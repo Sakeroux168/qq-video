@@ -698,6 +698,9 @@ class MainWindow(QMainWindow):
         sp_gap.setRange(0, 600)
         sp_gap.setSuffix(" 秒")
         sp_gap.setValue(int(self.st.get("api_interval", 5) or 0))
+        e_api_arc = QLineEdit(self.st.get("api_archive", ""))
+        f.addRow("接口发:发完挪到", e_api_arc)
+        f.addRow("", QLabel("{month} 会换成月份;平铺,不分号"))
         f.addRow("接口发:几个号一起发", sp_thr)
         f.addRow("接口发:每条间隔", sp_gap)
         f.addRow("", QLabel("旧软件是「线程 1、间隔 5 秒」:一条一条发,每条之间歇 5 秒"))
@@ -717,7 +720,8 @@ class MainWindow(QMainWindow):
                 accs.append({"name": line.strip(), "aliases": []})
         self.st.update(material_root=e_root.text().strip(), archive_root=e_arc.text().strip(), accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
-                       api_threads=sp_thr.value(), api_interval=sp_gap.value())
+                       api_threads=sp_thr.value(), api_interval=sp_gap.value(),
+                       api_archive=e_api_arc.text().strip() or self.st.get("api_archive", ""))
         C.AI_KEY = self.st.ai_key()
         self.st.save()
         self._load_dates()

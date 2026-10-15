@@ -258,7 +258,7 @@ def test_api(tmp: Path):
     check(apisrc.dates(roots, known) == ["10.14", "10.15"], "有哪些日子")
     vs = apisrc.videos(roots, "10.15", known)
     check(sorted(v.account for v in vs) == ["CSGO战神君", "DNF连招档案馆", "国漫趣谈"], "「不能用」「1疑似脏话」不算")
-    check(apisrc.archive_dir({}, "10.15") == r"X:\知乎视频\内容查看\10月发布视频\企鹅号\10.15已发布", "发完挪到哪(照搬旧软件)")
+    check(apisrc.archive_dir({}, "10.15") == r"X:\知乎视频\内容查看\10月发布视频\企鹅号\企鹅号软件发布", "发完挪到「企鹅号软件发布」")
 
     p = topic.split_topics("标题 #a #B #b")
     check(p["body"] == "标题" and p["sep"] == " " and p["tags"] == ["a", "B"], "话题拆开、不分大小写去重")

@@ -1,7 +1,7 @@
 """「接口发(16个号)」页:游戏 / 动漫 16 个号,用企鹅号官方接口直接发(不用罐头)。
 
 先检查(横屏 / 标题里有别的平台 / 话题不止一个)→ 横屏一键转竖、话题 AI 留一个(能撤销)、平台名你自己改 →
-发「能发的」:传视频 → 发布 → 发成了挪到「X月发布视频\\企鹅号\\X.X已发布」,记进「记录」。
+发「能发的」:传视频 → 发布 → 发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布」,记进「记录」。
 """
 import os
 import threading
@@ -109,7 +109,7 @@ class ApiTab(QWidget):
         self.b_pub = QPushButton("发能发的")
         self.b_pub.setMinimumHeight(34)
         self.b_pub.setToolTip("没有问题的(竖屏、标题里没别的平台、话题最多一个、没发过的)用接口发出去;\n"
-                              "发成了挪到「X月发布视频\\企鹅号\\X.X已发布」。几个号一起发,一个号一条一条来。")
+                              "发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布」(设置里能改)。")
         self.b_pub.clicked.connect(self.run_publish)
         self.b_stop = QPushButton("停")
         self.b_stop.clicked.connect(self.stop)
