@@ -498,6 +498,19 @@ def test_api_tab(tmp: Path):
     vis = [tab.videos[i].title for i, it in tab.items.items() if not it.isHidden()]
     check(vis == ["d2"], "搜标题")
     tab.e_find.setText("")
+    with open(os.path.join(esp, "e2.mp4"), "wb") as f:
+        f.write(b"x")
+    tab.load()
+    check("全部" in tab.b_check.text() and "全部" in tab.b_pub.text(), "没选:按钮写着「全部」")
+    tab.tree.clearSelection()
+    tab.groups["电竞情报馆"].setSelected(True)
+    check("选中 1 条" in tab.b_check.text() and "电竞情报馆" in tab.lab_scope.text(), "选了一个号:按钮写着「选中 N 条」")
+    tab.run_check()
+    tab.job.wait()
+    QApplication.processEvents()
+    check([bool(v.checks) for v in tab.videos] == [v.account == "电竞情报馆" for v in tab.videos], "只检查选中的号")
+    tab.tree.clearSelection()
+    check("全部" in tab.b_check.text(), "取消选择:回到全部")
     tab.unpick("电竞情报馆")
     check("10.15" not in (st.get("api_picked") or {}), "取消手选")
 
