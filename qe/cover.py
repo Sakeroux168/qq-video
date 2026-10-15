@@ -156,28 +156,46 @@ def set_kind(v, kind: str) -> None:
         v.plan = focus_of(faces) if faces else subject_of(v.png)
 
 
-# ---------------- 裁剪框要拖多远 ----------------
+# ---------------- 裁剪框放哪 ----------------
+RATIOS = [("3:4", 3 / 4), ("9:16", 9 / 16), ("2.35:1", 2.35), ("1:1", 1.0)]    # 企鹅号裁剪的几个比例(有的号只有前两个)
+
+
+def rkey(ratio: float) -> str:
+    return f"{ratio:.3f}"
+
+
+def crop_rect(img_w: float, img_h: float, ratio: float, plan: dict) -> tuple[float, float, float, float]:
+    """这个比例的框在图上放哪:返回 (左, 上, 宽, 高)(图的像素)。框尽量大(企鹅号就是这样)。
+    放哪:人手动拖过的(plan["manual"][比例] = 框中心占图的几成)> 自动的(plan 的 cx, cy,脸放框里偏上一点)> 正中间。
+    预览窗口画的、摆的时候真去拖的,都用这一个算法,所以看到的就是摆出来的。"""
+    if ratio <= img_w / img_h:
+        bh, bw = img_h, img_h * ratio
+    else:
+        bw, bh = img_w, img_w / ratio
+    man = (plan or {}).get("manual", {}).get(rkey(ratio))
+    if man:
+        tx, ty = man[0] * img_w - bw / 2, man[1] * img_h - bh / 2
+    elif plan and "cx" in plan:
+        tx = plan["cx"] * img_w - bw / 2
+        ty = plan["cy"] * img_h - bh * 0.45                   # 脸放在框里偏上一点(2.35:1 下面有「标题区域」)
+    else:
+        tx, ty = (img_w - bw) / 2, (img_h - bh) / 2
+    tx = min(max(tx, 0.0), img_w - bw)
+    ty = min(max(ty, 0.0), img_h - bh)
+    return tx, ty, bw, bh
+
+
 def box_drag(canvas: dict, img_w: int, img_h: int, ratio: float, plan: dict) -> tuple[float, float, float, float]:
     """裁剪弹框里:canvas = 画布在页面上的位置 {left, top, width, height};图按比例缩进画布、居中;
-    这个比例的框默认在图正中间、尽量大。返回 (从哪按下 x, y, 拖到 x, y)。plan 空 = 不用拖(起点终点一样)。
+    这个比例的框默认在图正中间、尽量大。返回 (从哪按下 x, y, 拖到 x, y)。
     实测:3:4 / 9:16 / 方 框都是图那么高、宽度按比例;2.35:1 框是图那么宽。"""
     cw, ch = canvas["width"], canvas["height"]
     s = min(cw / img_w, ch / img_h)
-    dw, dh = img_w * s, img_h * s
-    ix, iy = canvas["left"] + (cw - dw) / 2, canvas["top"] + (ch - dh) / 2
-    if ratio <= dw / dh:
-        bh, bw = dh, dh * ratio
-    else:
-        bw, bh = dw, dw / ratio
-    bx, by = ix + (dw - bw) / 2, iy + (dh - bh) / 2          # 默认位置(居中)
-    sx, sy = bx + bw / 2, by + bh / 2
-    if not plan:
-        return sx, sy, sx, sy
-    tx = ix + plan["cx"] * dw - bw / 2
-    ty = iy + plan["cy"] * dh - bh * 0.45                     # 脸放在框里偏上一点(2.35:1 下面有「标题区域」)
-    tx = min(max(tx, ix), ix + dw - bw)
-    ty = min(max(ty, iy), iy + dh - bh)
-    return sx, sy, sx + (tx - bx), sy + (ty - by)
+    ix, iy = canvas["left"] + (cw - img_w * s) / 2, canvas["top"] + (ch - img_h * s) / 2
+    dx, dy, bw, bh = crop_rect(img_w, img_h, ratio, {})              # 默认(居中)
+    tx, ty, _w, _h = crop_rect(img_w, img_h, ratio, plan)
+    sx, sy = ix + (dx + bw / 2) * s, iy + (dy + bh / 2) * s
+    return sx, sy, sx + (tx - dx) * s, sy + (ty - dy) * s
 
 
 def ratio_of(tag: str) -> float:

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogBut
 from qe import cover as C
 from qe import folders as F
 from qe.config import APP_VERSION, bj_str, data_dir
+from qe.adjust import Adjustments
 from qe.records import Records
 
 YELLOW = QBrush(QColor("#FFF3C4"))
@@ -31,9 +32,9 @@ class CoverWorker(QThread):
     one = Signal(int)
     done = Signal()
 
-    def __init__(self, videos, parent=None):
+    def __init__(self, videos, adj, parent=None):
         super().__init__(parent)
-        self.videos = videos
+        self.videos, self.adj = videos, adj
         self.stop = False
 
     def run(self):
@@ -42,6 +43,7 @@ class CoverWorker(QThread):
                 break
             if not v.cover_kind:
                 C.decide(v)
+                self.adj.apply(v)          # 人在「封面预览」里调过的套上去
             self.one.emit(i)
         self.done.emit()
 
@@ -82,6 +84,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.st = st
         self.rec = records or Records()
+        self.adj = Adjustments(os.path.join(os.path.dirname(self.rec.path), "封面调整.json") if records else None)
         self.videos: list = []            # 中间表里的
         self.batch_id = ""                # 摆好了、等人点发布的那一批
         self.batch_videos: list = []
@@ -139,6 +142,8 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setToolTip("双击一条:预览封面、拖裁剪框")
+        self.table.cellDoubleClicked.connect(lambda r, _c: self.preview_cover(r))
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for i, wd in ((1, 100), (2, 90), (3, 260), (4, 150)):
@@ -161,6 +166,9 @@ class MainWindow(QMainWindow):
         self.b_drop = QPushButton("这批不要了")
         self.b_drop.setToolTip("这批没发(在罐头里删了):记录作废,下次还会再摆这些视频。")
         self.b_drop.clicked.connect(self.batch_dropped)
+        self.b_preview = QPushButton("预览 / 调封面…")
+        self.b_preview.setToolTip("看软件选的封面、每个比例框在哪;不满意就拖框、换横竖(双击列表里一条也行)")
+        self.b_preview.clicked.connect(lambda: self.preview_cover())
         self.b_cover = QPushButton("选中的换横 / 竖封面")
         self.b_cover.clicked.connect(self.toggle_cover)
         self.b_move = QPushButton("这天发完了,挪走…")
@@ -168,6 +176,7 @@ class MainWindow(QMainWindow):
         for b in (self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addStretch(1)
+        bar.addWidget(self.b_preview)
         bar.addWidget(self.b_cover)
         bar.addWidget(self.b_move)
         v.addLayout(bar)
@@ -293,7 +302,7 @@ class MainWindow(QMainWindow):
             self.cover_worker.wait(3000)
         todo = [v for v in self.videos if not self.rec.status_of(v.path)]
         if todo:
-            self.cover_worker = CoverWorker(self.videos, self)
+            self.cover_worker = CoverWorker(self.videos, self.adj, self)
             self.cover_worker.one.connect(self._fill_row)
             self.cover_worker.start()
         self._refresh_buttons()
@@ -326,8 +335,29 @@ class MainWindow(QMainWindow):
         rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
         for r in rows:
             v = self.videos[r]
-            C.set_kind(v, "竖" if v.cover_kind == "横" else "横")
+            k = "竖" if v.cover_kind == "横" else "横"
+            if not (v.jpg if k == "竖" else v.png):
+                continue
+            self.adj.set_kind(v.path, k)
+            C.set_kind(v, k)
+            self.adj.apply(v)
             self._fill_row(r)
+
+    def preview_cover(self, row: int | None = None):
+        """封面预览:看软件选的、拖框改。"""
+        if self.cover_worker and self.cover_worker.isRunning():
+            QMessageBox.information(self, "封面预览", "封面还在认人,等几秒再看。")
+            return
+        if not self.videos:
+            QMessageBox.information(self, "封面预览", "先在左边勾上员工。")
+            return
+        if row is None:
+            sel = sorted({ix.row() for ix in self.table.selectedIndexes()})
+            row = sel[0] if sel else 0
+        from gui.cover_dialog import CoverDialog
+        d = CoverDialog(self.videos, row, self.adj, self)
+        d.changed.connect(self._fill_row)
+        d.exec()
 
     # ---------------- 一批 ----------------
     def _refresh_buttons(self):

@@ -200,6 +200,61 @@ def test_window(tmp: Path):
     w.close()
 
 
+def test_preview(tmp: Path):
+    print("[封面预览 / 手动拖框]")
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    from gui.cover_dialog import CoverDialog
+    from qe import cover as C
+    from qe.adjust import Adjustments
+    from qe.folders import Video
+    app = QApplication.instance() or QApplication([])
+    d = tmp / "pv"
+    d.mkdir()
+    _img(d / "a.png", 1600, 900)
+    _img(d / "a.jpg", 720, 1280)
+    (d / "a.mp4").write_bytes(b"x")
+    # crop_rect:手动的 > 自动的 > 正中
+    check(C.crop_rect(1600, 900, 0.75, {}) == (462.5, 0.0, 675.0, 900.0), "3:4 框:图那么高,放正中")
+    x, y, w, h = C.crop_rect(1600, 900, 0.75, {"cx": 0.9, "cy": 0.5, "manual": {C.rkey(0.75): [0.25, 0.5]}})
+    check(abs((x + w / 2) / 1600 - 0.25) < 1e-6, "手动拖过的位置优先")
+    x, y, w, h = C.crop_rect(1600, 900, 0.75, {"cx": 0.05, "cy": 0.5})
+    check(x == 0.0, "拖到头就停在图边上")
+    adj = Adjustments(tmp / "adj.json")
+    v = Video(path=str(d / "a.mp4"), title="a", account="号", employee="员", date="1.1", png=str(d / "a.png"), jpg=str(d / "a.jpg"))
+    C.decide(v)
+    adj.apply(v)
+    dlg = CoverDialog([v], 0, adj)
+    dlg.resize(1100, 680)
+    dlg.show()
+    app.processEvents()
+    cv = dlg.canvas
+    before = cv.rect_img
+    s, ox, oy = cv._geom()
+    cx, cy = ox + (before[0] + before[2] / 2) * s, oy + (before[1] + before[3] / 2) * s
+    for typ, pos in ((QMouseEvent.Type.MouseButtonPress, (cx, cy)), (QMouseEvent.Type.MouseMove, (cx + 120, cy)),
+                     (QMouseEvent.Type.MouseButtonRelease, (cx + 120, cy))):
+        ev = QMouseEvent(typ, QPointF(*pos), QPointF(*pos), Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        {QMouseEvent.Type.MouseButtonPress: cv.mousePressEvent, QMouseEvent.Type.MouseMove: cv.mouseMoveEvent,
+         QMouseEvent.Type.MouseButtonRelease: cv.mouseReleaseEvent}[typ](ev)
+    app.processEvents()
+    check(cv.rect_img[0] > before[0] + 50, f"在大图上拖框:框往右挪了 -> {before[0]:.0f} → {cv.rect_img[0]:.0f}")
+    man = Adjustments(tmp / "adj.json").manual(v.path, v.cover)
+    check(C.rkey(0.75) in man and man[C.rkey(0.75)][0] > 0.5, f"拖的位置记住了(关了软件再开还在)-> {man}")
+    sx, sy, ex, ey = C.box_drag({"left": 0, "top": 0, "width": 1600, "height": 900}, 1600, 900, 0.75, v.plan)
+    check(abs(ex - (man[C.rkey(0.75)][0] * 1600)) < 1, "摆的时候按拖过的位置去拖(和预览一样)")
+    dlg.set_kind("竖")
+    check(v.cover_kind == "竖" and Adjustments(tmp / "adj.json").kind(v.path) == "竖", "预览里换成竖封面,也记住了")
+    v2 = Video(path=v.path, title="a", account="号", employee="员", date="1.1", png=v.png, jpg=v.jpg)
+    C.decide(v2)
+    Adjustments(tmp / "adj.json").apply(v2)
+    check(v2.cover_kind == "竖", "重新打开:还是竖的")
+    dlg.reset()
+    check(v.cover_kind == "横" and not Adjustments(tmp / "adj.json").kind(v.path), "恢复自动")
+    dlg.close()
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     test_folders(tmp)
@@ -208,6 +263,7 @@ if __name__ == "__main__":
     test_bj_time()
     test_guard()
     test_window(tmp)
+    test_preview(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
