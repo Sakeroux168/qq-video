@@ -1,4 +1,4 @@
-"""封面预览:看软件选的横 / 竖封面、每个比例的框放在哪;不满意就在大图上拖框,或者换横 / 竖。
+"""封面预览:看每个比例的框放在哪;不满意就在大图上拖框。(只用无字的 png,jpg 有字不能用)
 
 用户:「做一个预览封面 我好看他选的 不行咋滴就让我手动在这个软件里面拖拽裁剪位置」
 框的大小和企鹅号一样(尽量大),位置用 qe.cover.crop_rect 算 —— 和摆的时候真去拖的是同一个算法,看到的就是摆出来的。
@@ -119,12 +119,8 @@ class CoverDialog(QDialog):
         mid.addWidget(self.canvas, 1)
         v.addLayout(mid, 1)
         bar = QHBoxLayout()
-        self.b_h = QPushButton("用横封面")
-        self.b_h.clicked.connect(lambda: self.set_kind("横"))
-        self.b_v = QPushButton("用竖封面")
-        self.b_v.clicked.connect(lambda: self.set_kind("竖"))
         self.b_auto = QPushButton("恢复自动")
-        self.b_auto.setToolTip("横竖、框的位置都按软件自己认的来")
+        self.b_auto.setToolTip("框的位置按软件自己认的来")
         self.b_auto.clicked.connect(self.reset)
         self.b_prev = QPushButton("← 上一条")
         self.b_prev.clicked.connect(lambda: self.go(-1))
@@ -132,8 +128,7 @@ class CoverDialog(QDialog):
         self.b_next.clicked.connect(lambda: self.go(1))
         b_ok = QPushButton("关闭")
         b_ok.clicked.connect(self.accept)
-        for b in (self.b_h, self.b_v, self.b_auto):
-            bar.addWidget(b)
+        bar.addWidget(self.b_auto)
         bar.addStretch(1)
         for b in (self.b_prev, self.b_next, b_ok):
             bar.addWidget(b)
@@ -150,9 +145,7 @@ class CoverDialog(QDialog):
         self.pm = QPixmap(v.cover) if v.cover else QPixmap()
         self.canvas.set_image(self.pm)
         self.lab_title.setText(f"{self.i + 1}/{len(self.videos)}  {v.title}")
-        self.lab_why.setText(f"{v.cover_kind or '?'}封面:{v.cover_why}" + ("" if v.cover else "(这条没有封面图)"))
-        self.b_h.setEnabled(bool(v.png) and v.cover_kind != "横")
-        self.b_v.setEnabled(bool(v.jpg) and v.cover_kind != "竖")
+        self.lab_why.setText(v.cover_why)
         self.b_prev.setEnabled(self.i > 0)
         self.b_next.setEnabled(self.i < len(self.videos) - 1)
         self.refresh()
@@ -194,16 +187,8 @@ class CoverDialog(QDialog):
         v.warn = False
         if "手动" not in v.cover_why:
             v.cover_why += "(框手动调过)"
-        self.lab_why.setText(f"{v.cover_kind}封面:{v.cover_why}")
+        self.lab_why.setText(v.cover_why)
         self.refresh()
-        self.changed.emit(self.i)
-
-    def set_kind(self, kind):
-        v = self.v
-        self.adj.set_kind(v.path, kind)
-        C.set_kind(v, kind)
-        self.adj.apply(v)
-        self.show_video()
         self.changed.emit(self.i)
 
     def reset(self):

@@ -93,20 +93,21 @@ def test_cover(tmp: Path):
         check(v.cover_kind == "横" and 0.6 < v.plan.get("cx", 0) < 0.75 and not v.warn, f"一个人在右边:横封面,框对准他 -> {v.cover_why} {v.plan.get('cx')}")
         v = mk("三款每日十分钟亲子小游戏，帮助提升儿童注意力水平")
         C.decide(v)
-        check(v.cover_kind == "竖", f"三个小孩分得开:竖封面 -> {v.cover_why}")
+        check(v.cover.endswith(".png") and v.warn and "脸最大" in v.cover_why, f"三个小孩分得开:还是用 png(jpg 有字),框对准脸最大的,标黄 -> {v.cover_why}")
         v = mk("十种添加剂含量较高零食，建议家长减少给孩子食用")
         C.decide(v)
         check(v.cover_kind == "横" and not v.warn and 0.45 < v.plan.get("cx", 0) < 0.7, f"没人(零食):横封面,框对准零食堆 -> {v.cover_why} {v.plan}")
         g = mk("五款辅助写作业工具，帮助改善孩子写作业专注力问题")
         C.decide(g)
         check(g.plan.get("cx", 0) > 0.58, f"背影写作业的小孩(认不出脸):框对准小孩那边 -> {g.plan.get('cx')}")
-        C.set_kind(v, "竖")
-        check(v.cover_kind == "竖" and v.cover.endswith(".jpg") and not v.warn, "手动改成竖的")
     else:
         print("  (网络盘上没有真封面,跳过)")
     v = Video(path="x.mp4", title="x", account="a", employee="e", date="d")
     C.decide(v)
     check(v.warn and not v.cover, "一张封面都没有:标黄")
+    v = Video(path="x.mp4", title="x", account="a", employee="e", date="d", jpg="x.jpg")
+    C.decide(v)
+    check(v.warn and not v.cover and "jpg 有字" in v.cover_why, f"只有 jpg:不用(有字),标黄 -> {v.cover_why}")
 
 
 def test_records(tmp: Path):
@@ -244,14 +245,13 @@ def test_preview(tmp: Path):
     check(C.rkey(0.75) in man and man[C.rkey(0.75)][0] > 0.5, f"拖的位置记住了(关了软件再开还在)-> {man}")
     sx, sy, ex, ey = C.box_drag({"left": 0, "top": 0, "width": 1600, "height": 900}, 1600, 900, 0.75, v.plan)
     check(abs(ex - (man[C.rkey(0.75)][0] * 1600)) < 1, "摆的时候按拖过的位置去拖(和预览一样)")
-    dlg.set_kind("竖")
-    check(v.cover_kind == "竖" and Adjustments(tmp / "adj.json").kind(v.path) == "竖", "预览里换成竖封面,也记住了")
     v2 = Video(path=v.path, title="a", account="号", employee="员", date="1.1", png=v.png, jpg=v.jpg)
     C.decide(v2)
     Adjustments(tmp / "adj.json").apply(v2)
-    check(v2.cover_kind == "竖", "重新打开:还是竖的")
+    check(C.rkey(0.75) in v2.plan.get("manual", {}), "重新打开:拖过的位置还在")
+    check(v.cover.endswith(".png") and not hasattr(dlg, "b_v"), "预览里只有 png,没有「换竖封面」")
     dlg.reset()
-    check(v.cover_kind == "横" and not Adjustments(tmp / "adj.json").kind(v.path), "恢复自动")
+    check(not Adjustments(tmp / "adj.json").manual(v.path, v.cover) and "manual" not in v.plan, "恢复自动")
     dlg.close()
 
 

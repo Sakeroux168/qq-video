@@ -167,17 +167,14 @@ class MainWindow(QMainWindow):
         self.b_drop.setToolTip("这批没发(在罐头里删了):记录作废,下次还会再摆这些视频。")
         self.b_drop.clicked.connect(self.batch_dropped)
         self.b_preview = QPushButton("预览 / 调封面…")
-        self.b_preview.setToolTip("看软件选的封面、每个比例框在哪;不满意就拖框、换横竖(双击列表里一条也行)")
+        self.b_preview.setToolTip("看每个比例的裁剪框在哪;不满意就拖框(双击列表里一条也行)")
         self.b_preview.clicked.connect(lambda: self.preview_cover())
-        self.b_cover = QPushButton("选中的换横 / 竖封面")
-        self.b_cover.clicked.connect(self.toggle_cover)
         self.b_move = QPushButton("这天发完了,挪走…")
         self.b_move.clicked.connect(self.move_day)
         for b in (self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addStretch(1)
         bar.addWidget(self.b_preview)
-        bar.addWidget(self.b_cover)
         bar.addWidget(self.b_move)
         v.addLayout(bar)
         self.logbox = QPlainTextEdit()
@@ -312,7 +309,7 @@ class MainWindow(QMainWindow):
             return
         v = self.videos[i]
         stt = self.rec.status_of(v.path)
-        cov = f"{v.cover_kind}:{v.cover_why}" if v.cover_kind else ("(没有封面图)" if v.warn else "认人中…")
+        cov = v.cover_why if (v.cover_kind or v.warn) else "认人中…"
         for c, t in enumerate([v.title, v.account, v.employee, cov, stt or "没发"]):
             it = QTableWidgetItem(t)
             if stt == "已发":
@@ -330,18 +327,6 @@ class MainWindow(QMainWindow):
         st = [self.rec.status_of(v.path) for v in self.videos]
         self.lab_sum.setText(f"勾上的一共 {n} 条:已发 {st.count('已发')},摆好没发 {st.count('摆好')},还没发 {st.count('')}"
                              if n else "左边勾上要发的员工")
-
-    def toggle_cover(self):
-        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
-        for r in rows:
-            v = self.videos[r]
-            k = "竖" if v.cover_kind == "横" else "横"
-            if not (v.jpg if k == "竖" else v.png):
-                continue
-            self.adj.set_kind(v.path, k)
-            C.set_kind(v, k)
-            self.adj.apply(v)
-            self._fill_row(r)
 
     def preview_cover(self, row: int | None = None):
         """封面预览:看软件选的、拖框改。"""
@@ -370,7 +355,7 @@ class MainWindow(QMainWindow):
 
     def next_batch(self) -> tuple[str, list]:
         """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
-        todo = [v for v in self.videos if not self.rec.status_of(v.path) and v.cover_kind]
+        todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why)]
         if not todo:
             return "", []
         acc = todo[0].account
@@ -386,9 +371,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "企鹅号发布助手", "勾上的员工里没有要发的了(都发过 / 摆好了)。")
             return
         warn = [v for v in vids if v.warn]
-        msg = f"在罐头里给「{acc}」摆 {len(vids)} 条:\n\n" + "\n".join(f"· {v.title[:30]}({v.cover_kind}封面)" for v in vids)
+        nocover = [v for v in vids if not v.cover]
+        if nocover:
+            QMessageBox.warning(self, "摆下一批", f"这批里有 {len(nocover)} 条没有无字封面(png),比如「{nocover[0].title[:24]}」。\n\n"
+                                "jpg 有字不能用,让员工补上 png 再摆。")
+            return
+        msg = f"在罐头里给「{acc}」摆 {len(vids)} 条:\n\n" + "\n".join(f"· {v.title[:30]}" for v in vids)
         if warn:
-            msg += f"\n\n其中 {len(warn)} 条封面标黄(没认出人),框放中间,摆好后你在罐头里看一眼。"
+            msg += f"\n\n其中 {len(warn)} 条封面标黄,建议先点「预览 / 调封面」看一眼。"
         msg += "\n\n软件只摆好,不点发布。摆的时候别在罐头里切到别的号。开始吗?"
         if QMessageBox.question(self, "摆下一批", msg) != QMessageBox.StandardButton.Yes:
             return

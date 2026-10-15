@@ -1,13 +1,13 @@
-"""封面:用横的还是竖的、裁剪框要对准哪。
+"""封面:裁剪框要对准哪。
 
-用户定的规矩(2026-10-14):
-- 默认传横封面(.png);裁剪时人必须在框中间(要拖一下框)。
-- 画面里有两个人以上、裁的时候会把人切掉 / 切一半 → 直接用竖封面(.jpg)。
+用户定的规矩:
+- 封面只用 .png(组长 2026-10-15:「jpg 是原封面不能要,上面有字,所以才 p 了一下导出的 png 无字版本」)。
+  以前「几个人分得开就用竖的 jpg」作废;没有 png 的标黄,不拿 jpg 顶。
+- 裁剪时人必须在框中间(要拖一下框);没有人的,框对准画面主体。
 认人用本机的 OpenCV YuNet 人脸模型(models/face_detection_yunet_2023mar.onnx,不联网)。
-实测 31 张:正脸都认得准;背对镜头、人很远很小的认不出来 → 标黄让人看一眼。
 
-企鹅号的裁剪依次有 3:4 / 9:16 / 2.35:1 / 公众号小图(方)四个框,最窄的是 9:16。
-「认出来的人都装得进 9:16 的框」→ 用横封面,框对准他们中间;装不下 → 用竖封面。
+企鹅号的裁剪依次有 3:4 / 9:16 / 2.35:1 / 公众号小图(方)四个框(有的号只有前两个),最窄的是 9:16。
+几个人都装得进 9:16 的框 → 框对准他们中间;装不下 → 框对准脸最大的那个(一般是主角),标黄让人在「封面预览」里看一眼。
 """
 import os
 
@@ -98,62 +98,35 @@ def subject_of(path: str) -> dict:
 
 
 def decide(v) -> None:
-    """给一条视频定封面:填 v.cover / cover_kind / cover_why / plan / warn。"""
+    """给一条视频定封面:填 v.cover / cover_kind / cover_why / plan / warn。只用 png。"""
     v.warn = False
-    if not v.png and not v.jpg:
-        v.cover, v.cover_kind, v.cover_why, v.plan, v.warn = "", "", "没有封面图", {}, True
-        return
     if not v.png:
-        _use_jpg(v, "没有横封面")
+        v.cover, v.cover_kind, v.plan, v.warn = "", "", {}, True
+        v.cover_why = "没有无字封面(png)" + (",jpg 有字不能用" if v.jpg else "")
         return
+    v.cover, v.cover_kind = v.png, "横"
     try:
         faces, (w, h) = faces_in(v.png)
     except Exception as e:
-        v.cover, v.cover_kind, v.cover_why, v.plan, v.warn = v.png, "横", f"认人出错({type(e).__name__}),框放中间", {}, True
+        v.cover_why, v.plan, v.warn = f"认人出错({type(e).__name__}),框放中间", {}, True
         return
     if not faces:
         try:
             plan = subject_of(v.png)
         except Exception:
             plan = {}
-        v.cover, v.cover_kind, v.plan = v.png, "横", plan
+        v.plan = plan
         v.cover_why, v.warn = ("没人,框对准画面主体", False) if plan else ("没认出人,框放中间(看一眼)", True)
         return
-    f = focus_of(faces)
     narrow_w = (h * NARROW) / w if w else 1.0          # 9:16 框占图宽的几成
     span = max(x[0] + x[2] for x in faces) - min(x[0] for x in faces)      # 几张脸从最左到最右(只算脸)
-    if len(faces) == 1 or span <= narrow_w * 0.9:       # 一个人(脸再大也是他一个)一律横的;几个人挨得近也横的
-        v.cover, v.cover_kind, v.plan = v.png, "横", f
+    if len(faces) == 1 or span <= narrow_w * 0.9:       # 一个人(脸再大也是他一个);几个人挨得近也框得下
+        v.plan = focus_of(faces)
         v.cover_why = "1 个人,框对准他" if len(faces) == 1 else f"{len(faces)} 个人挨得近,框得下"
         return
-    if v.jpg:
-        _use_jpg(v, f"{len(faces)} 个人,横的裁会切掉人")
-    else:
-        v.cover, v.cover_kind, v.plan, v.warn = v.png, "横", f, True
-        v.cover_why = f"{len(faces)} 个人分得开,但没有竖封面(看一眼)"
-
-
-def _use_jpg(v, why: str):
-    v.cover, v.cover_kind, v.cover_why = v.jpg, "竖", why
-    try:
-        faces, _ = faces_in(v.jpg)
-        v.plan = focus_of(faces) if faces else subject_of(v.jpg)
-    except Exception:
-        v.plan = {}
-
-
-def set_kind(v, kind: str) -> None:
-    """人在界面上手动改横 / 竖。"""
-    if kind == "竖" and v.jpg:
-        _use_jpg(v, "手动选的竖封面")
-        v.warn = False
-    elif kind == "横" and v.png:
-        try:
-            faces, _ = faces_in(v.png)
-        except Exception:
-            faces = []
-        v.cover, v.cover_kind, v.cover_why, v.warn = v.png, "横", "手动选的横封面", False
-        v.plan = focus_of(faces) if faces else subject_of(v.png)
+    big = max(faces, key=lambda x: x[2] * x[3])
+    v.plan, v.warn = focus_of([big]), True
+    v.cover_why = f"{len(faces)} 个人分得开,框对准脸最大的(看一眼)"
 
 
 # ---------------- 裁剪框放哪 ----------------
