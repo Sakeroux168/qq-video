@@ -493,7 +493,8 @@ def test_api_tab(tmp: Path):
     _settle(tab)
     check({n for n, g in tab.groups.items() if g.childCount()} == {"CSGO战神君"} and
           all(not g.isExpanded() for g in tab.groups.values()), "按号分组,默认收起")
-    check("今天没找到视频" in tab.groups["电竞情报馆"].text(0), "这天没视频的号也列出来(灰的)")
+    check("这天已发 1 条" in tab.groups["电竞情报馆"].text(0) and tab.cards.vals["sent"].text() != "0",
+          "发完挪走了的号:写「这天已发 N 条」,不是「没找到视频」;卡片「已发」算上挪走的")
     tab.expand_all(True)
     check(all(g.isExpanded() for g in tab.groups.values()), "全部展开")
     tab.expand_all(False)
@@ -909,8 +910,8 @@ def test_squarish(tmp: Path):
 
     class V:
         title = "a"
-    for (w, h), want in (((1080, 1920), []), ((720, 1280), []), ((1080, 1440), ["偏方,不是标准竖屏"]),
-                         ((1080, 1080), ["偏方,不是标准竖屏"]), ((1920, 1080), ["横屏"])):
+    for (w, h), want in (((1080, 1920), []), ((720, 1280), []), ((1080, 1440), ["偏方要转竖屏"]),
+                         ((1080, 1080), ["偏方要转竖屏"]), ((1920, 1080), ["横屏"])):
         V.checks = {"w": w, "h": h, "landscape": vertical.is_landscape({"w": w, "h": h}),
                     "squarish": vertical.is_squarish({"w": w, "h": h}), "tags": []}
         check(checks.problems(V) == want and checks.needs_vertical(V.checks) == bool(want), f"{w}×{h} -> {want or '能发'}")

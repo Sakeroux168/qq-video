@@ -39,7 +39,7 @@ def friendly(e) -> tuple[str, str]:
     s = str(e)
     code = getattr(e, "code", "") if isinstance(e, ApiError) else ""
     if getattr(e, "fatal", False):
-        return "没发成:号的密钥不对", "这个号的密钥不对或过期了 —— 去旧软件确认这个号还能用,再点右上角「从旧软件搬账号」重新搬一次"
+        return "没发成:号的密钥不对", "这个号的密钥不对或过期了 —— 去旧软件确认这个号还能用,再去「设置」里点「搬账号…」重新搬一次"
     if code == "40023" or "invalid_file_upload" in s:
         return "没发成:平台不收这个文件", "平台不收这个视频文件(可能坏了 / 格式不对)—— 先双击打开看能不能播,重新导出再发"
     if "网络连不上" in s or "超时" in s:
@@ -125,13 +125,9 @@ class ApiTab(QWidget):
                      "选了以后这个号这天只发那个文件夹里的视频,不再自动找。右键列表里的号 / 视频也能选 / 取消。")
         b.clicked.connect(lambda: self.pick_folder())
         top.addWidget(b)
-        b = QPushButton("搬账号…")
-        b.setToolTip("从旧软件「企鹅号批量发布」的数据库(qepm.db)把 16 个号搬过来。密钥加密存在这台电脑上,不显示。")
-        b.clicked.connect(self.migrate)
-        top.addWidget(b)
         v.addLayout(top)
 
-        self.cards = StatCards([("all", "今日待发"), ("ok", "能发"), ("bad", "要处理"), ("sent", "已发"), ("accs", "号发完")])
+        self.cards = StatCards([("all", "这天的视频"), ("ok", "能发"), ("bad", "要处理"), ("sent", "已发"), ("accs", "号发完")])
         v.addWidget(self.cards)
         view = QHBoxLayout()
         b = QPushButton("全部展开")
@@ -172,7 +168,8 @@ class ApiTab(QWidget):
         hh = self.tree.header()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setStretchLastSection(False)
-        for i, wd in ((1, 85), (2, 200), (3, 170)):
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        for i, wd in ((1, 90), (2, 230), (3, 170)):
             self.tree.setColumnWidth(i, wd)
         v.addWidget(self.tree, 1)
 
@@ -222,6 +219,7 @@ class ApiTab(QWidget):
         bar.addWidget(self.b_stop)
         v.addLayout(bar)
         self.logbox = QPlainTextEdit()
+        self.logbox.setObjectName("log")
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(3000)
         self.logbox.setMaximumHeight(96)
@@ -295,7 +293,8 @@ class ApiTab(QWidget):
         self.b_clear.setVisible(bool(sel))
         n = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
         retry = sum(1 for i in rows if self._can_send(i) and self.state.get(i, "").startswith(FAILED))
-        self.b_pub.setText(f"发布 {n} 条" + (f" + 重试 {retry}" if retry else "") if n or retry else "发布")
+        self.b_pub.setText(f"发布 {n} 条" + (f" + 重试 {retry}" if retry else "") if n else
+                           (f"重试没发成的 {retry} 条" if retry else "发布"))
         self.b_settopic.setText("批量改话题…" if sel else "批量改话题…(先选)")
 
     def roots(self) -> list[str]:
@@ -383,7 +382,20 @@ class ApiTab(QWidget):
                 v.checks["platform"] = checks.platform_hits(v.title, words)
             elif not s.startswith("已发"):
                 todo.append(i)
+        # 这天已经发出去、挪走了的(列表里没有了,但记录里有):号那一行和上面卡片要算上
+        self.archived = {}
+        if d:
+            here = {pkey(v.path) for v in self.videos}
+            seen = set()
+            for r in self.rec.rows(d):
+                if r["employee"] == "接口" and r["status"] == "已发" and pkey(r["path"]) not in here and pkey(r["path"]) not in seen:
+                    seen.add(pkey(r["path"]))
+                    self.archived[r["account"]] = self.archived.get(r["account"], 0) + 1
+        new_day = d != getattr(self, "_shown_day", None)
+        self._shown_day = d
         self._build_tree()
+        if new_day:
+            self.tree.scrollToTop()                       # ②5 换了日期回到最上面
         if d:
             accs = sorted({v.account for v in self.videos})
             unsure = sum(1 for x in self.state.values() if x == "结果不明")
@@ -392,7 +404,7 @@ class ApiTab(QWidget):
                          "去企鹅号后台看一眼,再右键标「发了 / 没发」;标之前软件不会再发它们。")
             missing = [n for n in apiacc.nicks() if n not in accs]
             self.say(f"接口发 {d}:{len(self.videos)} 条,{len(accs)} 个号" +
-                     (f";今天没找到视频的号:{'、'.join(missing)}" if missing else "") + "。")
+                     (f";这天没找到视频的号:{'、'.join(missing)}" if missing else "") + "。")
             if todo:
                 self.run_check(todo, quiet=True)          # 新出现的自动检查(审查:原来每次刷新都要重新点「检查」)
 
@@ -419,13 +431,21 @@ class ApiTab(QWidget):
             g.addChild(it)
             self.items[i] = it
             self._fill(i, group=False)
-        if self.c_date.currentText():                     # 今天没找到视频的号也列出来(灰的),一眼看出少了谁
+        if self.c_date.currentText():                     # 这天没找到视频的号也列出来(灰的),一眼看出少了谁
             for nick in apiacc.nicks():
                 if nick not in self.groups:
                     g = group(nick)
             for nick, g in self.groups.items():
                 if not g.childCount():
-                    g.setText(0, f"{nick}  今天没找到视频")
+                    gone = self.archived.get(nick, 0)
+                    if gone:
+                        g.setText(0, f"{nick}  这天已发 {gone} 条(发完挪走了)")
+                        g.setText(3, f"已发 {gone}")
+                        g.setToolTip(0, "这天的视频都发出去了,已经挪到「企鹅号软件发布」里")
+                        for c in range(len(COLS)):
+                            g.setBackground(c, GREEN)
+                        continue
+                    g.setText(0, f"{nick}  这天没找到视频")
                     g.setToolTip(0, "这个号这天没有日期文件夹 / 文件夹里没视频。员工放错地方了?可以右键「给这个号选文件夹」")
                     for c in range(len(COLS)):
                         g.setForeground(c, QBrush(GREY))
@@ -480,7 +500,7 @@ class ApiTab(QWidget):
         for col, t in enumerate([v.title, res, "、".join(probs) if c else "", st]):
             it.setText(col, t)
             it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else t)
-        bg = GREEN if st.startswith("已发") else ORANGE if st == "结果不明" else RED if st.startswith(FAILED) or (c and checks.needs_vertical(c)) \
+        bg = GREEN if st.startswith("已发") else ORANGE if st == "结果不明" else RED if st.startswith(FAILED) \
             else YELLOW if probs else None
         for col in range(len(COLS)):
             it.setBackground(col, bg if bg else QColor(0, 0, 0, 0))
@@ -530,14 +550,19 @@ class ApiTab(QWidget):
         accs = {}
         for i, v in enumerate(self.videos):
             accs.setdefault(v.account, []).append(self.state.get(i, "").startswith("已发"))
+        arch = getattr(self, "archived", {}) or {}
+        for nick in arch:
+            accs.setdefault(nick, [])                     # 发完挪走了的号:列表里没视频,算发完
         done = sum(1 for xs in accs.values() if all(xs))
         unsure = sum(1 for i in range(n) if self.state.get(i, "") == "结果不明")
+        gone = sum(arch.values())
         self.lab_sum.setText("" if len(checked) >= n or not n else f"{n - len(checked)} 条还没检查完…")
-        self.cards.set(all=n, ok=(ok, "good" if ok else ""), bad=(bad + fail + unsure, "warn" if bad + fail + unsure else ""),
-                       sent=sent, accs=(f"{done} / {len(accs)}" if accs else "–", "good" if accs and done == len(accs) else ""),
-                       bad_sub=" · ".join(x for x in ((f"有问题 {bad}" if bad else ""), (f"没发成 {fail}" if fail else ""),
-                                                       (f"结果不明 {unsure}" if unsure else "")) if x),
-                       ok_sub="点「发布」发这些" if ok else "", accs_sub="")
+        subs = [x for x in ((f"有问题 {bad}" if bad else ""), (f"没发成 {fail}" if fail else ""),
+                            (f"结果不明 {unsure}" if unsure else "")) if x]
+        self.cards.set(all=n + gone, ok=(ok, "good" if ok else ""), bad=(bad + fail + unsure, "warn" if bad + fail + unsure else ""),
+                       sent=sent + gone, accs=(f"{done} / {len(accs)}" if accs else "–", "good" if accs and done == len(accs) else ""),
+                       bad_sub=" · ".join(subs[:2]), ok_sub="点「发布」发这些" if ok else "",
+                       sent_sub=f"其中 {gone} 条已挪走" if gone else "", all_sub="")
 
     def _hidden(self, i: int) -> bool:
         key = self.e_find.text().strip().lower()
@@ -648,6 +673,10 @@ class ApiTab(QWidget):
             nick = it.data(0, NICK) if i == -1 else self.videos[i].account
             sel = self.selected_rows()
             mine = self.rows_of(nick)
+            if i != -1 and self.state.get(i) == "结果不明":
+                m.addAction("去后台看过了:这条发出去了", lambda: self.resolve_unsure(i, True)).setEnabled(not busy)
+                m.addAction("去后台看过了:这条没发出去(可以再发)", lambda: self.resolve_unsure(i, False)).setEnabled(not busy)
+                m.addSeparator()
             if sel:
                 for text, fn in ((f"检查选中的 {len(sel)} 条", lambda: self.run_check(sel)),
                                  (f"转标准竖屏(选中的 {len(sel)} 条)", lambda: self.run_vertical(sel)),
@@ -662,10 +691,6 @@ class ApiTab(QWidget):
                         m.addSeparator()
                     else:
                         m.addAction(text, fn).setEnabled(not busy)
-            if i != -1 and self.state.get(i) == "结果不明":
-                m.addSeparator()
-                m.addAction("去后台看过了:这条发出去了", lambda: self.resolve_unsure(i, True)).setEnabled(not busy)
-                m.addAction("去后台看过了:这条没发出去(可以再发)", lambda: self.resolve_unsure(i, False)).setEnabled(not busy)
             if i != -1:
                 m.addSeparator()
                 m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not busy and not self._sent(i))
@@ -743,14 +768,19 @@ class ApiTab(QWidget):
         self._busy(False)
         if msg:
             self.say(msg)
+        if getattr(self, "_show_bad_after", False):
+            self._show_bad_after = False
+            self.k_bad.setChecked(True)                   # 发完有失败的:直接只看有问题的
         pop = getattr(self, "_popup", None)
         self._popup = None
         if pop:
             QMessageBox.warning(self, pop[0], pop[1]) if pop[2] else QMessageBox.information(self, pop[0], pop[1])
 
     def stop(self):
-        if self.job:
+        if self.job and self.job.isRunning():
             self.job.stop()
+            self.lab_scope.setText("正在停…等手上这条做完(上传大文件可能要一会儿)")
+            self.b_stop.setEnabled(False)
             self.say("正在停…(手上这条做完就停)")
 
     def run_check(self, only: list[int] | None = None, quiet: bool = False):
@@ -1062,7 +1092,7 @@ class ApiTab(QWidget):
         vs = self.videos
         gate = {"last": 0.0}
         glock = threading.Lock()
-        stats = {"ok": 0, "fail": 0, "unsure": 0, "skip": 0, "done": 0, "bad_acc": []}
+        stats = {"ok": 0, "fail": 0, "unsure": 0, "skip": 0, "done": 0, "bad_acc": [], "fails": []}
         slock = threading.Lock()
 
         def bump(k, n=1):
@@ -1082,6 +1112,8 @@ class ApiTab(QWidget):
             with glock:
                 gate["last"] = time.time()
             bump("done")
+            if self.job and self.job._stop.is_set():
+                return
             emit(PROGRESS, f"正在发 {stats['done']}/{len(rows)} · 成功 {stats['ok']} · 没发成 {stats['fail']}" +
                  (f" · 结果不明 {stats['unsure']}" if stats["unsure"] else "") + "(点「停」:手上这条做完就停)")
 
@@ -1122,6 +1154,8 @@ class ApiTab(QWidget):
                     else:
                         self.rec.api_result(v, "结果不明", str(e))
                     self.why[i] = str(e)
+                    with slock:
+                        stats["fails"].append((v.title, "结果不明(去后台看一眼)"))
                     emit(i, "结果不明")
                     emit(-1, f"「{nick}」{v.title}:结果不明 —— 去企鹅号后台看一眼,再右键标「发了 / 没发」")
                     bump("unsure")
@@ -1130,6 +1164,8 @@ class ApiTab(QWidget):
                 except Exception as e:
                     raw = redact(str(e)) if isinstance(e, ApiError) else f"{type(e).__name__}: {redact(str(e))}"
                     short, tip = friendly(e)
+                    with slock:
+                        stats["fails"].append((v.title, short.replace("没发成:", "") or "没发成"))
                     if "id" in rid:
                         self.rec.api_finish(rid["id"], "没发成", raw)
                     else:
@@ -1142,6 +1178,7 @@ class ApiTab(QWidget):
                     if getattr(e, "fatal", False):        # 换不到 token:这个号后面的都别试了,标出来
                         left = idx[k + 1:]
                         for j in left:
+                            self.rec.api_result(vs[j], "没发成", "没轮到:这个号密钥不对")
                             emit(j, "没轮到:这个号密钥不对")
                         bump("skip", len(left))
                         with slock:
@@ -1170,8 +1207,12 @@ class ApiTab(QWidget):
                        (f" · 没轮到 {stats['skip']}({'、'.join(stats['bad_acc'])} 密钥不对)" if stats["skip"] else "") +
                        (f" · 停下了没发 {not_run}" if stopped() and not_run > 0 else ""))
             bad = stats["fail"] or stats["unsure"] or stats["skip"]
-            self._popup = ("发完了", summary + ("\n\n没发成的看日志里的原因;结果不明的去后台看一眼,再右键标「发了 / 没发」。\n"
-                                               "网络问题的:网好了再点「发布」,会接着发没发的(发过的不会重发)。" if bad else ""), bool(bad))
+            lst = "".join(f"\n · {t[:26]}:{why}" for t, why in stats["fails"][:6]) + \
+                ("\n · …" if len(stats["fails"]) > 6 else "")
+            self._popup = ("发完了", summary + (f"\n\n这几条要你看一下:{lst}\n\n列表已经切到「只看有问题的」。"
+                                               "结果不明的去后台看一眼,再右键标「发了 / 没发」;网络问题的网好了再点「发布」,"
+                                               "会接着发没发的(发过的不会重发)。" if bad else ""), bool(bad))
+            self._show_bad_after = bool(bad)
             return summary
         self._start(fn, f"开始发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
                     f",间隔 {gap:g} 秒")

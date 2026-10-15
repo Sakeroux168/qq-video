@@ -171,11 +171,14 @@ class MainWindow(QMainWindow):
         self.table.customContextMenuRequested.connect(self._table_menu)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for i, wd in ((1, 100), (2, 90), (3, 260), (4, 150)):
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        for i, wd in ((1, 96), (2, 70), (3, 200), (4, 80)):
             self.table.setColumnWidth(i, wd)
         rv.addWidget(self.table, 1)
         sp.addWidget(right)
-        sp.setSizes([340, 940])
+        sp.setSizes([300, 900])
+        sp.setStretchFactor(0, 1)
+        sp.setStretchFactor(1, 3)
         v.addWidget(sp, 1)
 
         bar = QHBoxLayout()
@@ -217,6 +220,7 @@ class MainWindow(QMainWindow):
             self._top.addWidget(b)
         v.addLayout(bar)
         self.logbox = QPlainTextEdit()
+        self.logbox.setObjectName("log")
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(3000)
         self.logbox.setMaximumHeight(110)
@@ -271,6 +275,7 @@ class MainWindow(QMainWindow):
     def _load_dates(self):
         root = self.st["material_root"]
         self.lab_root.setText(f"素材在 {root}")
+        self.lab_root.setToolTip(root)
         dates = F.list_dates(root)
         cur = self.c_date.currentText() or self.st.get("last_date", "")
         self.c_date.blockSignals(True)
@@ -443,8 +448,8 @@ class MainWindow(QMainWindow):
         if not vids:
             QMessageBox.information(self, "标成已发", "先在列表里选中你手动发了的那几条(已经是「已发」的不用选)。")
             return
-        if QMessageBox.question(self, "标成已发", f"这 {len(vids)} 条你已经在罐头里手动发了?\n\n"
-                                + "\n".join(f"· {v.title[:30]}" for v in vids[:8])) != QMessageBox.StandardButton.Yes:
+        if not self._ask("标成已发", f"这 {len(vids)} 条你已经在罐头里手动发了?\n\n"
+                         + "\n".join(f"· {v.title[:30]}" for v in vids[:8]), "标成已发", "先不"):
             return
         for v in vids:
             self.rec.manual_published(v)
@@ -473,7 +478,7 @@ class MainWindow(QMainWindow):
     def _refresh_buttons(self):
         running = bool(self.worker and self.worker.isRunning())
         self.b_go.setEnabled(not running and not self.batch_id)
-        self.b_stop.setEnabled(True)
+        self.b_stop.setEnabled(running)
         self.b_sent.setEnabled(not running and bool(self.batch_id))
         self.b_drop.setEnabled(not running and bool(self.batch_id))
         self.b_move.setEnabled(not running and bool(self.c_date.currentData()))
@@ -486,6 +491,10 @@ class MainWindow(QMainWindow):
         acc = todo[0].account
         n = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
         return acc, [v for v in todo if v.account == acc][:n]
+
+    def _ask(self, title: str, text: str, yes: str, no: str) -> bool:
+        import gui.api_tab as A                       # 中文动词按钮的确认框(和接口页同一个)
+        return A.ask(self, title, text, yes, no)
 
     def _nothing_left(self) -> str:
         """没有能摆的了:说清楚是真发完了,还是剩下的缺无字封面(png)。"""
@@ -521,7 +530,7 @@ class MainWindow(QMainWindow):
         auto = self.k_auto.isChecked()
         msg += ("\n\n摆好后软件自己点「全部发布」,接着摆下一批(有标黄 / 没摆好的会停下来叫你)。" if auto else
                 "\n\n软件只摆好,不点发布。") + "摆的时候别在罐头里切到别的号。开始吗?"
-        if not chained and QMessageBox.question(self, "摆下一批", msg) != QMessageBox.StandardButton.Yes:
+        if not chained and not self._ask("摆下一批", msg, "开始摆", "先不"):
             return
         self.batch_id = f"{acc}-{bj_str().replace(' ', '_').replace(':', '')}"
         self.batch_videos = vids
@@ -573,8 +582,9 @@ class MainWindow(QMainWindow):
             self.say(f"⚠ {pub}")
         if err:
             n_ok = max(len(ok), ready)
-            self.say(f"✘ 没摆完:{err}" + (f"(已经摆好 {n_ok} 条,在罐头里看看)" if n_ok else ""))
-            QMessageBox.warning(self, "摆下一批", f"没摆完:{err}" + (
+            self.say(f"没摆完:{err}" + (f"(已经摆好 {n_ok} 条,在罐头里看看)" if n_ok else ""))
+            box = QMessageBox.information if err == "停下了" else QMessageBox.warning
+            box(self, "摆下一批", ("你点了「停」,停下来了。" if err == "停下了" else f"没摆完:{err}") + (
                 f"\n\n已经摆好 {n_ok} 条,在罐头里看看:要发就点「发布 → 全部发布」再回来点「这批发好了」;"
                 "不要就在罐头里删掉,回来点「这批不要了」。" if n_ok else ""))
         elif ok:
@@ -592,13 +602,16 @@ class MainWindow(QMainWindow):
     def batch_sent(self):
         if not self.batch_id:
             return
-        if QMessageBox.question(self, "这批发好了", "你已经在罐头里点了「发布 → 全部发布」,这批都发出去了吗?") != QMessageBox.StandardButton.Yes:
+        n_ready = self.rec.ready_in_batch(self.batch_id)
+        acc = self.batch_videos[0].account if self.batch_videos else ""
+        if not self._ask("这批发好了", f"「{acc}」这批 {n_ready} 条,你已经在罐头里点了「发布 → 全部发布」,都发出去了?",
+                         "都发了,记下", "还没"):
             return
         n = self.rec.mark_batch_published(self.batch_id)
         self.say(f"记下:这批 {n} 条发了({bj_str()})")
         bad = self.rec.failed_in_batch(self.batch_id)
-        if bad and QMessageBox.question(self, "这批发好了", f"这批里还有 {len(bad)} 条软件没摆成(比如「{bad[0]['title'][:20]}」)。\n\n"
-                                        "你在罐头里手动补好、一起发出去了吗?") == QMessageBox.StandardButton.Yes:
+        if bad and self._ask("这批发好了", f"这批里还有 {len(bad)} 条软件没摆成(比如「{bad[0]['title'][:20]}」)。\n\n"
+                                         "你在罐头里手动补好、一起发出去了吗?", "补好一起发了", "没有"):
             m = self.rec.mark_failed_published(self.batch_id)
             self.say(f"记下:没摆成的 {m} 条也是你手动补好一起发的")
         self.batch_id = ""
@@ -607,7 +620,7 @@ class MainWindow(QMainWindow):
     def batch_dropped(self):
         if not self.batch_id:
             return
-        if QMessageBox.question(self, "这批不要了", "这批没发(在罐头里删掉了)?记录作废,下次这些视频还会再摆。") != QMessageBox.StandardButton.Yes:
+        if not self._ask("这批不要了", "这批没发(在罐头里删掉了)?记录作废,下次这些视频还会再摆。", "不要了", "先留着"):
             return
         n = self.rec.drop_batch(self.batch_id)
         self.say(f"这批 {n} 条作废了")
@@ -635,10 +648,14 @@ class MainWindow(QMainWindow):
             for d in dirs:
                 for emp in F.employees(d):
                     left += [v for v in F.videos_in(os.path.join(d, emp), acc, date) if self.rec.status_of(v.path) != "已发"]
-        msg = f"把整个「{date}」文件夹剪切到:\n{dst}\n"
+        msg = f"把整个「{date}」文件夹挪到:\n{dst}\n"
         if left:
-            msg += f"\n注意:里面还有 {len(left)} 条软件没记成「已发」(比如「{left[0].title[:20]}」)。"
-        if QMessageBox.question(self, "这天发完了,挪走", msg + "\n挪吗?") != QMessageBox.StandardButton.Yes:
+            per = {}
+            for v in left:
+                per[f"{v.account} · {v.employee}"] = per.get(f"{v.account} · {v.employee}", 0) + 1
+            msg += f"\n注意:里面还有 {len(left)} 条软件没记成「已发」:\n" + "\n".join(f"  · {k}:{n} 条" for k, n in per.items())
+            msg += "\n(手动发了的可以先选中点「标成已发」)"
+        if not self._ask("这天发完了,挪走", msg + "\n\n挪吗?", "挪走", "先不"):
             return
         from qe.fsops import MoveError
         try:
@@ -715,8 +732,8 @@ class MainWindow(QMainWindow):
         self.c_rec_date.addItem("全部", "")
         for d in dates:
             self.c_rec_date.addItem(d, d)
-        i = self.c_rec_date.findData(cur)
-        self.c_rec_date.setCurrentIndex(max(0, i))
+        i = self.c_rec_date.findData(cur) if cur is not None else -1
+        self.c_rec_date.setCurrentIndex(i if i >= 0 else (self.c_rec_date.count() - 1 if dates else 0))   # 默认最新的一天
         self.c_rec_date.blockSignals(False)
         date = self.c_rec_date.currentData() or ""
         s = self.rec.summary(date)
@@ -734,8 +751,14 @@ class MainWindow(QMainWindow):
                 it = QTableWidgetItem(short(x[k]) if k.endswith("_at") else str(x[k] or ""))
                 it.setToolTip(str(x[k] or ""))
                 self.t_rec.setItem(i, c, it)
-        self.t_rec.resizeColumnToContents(5)
-        self.t_rec.resizeColumnToContents(6)
+            if x["status"] in ("没发成", "结果不明", "发布中"):
+                for c in range(self.t_rec.columnCount()):
+                    item = self.t_rec.item(i, c)
+                    if item:
+                        item.setBackground(QBrush(QColor("#ffe7eb" if x["status"] == "没发成" else "#ffeedd")))
+        for c in (0, 1, 2, 4, 5, 6):
+            self.t_rec.resizeColumnToContents(c)
+        self.t_sum.resizeColumnsToContents()
 
     def export_records(self):
         date = self.c_rec_date.currentData() or ""
@@ -811,6 +834,11 @@ class MainWindow(QMainWindow):
         f2.addRow("几个号一起发", sp_thr)
         f2.addRow("每条间隔", sp_gap)
         f2.addRow("", QLabel("旧软件是「线程 1、间隔 5 秒」:一条一条发,上一条发完歇 5 秒再发下一条"))
+        b_mig = QPushButton("从旧软件搬账号…")
+        b_mig.setToolTip("从旧软件「企鹅号批量发布」的数据库(qepm.db)把 16 个号搬过来。密钥加密存在这台电脑上,不显示。")
+        b_mig.clicked.connect(self.api_tab.migrate)
+        b_mig.setEnabled(not self.api_tab.busy())
+        f2.addRow("16 个号的账号", b_mig)
         outer.addWidget(g2)
 
         from gui import theme as TH

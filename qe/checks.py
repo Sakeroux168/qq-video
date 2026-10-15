@@ -56,7 +56,7 @@ def problems(v) -> list[str]:
     elif c.get("landscape"):
         out.append("横屏")
     elif c.get("squarish"):
-        out.append("偏方,不是标准竖屏")
+        out.append("偏方要转竖屏")
     if c.get("platform"):
         out.append("标题有「" + "、".join(c["platform"]) + "」")
     if len(c.get("tags") or []) > 1:

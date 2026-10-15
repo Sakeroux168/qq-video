@@ -53,9 +53,23 @@ def _get(t: dict) -> dict:
     return p
 
 
+def _blend(c1: str, c2: str, k: float) -> str:
+    """c1 和 c2 按 k 混(k=0.12 → 12% 的 c1)。用来从强调色调出浅底。"""
+    a, b = QColor(c1), QColor(c2)
+    return QColor(round(a.red() * k + b.red() * (1 - k)), round(a.green() * k + b.green() * (1 - k)),
+                  round(a.blue() * k + b.blue() * (1 - k))).name()
+
+
+def _asset(name: str) -> str:
+    import os
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name).replace("\\", "/")
+
+
 def qss(t: dict) -> str:
     p, a, r = _get(t), t["accent"], t["radius"]
-    soft = t.get("soft", p["highlight"])
+    # 选中项的浅底:没写 soft 的主题从强调色调淡(审查:原来用 highlight = 强调色,蓝底蓝字看不见)
+    soft = t.get("soft") or _blend(a, p["base"], 0.16)
+    down, up = _asset("down.svg"), _asset("up.svg")
     return f"""
 QWidget {{ {BASE_FONT} color:{p['text']}; }}
 QMainWindow, QDialog, QWidget#page, QStackedWidget {{ background:{p['window']}; }}
@@ -84,13 +98,17 @@ QPushButton#primary:hover {{ background:{t['accent_hover']}; color:#ffffff; }}
 QPushButton#primary:disabled {{ background:{p['mid']}; color:{p['muted']}; border-color:{p['mid']}; }}
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r}px; padding:5px 8px; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color:{a}; }}
-QComboBox::drop-down {{ border:none; width:22px; }}
+QComboBox::drop-down {{ border:none; width:24px; }}
+QComboBox::down-arrow {{ image:url({down}); width:12px; height:12px; }}
+QSpinBox::up-button, QSpinBox::down-button {{ border:none; width:20px; background:transparent; }}
+QSpinBox::up-arrow {{ image:url({up}); width:10px; height:10px; }}
+QSpinBox::down-arrow {{ image:url({down}); width:10px; height:10px; }}
 QComboBox QAbstractItemView {{ background:{p['base']}; border:1px solid {p['mid']}; selection-background-color:{soft}; selection-color:{a}; }}
-QPlainTextEdit {{ color:{p['muted']}; }}
+QPlainTextEdit#log {{ color:{p['muted']}; }}
 QTreeWidget, QTableWidget {{ background:{p['base']}; alternate-background-color:{p['alt']}; border:1px solid {p['mid']};
     border-radius:{r + 2}px; gridline-color:{p['mid']}; }}
 QTreeWidget::item, QTableWidget::item {{ padding:4px 2px; }}
-QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{p['highlight']}; color:{p['htext']}; }}
+QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{soft}; color:{p['text']}; }}
 QHeaderView::section {{ background:{p['base']}; border:none; border-bottom:1px solid {p['mid']}; padding:8px 6px;
     font-weight:bold; color:{p['muted']}; }}
 QGroupBox {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r + 2}px; margin-top:16px; padding:12px 10px 8px 10px; }}
