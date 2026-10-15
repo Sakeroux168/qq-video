@@ -56,8 +56,9 @@ def faces_in(path: str) -> tuple[list[tuple[float, float, float, float]], tuple[
     out = []
     for f in (fs if fs is not None else []):
         x, y, fw, fh = float(f[0]) / sw, float(f[1]) / sh, float(f[2]) / sw, float(f[3]) / sh
+        eye = (float(f[5]) + float(f[7])) / 2 / sh            # 两只眼睛的高度(YuNet 的关键点)
         if fw >= MIN_FACE:
-            out.append((max(0.0, x), max(0.0, y), fw, fh))
+            out.append((max(0.0, x), max(0.0, y), fw, fh, eye))
     return out, (w, h)
 
 
@@ -129,6 +130,26 @@ def decide(v) -> None:
     v.cover_why = f"{len(faces)} 个人分得开,框对准脸最大的(看一眼)"
 
 
+WIDE_NOTE = {"crop": ";2.35:1 切掉一点头顶(不挡脸)", "ai": ";2.35:1 要 AI 扩图(看一眼)"}
+
+
+def note_wide(v) -> None:
+    """说明里补一句 2.35:1 怎么躲标题区(切头顶 / AI 扩图);AI 扩的标黄让人看一眼。"""
+    for t in WIDE_NOTE.values():
+        v.cover_why = v.cover_why.replace(t, "")
+    if not v.cover or not (v.plan or {}).get("faces"):
+        return
+    try:
+        w, h = image_size(v.cover)
+    except Exception:
+        return
+    mode = wide_mode(w, h, v.plan)[0]
+    if mode in WIDE_NOTE:
+        v.cover_why += WIDE_NOTE[mode]
+        if mode == "ai":
+            v.warn = True
+
+
 # ---------------- 裁剪框放哪 ----------------
 RATIOS = [("3:4", 3 / 4), ("9:16", 9 / 16), ("2.35:1", 2.35), ("1:1", 1.0)]    # 企鹅号裁剪的几个比例(有的号只有前两个)
 
@@ -140,6 +161,7 @@ def rkey(ratio: float) -> str:
 # 2.35:1(公众号推送大图)框的下面 26% 是「标题区域」,会压上标题字(用户:大头照脸上会有字,不行)。
 # 实测两张截图:标题区上沿在框高的 0.738、0.758 处 → 按 0.72 算(留点余量)。
 TITLE_SAFE = 0.72
+TITLE_TEXT = 0.76      # 标题的字在标题区中间偏下:切头顶的时候下巴可以碰到标题区上沿那条暗边,但不能到字那里
 WIDE = 2.35
 
 
@@ -165,44 +187,136 @@ def title_fit(img_w: float, img_h: float, plan: dict):
     return False, min(max(bot - TITLE_SAFE * bh, 0.0), img_h - bh)
 
 
+def crop_fit(img_w: float, img_h: float, plan: dict):
+    """办法一(用户选的):挪框躲不开时,允许切掉一点头顶 —— 下巴刚好在标题区上面。
+    最多切到眼睛上面(眼睛往上留脸高的 22%,眉毛额头要在),再多就不行。返回 (行不行, 框上沿 y)。"""
+    fs = (plan or {}).get("faces") or []
+    if not fs:
+        return True, None
+    bh = min(img_h, img_w / WIDE)
+    chin = max(f[1] + f[3] * 1.03 for f in fs) * img_h
+    brow = min((f[4] if len(f) > 4 else f[1] + f[3] * 0.4) - f[3] * 0.22 for f in fs) * img_h
+    ty = min(max(chin - TITLE_SAFE * bh, 0.0), img_h - bh)
+    return (ty + TITLE_TEXT * bh >= chin - 1 and ty <= brow), ty
+
+
+def wide_mode(img_w: float, img_h: float, plan: dict) -> tuple[str, float | None]:
+    """2.35:1 怎么办:
+    "manual" 人手动拖过;"drag" 挪框就躲开标题区;"crop" 切掉一点头顶(办法一);"ai" AI 扩图做专用图(办法三);
+    "none" 没脸,不管标题区。人在预览里点了「AI 扩图」(plan["ai235"])就直接 "ai"。返回 (怎么办, 框上沿 y)。"""
+    plan = plan or {}
+    if plan.get("manual", {}).get(rkey(WIDE)):
+        return "manual", None
+    if not plan.get("faces"):
+        return "none", None
+    if plan.get("ai235"):
+        return "ai", None
+    ok, ty = title_fit(img_w, img_h, plan)
+    if ok:
+        return "drag", ty
+    ok, ty2 = crop_fit(img_w, img_h, plan)
+    if ok or plan.get("no_ai"):                           # 人点了「不用 AI」:切头顶能切多少切多少
+        return "crop", ty2
+    return "ai", None
+
+
 def needs_wide(img_w: float, img_h: float, plan: dict) -> bool:
-    """这条的 2.35:1 要不要用「专用图」:挪框也躲不开标题区(大头照),人又没手动拖过 2.35:1。"""
-    if (plan or {}).get("manual", {}).get(rkey(WIDE)):
-        return False
-    return not title_fit(img_w, img_h, plan)[0]
+    """这条的 2.35:1 要不要换专用图(AI 扩图)。"""
+    return wide_mode(img_w, img_h, plan)[0] == "ai"
 
 
-def wide_cover(path: str, plan: dict) -> str:
-    """给 2.35:1 做一张专用图(和框一样是 2.35:1):原图缩小放进去,整张脸落在标题区上面,
-    空出来的地方用原图放大、模糊、压暗填上(下面那块正好在标题区里,本来就压暗)。存在数据目录,返回路径。"""
+# ---------------- 办法三:AI 扩图(阿里百炼 qwen-image-2.0,一张约几毛钱、6 秒左右)----------------
+# 用户 2026-10-15:两边模糊不行(「那张封面 png 并没有模糊处理」);办法一(切头顶)和办法三(AI 扩)都不错。
+# 原图缩小放进 2.35:1 的白底画布(脸在标题区上面),让 AI 把白的地方补成和原图连着的场景;
+# 画完把原图原样贴回去 —— 人脸和原画面一个像素都不让 AI 改,AI 只补边(实测它会在边上乱画一只手,提示词里也不让画人)。
+AI_KEY = ""                  # 窗口启动时从设置里填
+AI_NEGATIVE = "人,手,手臂,手指,胳膊,人脸,身体,文字,字母,水印,logo"
+AI_MODEL = "qwen-image-2.0"
+AI_PROMPT = ("这张图两边和下面的纯白色区域是空的。把纯白色区域补画出来,和中间原来的画面自然衔接"
+             "(同一个场景、同样的光线和色调、线条接得上)。不要画任何人、手、脸或身体的一部分,不要加任何文字和水印。"
+             "中间原有的画面和人物一点都不要改动。")
+
+
+def ai_canvas(img, plan: dict, max_w: int = 1424):
+    """原图(缩到 max_w 宽以内)放进 2.35:1 白底画布:脸(头顶到下巴)落在标题区上面。
+    脸在原图很靠下时原图要往上推(上面超出画布的部分不要),下面空出来给 AI 补。
+    返回 (画布, (原图那块在画布上的 左, 上, 宽, 高, 从原图(缩小后)第几行开始))。"""
     import cv2
-    from .config import data_dir
-    img = read_image(path)
     H, W = img.shape[:2]
-    W2, H2 = W, round(W / WIDE)
+    if W > max_w:
+        img = cv2.resize(img, (max_w, round(H * max_w / W)), interpolation=cv2.INTER_AREA)
+        H, W = img.shape[:2]
     top, bot = _face_band(plan, H)
     fs = plan.get("faces") or []
     cx = (min(f[0] for f in fs) + max(f[0] + f[2] for f in fs)) / 2 * W
-    s = min(1.0, (TITLE_SAFE - 0.06) * H2 / max(1.0, bot - top))     # 脸(连头发下巴)占上面那段的大部分
-    ox = W2 / 2 - cx * s
-    oy = 0.03 * H2 - top * s
-    if oy + H * s < H2 * TITLE_SAFE:                                   # 图底下不能露在标题区上面
-        oy = H2 * TITLE_SAFE - H * s
-    small = cv2.resize(img, (max(1, round(W * s)), max(1, round(H * s))), interpolation=cv2.INTER_AREA)
-    k = max(W2 / W, H2 / H)
-    bg = cv2.resize(img, (round(W * k) + 1, round(H * k) + 1))
-    by, bx = (bg.shape[0] - H2) // 2, (bg.shape[1] - W2) // 2
-    bg = cv2.GaussianBlur(bg[by:by + H2, bx:bx + W2], (0, 0), 40)
-    bg = (bg * 0.75).astype(np.uint8)
-    x0, y0 = round(ox), round(oy)
-    sx0, sy0, dx0, dy0 = max(0, -x0), max(0, -y0), max(0, x0), max(0, y0)
-    ww, hh = min(small.shape[1] - sx0, W2 - dx0), min(small.shape[0] - sy0, H2 - dy0)
-    if ww > 0 and hh > 0:
-        bg[dy0:dy0 + hh, dx0:dx0 + ww] = small[sy0:sy0 + hh, sx0:sx0 + ww]
+    s = min(1.0, (TITLE_SAFE - 0.06) * (W / WIDE) / max(1.0, bot - top))   # 画布上原图要缩到几成(画布宽 = 原图宽 / s)
+    W2 = round(W / s)
+    H2 = round(W2 / WIDE)
+    left = int(min(max(W2 / 2 - cx, 0), W2 - W))
+    up = int(round(0.03 * H2 - top))                    # 可以是负的:原图往上推
+    up = min(up, max(0, H2 - H))                        # 原图比画布矮时别往下放过头
+    canvas = np.full((H2, W2, 3), 255, np.uint8)
+    y0, y1 = max(0, up), min(H2, up + H)
+    canvas[y0:y1, left:left + W] = img[y0 - up:y1 - up]
+    return canvas, (left, y0, W, y1 - y0, y0 - up)
+
+
+def wide_cover(path: str, plan: dict, log=lambda m: None) -> str:
+    """办法三:AI 扩图做 2.35:1 专用图。做过的直接用(存在数据目录)。没填阿里百炼 Key / 调不通抛 RuntimeError。"""
+    import base64
+    import cv2
+    import requests
+    from .config import data_dir
     d = data_dir() / "2.35专用封面"
     d.mkdir(parents=True, exist_ok=True)
-    out = d / (os.path.splitext(os.path.basename(path))[0][:60] + "_2.35.jpg")
-    cv2.imencode(".jpg", bg, [cv2.IMWRITE_JPEG_QUALITY, 93])[1].tofile(str(out))
+    out = d / (os.path.splitext(os.path.basename(path))[0][:60] + "_2.35_AI.jpg")
+    if out.is_file() and out.stat().st_mtime >= os.path.getmtime(path):
+        return str(out)
+    if not AI_KEY:
+        raise RuntimeError("要用 AI 扩图,先在「设置」里填阿里百炼 Key")
+    img = read_image(path)
+    canvas, (left, up, w, h, src0) = ai_canvas(img, plan)
+    ok, buf = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    body = {"model": AI_MODEL, "input": {"messages": [{"role": "user", "content": [
+        {"image": "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()}, {"text": AI_PROMPT}]}]},
+        "parameters": {"n": 1, "watermark": False, "negative_prompt": AI_NEGATIVE}}
+    log("  AI 扩图中…(6 秒左右)")
+    r = requests.post("https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+                      headers={"Authorization": f"Bearer {AI_KEY}", "Content-Type": "application/json"}, json=body, timeout=180)
+    try:
+        url = r.json()["output"]["choices"][0]["message"]["content"][0]["image"]
+    except Exception:
+        raise RuntimeError(f"AI 扩图没成:{r.status_code} {r.text[:150]}")
+    gen = cv2.imdecode(np.frombuffer(requests.get(url, timeout=60).content, np.uint8), cv2.IMREAD_COLOR)
+    if gen is None:
+        raise RuntimeError("AI 扩图的结果下载不下来")
+    # 按原图的清晰度拼:画布放大 k 倍(k = 原图宽 / 交给 AI 的那张宽),中间贴全尺寸原图
+    # (企鹅号嫌小:交给 AI 的 1424 宽扩出来只有一千多宽,传上去报「封面图尺寸过小」)
+    k = img.shape[1] / w
+    H2, W2 = round(canvas.shape[0] * k), round(canvas.shape[1] * k)
+    left, up, w, h, src_top = round(left * k), round(up * k), img.shape[1], round(h * k), round(src0 * k)
+    gen = cv2.resize(gen, (W2, H2), interpolation=cv2.INTER_CUBIC)
+    canvas = gen.copy()
+    h = min(h, H2 - up, img.shape[0] - src_top)
+    canvas[up:up + h, left:left + w] = img[src_top:src_top + h, :w]
+    # 原图贴回去:原图那块全用原图;只在和 AI 补的交界处(不贴画布边的那几条边)往里 12 像素渐变
+    feather = 12
+    mask = np.zeros((H2, W2), np.float32)
+    ys = np.ones(h, np.float32)
+    xs = np.ones(w, np.float32)
+    ramp = np.linspace(0, 1, feather, dtype=np.float32)
+    if up > 0:
+        ys[:feather] = np.minimum(ys[:feather], ramp)
+    if up + h < H2:
+        ys[-feather:] = np.minimum(ys[-feather:], ramp[::-1])
+    if left > 0:
+        xs[:feather] = np.minimum(xs[:feather], ramp)
+    if left + w < W2:
+        xs[-feather:] = np.minimum(xs[-feather:], ramp[::-1])
+    mask[up:up + h, left:left + w] = np.outer(ys, xs)
+    m3 = mask[..., None]
+    res = (gen.astype(np.float32) * (1 - m3) + canvas.astype(np.float32) * m3).astype(np.uint8)
+    cv2.imencode(".jpg", res, [cv2.IMWRITE_JPEG_QUALITY, 93])[1].tofile(str(out))
     return str(out)
 
 
@@ -221,7 +335,9 @@ def crop_rect(img_w: float, img_h: float, ratio: float, plan: dict) -> tuple[flo
         tx = plan["cx"] * img_w - bw / 2
         ty = plan["cy"] * img_h - bh * 0.45                   # 脸放在框里偏上一点
         if ratio >= 2 and plan.get("faces"):
-            ty = title_fit(img_w, img_h, plan)[1]             # 2.35:1:让脸躲开下面的标题区
+            mode, t2 = wide_mode(img_w, img_h, plan)          # 2.35:1:让脸躲开下面的标题区(挪框 / 切掉点头顶)
+            if t2 is not None:
+                ty = t2
     else:
         tx, ty = (img_w - bw) / 2, (img_h - bh) / 2
     tx = min(max(tx, 0.0), img_w - bw)

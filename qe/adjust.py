@@ -35,6 +35,14 @@ class Adjustments:
         self.d.setdefault(video, {}).setdefault("manual", {}).setdefault(cover, {})[rkey] = [round(cx, 4), round(cy, 4)]
         self._save()
 
+    def ai235(self, video: str):
+        """None = 按软件自己判断;True = 人点了用 AI 扩;False = 人点了不用 AI(切头顶)。"""
+        return (self.d.get(video) or {}).get("ai235")
+
+    def set_ai235(self, video: str, on):
+        self.d.setdefault(video, {})["ai235"] = on
+        self._save()
+
     def reset(self, video: str):
         """恢复自动:手动拖过的框都不要了。"""
         if video in self.d:
@@ -43,6 +51,9 @@ class Adjustments:
 
     def apply(self, v) -> None:
         """自动定完封面以后,把人调过的套上去。"""
+        ai = self.ai235(v.path)
+        if ai is not None and v.plan is not None:
+            v.plan = dict(v.plan, ai235=bool(ai), no_ai=not ai)
         man = self.manual(v.path, v.cover) if v.cover else {}
         if man:
             v.plan = dict(v.plan or {}, manual=man)

@@ -212,14 +212,36 @@ def test_title_zone(tmp: Path):
     low = {"cx": 0.5, "cy": 0.7, "faces": [[0.45, 0.55, 0.1, 0.15]]}          # 脸偏下:框挪到底
     ok, ty = C.title_fit(1600, 900, low)
     check(ok and abs(ty - (900 - 1600 / 2.35)) < 1, f"脸偏下:框挪到最底下 -> {ty:.0f}")
-    big = {"cx": 0.5, "cy": 0.6, "faces": [[0.38, 0.15, 0.26, 0.63]]}         # 大头照(像今天 16 号)
-    check(C.needs_wide(1600, 900, big), "大头照:挪框躲不开,要专用图")
-    check(not C.needs_wide(1600, 900, dict(big, manual={C.rkey(2.35): [0.5, 0.5]})), "人手动拖过 2.35:1:按人的来,不用专用图")
-    check(not C.needs_wide(1600, 900, {"cx": 0.5, "cy": 0.5}), "没人:不管标题区")
+    # 大头照(像今天 16 号):挪框躲不开 → 切掉一点头顶(办法一)
+    big = {"cx": 0.5, "cy": 0.6, "faces": [[0.38, 0.15, 0.26, 0.63, 0.40]]}
+    mode, ty = C.wide_mode(1600, 900, big)
+    check(mode == "crop" and ty > 0, f"大头照:切掉一点头顶 -> {mode}")
+    x, y, w, h = C.crop_rect(1600, 900, 2.35, big)
+    chin = (0.15 + 0.63 * 1.03) * 900
+    check(y + h * C.TITLE_TEXT >= chin - 1 and y <= (0.40 - 0.63 * 0.22) * 900, "切完:下巴不碰标题字,眼睛眉毛都在")
+    # 脸在图最下面:切头顶也躲不开 → AI 扩图(办法三)
+    low2 = {"cx": 0.5, "cy": 0.9, "faces": [[0.4, 0.7, 0.12, 0.25, 0.8]]}
+    check(C.wide_mode(1600, 900, low2)[0] == "ai" and C.needs_wide(1600, 900, low2), "脸贴着图片底下:要 AI 扩图")
+    check(C.wide_mode(1600, 900, dict(low2, no_ai=True))[0] == "crop", "人点了「不用 AI」:改成切头顶")
+    check(C.wide_mode(1600, 900, dict(big, ai235=True))[0] == "ai", "人点了「用 AI 扩」:就用 AI")
+    check(C.wide_mode(1600, 900, dict(big, manual={C.rkey(2.35): [0.5, 0.5]}))[0] == "manual", "人手动拖过 2.35:1:按人的来")
+    check(C.wide_mode(1600, 900, {"cx": 0.5, "cy": 0.5})[0] == "none", "没人:不管标题区")
+    # AI 画布:脸落在标题区上面,原图该往上推就往上推
+    import numpy as np
+    img = np.zeros((900, 1600, 3), np.uint8)
+    canvas, (left, up, w2, h2, src0) = C.ai_canvas(img, low2)
+    H2, W2 = canvas.shape[:2]
+    check(abs(W2 / H2 - 2.35) < 0.01, f"AI 画布就是 2.35:1 -> {W2}×{H2}")
+    check(up == 0 and src0 > 0 and h2 < 900 * 1424 / 1600, "脸在最底下:原图往上推(上面切掉一块),下面空出来给 AI 补")
+    old_key = C.AI_KEY
+    C.AI_KEY = ""
     _img(tmp / "big.png", 1600, 900)
-    out = C.wide_cover(str(tmp / "big.png"), big)
-    w2, h2 = C.image_size(out)
-    check(abs(w2 / h2 - 2.35) < 0.01, f"专用图就是 2.35:1 -> {w2}×{h2}")
+    try:
+        C.wide_cover(str(tmp / "big.png"), low2)
+        check(False, "没填 Key 要说清楚")
+    except RuntimeError as e:
+        check("Key" in str(e), f"没填阿里百炼 Key:说清楚 -> {e}")
+    C.AI_KEY = old_key
 
 
 def test_preview(tmp: Path):

@@ -53,6 +53,7 @@ DEFAULTS = {
         {"name": "家长小天地", "aliases": ["小天地"]},
     ],
     "batch_size": 10,          # 企鹅号一次最多传 10 条
+    "ai_key": "",              # 阿里百炼 Key(2.35:1 AI 扩图用);空着就用百家号发布助手里填的
     "last_date": "",
 }
 
@@ -75,6 +76,18 @@ class Settings(dict):
             os.replace(tmp, self.path)
         except OSError:
             pass
+
+    def ai_key(self) -> str:
+        k = str(self.get("ai_key") or "").strip()
+        if k:
+            return k
+        try:                                   # 百家号发布助手的设置(这台电脑上用户填过阿里百炼 Key)
+            ptr = Path(os.environ.get("APPDATA") or "") / "百家号发布助手2" / "location.json"
+            root = json.loads(ptr.read_text("utf-8")).get("data_root") or ""
+            d = json.loads((Path(root) / "data" / "settings.json").read_text("utf-8"))
+            return str(d.get("bailian_api_key") or "").strip()
+        except Exception:
+            return ""
 
     def account_names(self) -> list[str]:
         return [a["name"] for a in self.get("accounts") or [] if a.get("name")]

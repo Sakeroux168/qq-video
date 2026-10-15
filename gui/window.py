@@ -44,6 +44,7 @@ class CoverWorker(QThread):
             if not v.cover_kind:
                 C.decide(v)
                 self.adj.apply(v)          # 人在「封面预览」里调过的套上去
+                C.note_wide(v)             # 2.35:1 怎么躲标题区(切头顶 / AI 扩图)
             self.one.emit(i)
         self.done.emit()
 
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow):
         self.batch_videos: list = []
         self.worker: BatchWorker | None = None
         self.cover_worker: CoverWorker | None = None
+        C.AI_KEY = st.ai_key() if hasattr(st, "ai_key") else ""
         self.setWindowTitle(f"企鹅号发布助手(第{APP_VERSION}版)")
         self.resize(1280, 820)
         self._build()
@@ -537,11 +539,16 @@ class MainWindow(QMainWindow):
         sp = QSpinBox()
         sp.setRange(1, 10)
         sp.setValue(int(self.st.get("batch_size", 10)))
+        e_key = QLineEdit(self.st.get("ai_key", ""))
+        e_key.setEchoMode(QLineEdit.EchoMode.Password)
+        e_key.setPlaceholderText("空着就用百家号发布助手里填的" + ("(找到了)" if self.st.ai_key() else "(没找到)"))
         f.addRow("素材文件夹", e_root)
         f.addRow("发完挪到", e_arc)
         f.addRow("", QLabel("{month} 会换成日期的月份,比如 10.15 → 10"))
         f.addRow("号和缩写", e_acc)
         f.addRow("一批几条", sp)
+        f.addRow("阿里百炼 Key", e_key)
+        f.addRow("", QLabel("大头照的 2.35:1 封面要 AI 扩图时用(一张几毛钱)"))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(d.accept)
         bb.rejected.connect(d.reject)
@@ -557,7 +564,8 @@ class MainWindow(QMainWindow):
             elif line.strip():
                 accs.append({"name": line.strip(), "aliases": []})
         self.st.update(material_root=e_root.text().strip(), archive_root=e_arc.text().strip(), accounts=accs or self.st["accounts"],
-                       batch_size=sp.value())
+                       batch_size=sp.value(), ai_key=e_key.text().strip())
+        C.AI_KEY = self.st.ai_key()
         self.st.save()
         self._load_dates()
 

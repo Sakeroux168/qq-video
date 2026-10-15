@@ -126,6 +126,13 @@ class CoverDialog(QDialog):
         mid.addWidget(self.canvas, 1)
         v.addLayout(mid, 1)
         bar = QHBoxLayout()
+        self.b_ai = QPushButton("2.35:1 用 AI 扩图")
+        self.b_ai.setCheckable(True)
+        self.b_ai.setToolTip("大头照:2.35:1 下面的标题区会挡脸。按下 = 用 AI 把画面往两边、下面扩出来(脸在标题区上面);"
+                             "不按 = 切掉一点头顶。AI 一张几毛钱,偶尔会画歪,不满意点「重新扩一张」。")
+        self.b_ai.clicked.connect(self.toggle_ai)
+        self.b_again = QPushButton("重新扩一张")
+        self.b_again.clicked.connect(self.ai_again)
         self.b_auto = QPushButton("恢复自动")
         self.b_auto.setToolTip("框的位置按软件自己认的来")
         self.b_auto.clicked.connect(self.reset)
@@ -135,6 +142,8 @@ class CoverDialog(QDialog):
         self.b_next.clicked.connect(lambda: self.go(1))
         b_ok = QPushButton("关闭")
         b_ok.clicked.connect(self.accept)
+        bar.addWidget(self.b_ai)
+        bar.addWidget(self.b_again)
         bar.addWidget(self.b_auto)
         bar.addStretch(1)
         for b in (self.b_prev, self.b_next, b_ok):
@@ -163,10 +172,16 @@ class CoverDialog(QDialog):
         _tag, r = C.RATIOS[k]
         if r >= 2 and not self.pm.isNull() and C.needs_wide(self.pm.width(), self.pm.height(), self.v.plan):
             if self._wide is None:
+                from PySide6.QtWidgets import QApplication, QMessageBox
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                 try:
                     self._wide = QPixmap(C.wide_cover(self.v.cover, self.v.plan))
-                except Exception:
+                except Exception as e:
                     self._wide = QPixmap()
+                    QApplication.restoreOverrideCursor()
+                    QMessageBox.warning(self, "AI 扩图", f"AI 扩图没成:{e}。先用原图显示;摆的时候会改成切掉一点头顶。")
+                else:
+                    QApplication.restoreOverrideCursor()
             if not self._wide.isNull():
                 return self._wide
         return self.pm
@@ -197,7 +212,12 @@ class CoverDialog(QDialog):
             self.canvas.set_rect(self.rect_for(self.ratio_i))
             wide = pm is not self.pm
             self.canvas.setEnabled(not wide)
-            self.lab_why.setText(self.v.cover_why + ("    ·  2.35:1 是大头照,挪框躲不开标题区,用专用图(脸在标题区上面)" if wide else ""))
+            self.lab_why.setText(self.v.cover_why)
+        mode = C.wide_mode(self.pm.width() or 1, self.pm.height() or 1, self.v.plan)[0] if not self.pm.isNull() else "none"
+        has_face = bool((self.v.plan or {}).get("faces"))
+        self.b_ai.setEnabled(has_face and mode != "manual")
+        self.b_ai.setChecked(mode == "ai")
+        self.b_again.setEnabled(mode == "ai")
 
     def pick_ratio(self, k):
         self.ratio_i = k
@@ -222,11 +242,35 @@ class CoverDialog(QDialog):
         self.refresh()
         self.changed.emit(self.i)
 
+    def toggle_ai(self, on: bool):
+        v = self.v
+        self.adj.set_ai235(v.path, bool(on))
+        self.adj.apply(v)
+        C.note_wide(v)
+        self._wide = None
+        self.pick_ratio(2)                          # 跳到 2.35:1 看效果
+        self.changed.emit(self.i)
+
+    def ai_again(self):
+        """AI 扩的不满意:删掉这张,再扩一张。"""
+        import glob
+        import os
+        from qe.config import data_dir
+        stem = os.path.splitext(os.path.basename(self.v.cover))[0][:60]
+        for f in glob.glob(str(data_dir() / "2.35专用封面" / (glob.escape(stem) + "_2.35_AI.jpg"))):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        self._wide = None
+        self.pick_ratio(2)
+
     def reset(self):
         v = self.v
         self.adj.reset(v.path)
         v.cover_kind = ""
         C.decide(v)
+        C.note_wide(v)
         self.show_video()
         self.changed.emit(self.i)
 

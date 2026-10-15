@@ -256,12 +256,13 @@ class Runner:
         idx = self.ev("""[...document.querySelectorAll('input[type=file]')].findIndex(i => (i.accept||'').includes('image') && i.closest('.omui-dialog') && window.__qe.vis(i.closest('.omui-dialog')))""")
         if idx is None or idx < 0:
             raise PrepError("封面弹框里找不到传图片的地方")
+        small0 = self._small_count()
         self.page.set_files("input[type=file]", [upfile], index=int(idx))
         end = time.time() + 60
         while True:
             self.sleep(0.6)
-            st = self.ev("""(() => { if (document.body.innerText.includes('封面图尺寸过小')) return 'small';
-                const d = window.__qe.dlg(); return d && [...d.querySelectorAll('button')].some(b => window.__qe.vis(b) && b.innerText.trim() === '下一步') ? 'ok' : ''; })()""")
+            st = self.ev("""((n0) => { if ((document.body.innerText.match(/封面图尺寸过小/g) || []).length > n0) return 'small';
+                const d = window.__qe.dlg(); return d && [...d.querySelectorAll('button')].some(b => window.__qe.vis(b) && b.innerText.trim() === '下一步') ? 'ok' : ''; })(%d)""" % small0)
             if st == "ok":
                 break
             if st == "small":
@@ -273,7 +274,13 @@ class Runner:
         self.sleep(1.2)
         iw, ih = C.image_size(upfile)
         # 2.35:1 下面有「标题区域」:大头照挪框也躲不开 → 这一个比例「更换当前封面」换成专用图(脸在标题区上面),后面的比例再换回原图
-        wide = C.wide_cover(v.cover, v.plan) if C.needs_wide(iw, ih, v.plan) else ""
+        wide = ""
+        if C.needs_wide(iw, ih, v.plan):
+            try:
+                wide = C.wide_cover(v.cover, v.plan, log=self.log)
+            except Exception as e:                         # 没 Key / 接口不通:退回切头顶(能躲多少躲多少)
+                self.log(f"  ⚠ AI 扩图没成({e}),2.35:1 改成切掉一点头顶")
+                v.plan = dict(v.plan, no_ai=True, ai235=False)
         on_wide = False
         done = []
         for _step in range(8):
@@ -289,7 +296,7 @@ class Runner:
             if ratio >= 2 and wide:
                 self._replace_current(wide)                    # 专用图就是 2.35:1,框正好是整张图,不用拖
                 on_wide = True
-                self.log("  2.35:1:大头照,换成专用图(脸在标题区上面)")
+                self.log("  2.35:1:换成 AI 扩的专用图(脸在标题区上面)")
             else:
                 if on_wide:
                     self._replace_current(upfile)              # 企鹅号会「优先同步最新更换的封面图」:换回原图
@@ -348,11 +355,12 @@ class Runner:
         idx = self.ev(f"""(() => {{ const d = {NEST}; return [...document.querySelectorAll('input[type=file]')].findIndex(i => (i.accept||'').includes('image') && d.contains(i)); }})()""")
         if idx is None or idx < 0:
             raise PrepError("换封面的弹框里找不到传图片的地方")
+        small0 = self._small_count()
         self.page.set_files("input[type=file]", [file], index=int(idx))
         end = time.time() + 60
         while True:
             self.sleep(0.6)
-            st = self.ev(f"""(() => {{ if (document.body.innerText.includes('封面图尺寸过小')) return 'small'; const d = {NEST};
+            st = self.ev(f"""(() => {{ if ((document.body.innerText.match(/封面图尺寸过小/g) || []).length > {small0}) return 'small'; const d = {NEST};
                 return d && !d.innerText.includes('上传图片') && [...d.querySelectorAll('button')].some(b => window.__qe.vis(b) && b.innerText.trim() === '下一步') ? 'ok' : ''; }})()""")
             if st == "ok":
                 break
@@ -363,6 +371,10 @@ class Runner:
         self.ev(f"""(() => {{ const d = {NEST}; [...d.querySelectorAll('button')].find(b => window.__qe.vis(b) && b.innerText.trim() === '下一步').click(); }})()""")
         self.wait(f"!({NEST}) && !!window.__qe.dlg() && !!window.__qe.dlg().querySelector('ezimage-cropper')", 20, "回到裁剪页")
         self.sleep(1.2)
+
+    def _small_count(self) -> int:
+        """页面上现在有几条「封面图尺寸过小」(提示会留一会儿:只认传完以后新冒出来的)。"""
+        return int(self.ev("(document.body.innerText.match(/封面图尺寸过小/g) || []).length") or 0)
 
     def _cover_done(self) -> bool:
         """这条的封面已经设过了(封面那一栏里有带比例字样的小图,没有那个大 + 号)。"""
