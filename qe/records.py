@@ -60,6 +60,16 @@ class Records:
                 (v.date, v.account, v.employee, v.title, v.path, v.cover_kind, "手动", "已发", "", bj_str(), note))
             self.conn.commit()
 
+    # ---------------- 接口发的 16 个号(员工一栏记「接口」,和教育的放一起数) ----------------
+    def api_result(self, v, status: str, note: str = "") -> None:
+        """status:已发 / 没发成。v.path 记原来的位置(发完挪走了也能查到是哪条)。"""
+        with _LOCK:
+            self.conn.execute(
+                "INSERT INTO posts(date,account,employee,title,path,cover_kind,batch,status,prepared_at,published_at,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (v.date, v.account, "接口", v.title, v.path, "", "接口", status, "",
+                 bj_str() if status == "已发" else "", note))
+            self.conn.commit()
+
     def failed_in_batch(self, batch: str) -> list[dict]:
         """这批里没摆成、后来也没记已发的(人可能在罐头里手动补好一起发了)。"""
         with _LOCK:

@@ -238,6 +238,119 @@ def test_failed_steps(tmp: Path):
     check(r.status_of("c") == "已发" and r.rows("1.1")[-1]["published_at"], "「选中的标成已发」:记已发、有时间")
 
 
+def test_api(tmp: Path):
+    print("[接口发:找素材 / 话题留一个 / 平台名 / 转竖屏 / 账号加密 / 发布流程(假接口)]")
+    from qe import apiacc, apisrc, checks, omapi, topic, vertical
+    root = tmp / "api"
+    g = root / "游戏视频"
+    for d in ("CSGO--CSGO战神君/10.15(20)", "CSGO--CSGO战神君/不能用", "CSGO--CSGO战神君/10.14", "1疑似脏话/10.15",
+              "地下城与勇士--DNF连招档案馆/10.15（20）"):
+        (g / d).mkdir(parents=True)
+    (root / "动漫视频" / "国漫趣谈" / "10.15（星期四）").mkdir(parents=True)
+    for f in ("CSGO--CSGO战神君/10.15(20)/a #CSGO #反恐精英.mp4", "CSGO--CSGO战神君/10.15(20)/a #CSGO #反恐精英.jpg",
+              "CSGO--CSGO战神君/不能用/坏.mp4", "1疑似脏话/10.15/脏.mp4", "地下城与勇士--DNF连招档案馆/10.15（20）/b.mp4"):
+        (g / f).write_bytes(b"x")
+    (root / "动漫视频" / "国漫趣谈" / "10.15（星期四）" / "抖音同款 #牧神记.mp4").write_bytes(b"x")
+    roots = [str(g), str(root / "动漫视频")]
+    check(apisrc.date_key("10.14（星期三）") == "10.14" and apisrc.date_key("10.15(20)") == "10.15" and apisrc.date_key("不能用") == "",
+          "日期文件夹只认开头的「月.日」")
+    known = {"CSGO战神君", "DNF连招档案馆", "国漫趣谈"}
+    check(apisrc.dates(roots, known) == ["10.14", "10.15"], "有哪些日子")
+    vs = apisrc.videos(roots, "10.15", known)
+    check(sorted(v.account for v in vs) == ["CSGO战神君", "DNF连招档案馆", "国漫趣谈"], "「不能用」「1疑似脏话」不算")
+    check(apisrc.archive_dir({}, "10.15") == r"X:\知乎视频\内容查看\10月发布视频\企鹅号\10.15已发布", "发完挪到哪(照搬旧软件)")
+
+    p = topic.split_topics("标题 #a #B #b")
+    check(p["body"] == "标题" and p["sep"] == " " and p["tags"] == ["a", "B"], "话题拆开、不分大小写去重")
+    check(topic.split_topics("标题#a 中间 #b")["tags"] == ["b"], "只认结尾那一串")
+    check(topic.new_name("x #a #a") == "x #a" and topic.new_name("x #a") is None and topic.new_name("x") is None, "0/1 个不问 AI")
+    check(topic.new_name("x #活动 #三角洲行动", lambda b, t: t[1]) == "x #三角洲行动", "2 个以上留 AI 挑的")
+    check(topic.parse_order('```json\n{"理由":"x","顺序":[2,1]}\n```', 2) == [2, 1] and topic.parse_order("2", 3) == [2, 1, 3]
+          and topic.parse_order("不知道", 2) == [], "AI 回话读顺序")
+    m = topic.topic_messages("正文", ["a", "b"])
+    check("排第一的那个会被留下" in m[0]["content"] and "1. #a\n2. #b" in m[1]["content"], "提示词和 ainame 一样")
+
+    check(checks.platform_hits("抖音同款 #牧神记") == ["抖音"] and checks.platform_hits("everybody books") == []
+          and checks.platform_hits("来自 dy 的") == ["dy"], "标题里的别的平台名(dy 只认单独的)")
+
+    v = [x for x in vs if x.account == "CSGO战神君"][0]
+    led = topic.Ledger(tmp / "led.json")
+    moves = topic.rename_with_sidecars(v.path, topic.new_name(v.title, lambda b, t: t[0]))
+    led.add("t1", moves)
+    d = os.path.dirname(v.path)
+    check(sorted(os.listdir(d)) == ["a #CSGO.jpg", "a #CSGO.mp4"], "改名:同名封面跟着改")
+    check(led.undo_last() == (2, 0) and sorted(os.listdir(d)) == ["a #CSGO #反恐精英.jpg", "a #CSGO #反恐精英.mp4"], "能撤销")
+
+    check(apiacc.unseal(apiacc.seal("秘密abc")) == "秘密abc" and "秘密" not in apiacc.seal("秘密abc"), "密钥加密存")
+    import sqlite3
+    db = tmp / "old.db"
+    con = sqlite3.connect(db)
+    con.execute("create table accounts(id integer primary key, source_name, source_id, client_id, client_secret, nick, category, enabled, sort_order)")
+    con.execute("insert into accounts values(1,'CSGO','1','cid','sec1','CSGO战神君',1604,1,0)")
+    con.commit()
+    con.close()
+    check(apiacc.migrate(str(db)) == 1 and apiacc.find("CSGO战神君")["category"] == 1604, "从旧数据库搬账号")
+    check("sec1" not in apiacc.store_path().read_text("utf-8"), "存下来的文件里没有明文密钥")
+
+    class R:
+        def __init__(self, j):
+            self.j, self.status_code, self.text = j, 200, ""
+
+        def json(self):
+            return self.j
+
+    class S:
+        def __init__(self):
+            self.calls, self.n = [], 0
+
+        def post(self, url, **kw):
+            self.calls.append(("token", kw["params"]["client_secret"]))
+            return R({"code": "0", "data": {"access_token": "T", "expires_in": 7200}})
+
+        def request(self, method, url, **kw):
+            path = url.split("api.om.qq.com")[1]
+            self.calls.append((path, kw.get("json")))
+            assert kw["params"]["access_token"] == "T"
+            if path == "/video/clientuploadready":
+                return R({"code": "0", "data": {"transaction_id": "U1"}})
+            if path == "/video/clientuploadtrunk":
+                return R({"code": "0", "data": {"end_offset": 1}})
+            if path == "/articlev2/clientpubvideo":
+                return R({"code": "0", "data": {"transaction_id": "P1", "article_id": "A9"}})
+            if path == "/transaction/infoclient":
+                if kw["params"]["transaction_id"] == "U1":
+                    return R({"code": "0", "data": {"article_info": {"article_video_info": {"vid": "V7"}}}})
+                self.n += 1
+                return R({"code": "0", "data": {"transaction_status": "处理中" if self.n < 2 else "成功"}})
+            return R({"code": "-1", "msg": "?"})
+    s = S()
+    real_sleep = omapi.time.sleep
+    omapi.time.sleep = lambda x: None
+    try:
+        r = omapi.Client("cid", "sec1", session=s).send(v.path, v.title, 1604)
+    finally:
+        omapi.time.sleep = real_sleep
+    pub = [c[1] for c in s.calls if c[0] == "/articlev2/clientpubvideo"][0]
+    check(r == {"vid": "V7", "article_id": "A9", "transaction_id": "P1", "status": "成功"}, "发布流程:传 → vid → 发 → 等成功")
+    check(pub == {"title": v.title, "tags": "", "vid": "V7", "cat": 1604, "desc": v.title, "aigc_userstatement": "2"},
+          "发的内容和旧软件一样(标题 = 简介 = 文件名,非 AI)")
+    dst = apisrc.move_published(v.path, str(tmp / "已发布"))
+    check(os.path.isfile(dst) and not os.path.exists(v.path), "发完挪走")
+
+    ff = vertical.ffmpeg_path()
+    if ff:
+        src = tmp / "横.mp4"
+        import subprocess
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25", "-f", "lavfi",
+                        "-i", "sine", "-t", "2", "-c:v", "libx264", "-c:a", "aac", str(src)], check=True)
+        check(vertical.is_landscape(vertical.probe(str(src), ff)), "认出横屏")
+        new, orig = vertical.to_vertical(str(src), ff)
+        info = vertical.probe(new, ff)
+        check((info["w"], info["h"]) == (1080, 1920) and os.path.isfile(orig) and "横屏原片" in orig, "转成竖屏,原片挪进「横屏原片」")
+    else:
+        print("  (没有 ffmpeg,跳过转竖屏)")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -426,6 +539,7 @@ if __name__ == "__main__":
     test_preview(tmp)
     test_title_zone(tmp)
     test_group(tmp)
+    test_api(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

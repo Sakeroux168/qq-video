@@ -55,6 +55,11 @@ DEFAULTS = {
     "batch_size": 10,          # 企鹅号一次最多传 10 条
     "ai_key": "",              # 阿里百炼 Key(2.35:1 AI 扩图用);空着就用百家号发布助手里填的
     "last_date": "",
+    # 接口发的 16 个号(游戏 / 动漫)
+    "api_roots": [r"X:\知乎视频\游戏视频", r"X:\知乎视频\动漫视频"],
+    "api_archive": r"X:\知乎视频\内容查看\{month}月发布视频\企鹅号\{date}已发布",
+    "api_parallel": 3,         # 几个号一起发
+    "topic_model": "qwen-plus",
 }
 
 

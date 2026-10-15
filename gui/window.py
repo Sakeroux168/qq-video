@@ -217,7 +217,10 @@ class MainWindow(QMainWindow):
         self.logbox.setMaximumBlockCount(3000)
         self.logbox.setMaximumHeight(170)
         v.addWidget(self.logbox)
-        tabs.addTab(w, "发视频")
+        tabs.addTab(w, "发视频(教育,罐头)")
+        from gui.api_tab import ApiTab
+        self.api_tab = ApiTab(self.st, self.rec, self.say, self)
+        tabs.addTab(self.api_tab, "接口发(16个号)")
 
         # 记录页
         r = QWidget()
@@ -250,7 +253,7 @@ class MainWindow(QMainWindow):
         self.t_rec.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         rv2.addWidget(self.t_rec, 1)
         tabs.addTab(r, "记录")
-        tabs.currentChanged.connect(lambda i: i == 1 and self.refresh_records())
+        tabs.currentChanged.connect(lambda i: i == 2 and self.refresh_records())
 
     def say(self, m: str):
         self.logbox.appendPlainText(f"[{bj_str()[11:]}] {m}")
@@ -715,4 +718,12 @@ class MainWindow(QMainWindow):
                 return
             self.worker.stop()
             self.worker.wait(20000)
+        j = getattr(getattr(self, "api_tab", None), "job", None)
+        if j and j.isRunning():
+            if QMessageBox.question(self, "企鹅号发布助手", "接口那边还在做(发布 / 转竖屏 / 改话题),要停下来关掉吗?") \
+                    != QMessageBox.StandardButton.Yes:
+                e.ignore()
+                return
+            j.stop()
+            j.wait(60000)
         super().closeEvent(e)
