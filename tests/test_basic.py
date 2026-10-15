@@ -386,8 +386,8 @@ def test_api_tab(tmp: Path):
     vs = apisrc.videos(roots, "10.15", known, {"CSGO战神君": esp})
     check([v.account for v in vs] == ["CSGO战神君"] and vs[0].title == "e1", "手选了就不再自动找这个号")
 
-    accs = [{"nick": "CSGO战神君", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
-            {"nick": "电竞情报馆", "client_id": "b", "secret": apiacc.seal("s"), "category": 1605, "enabled": True}]
+    accs = [{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+            {"nick": "电竞情报馆", "source_name": "电竞赛事", "client_id": "b", "secret": apiacc.seal("s"), "category": 1605, "enabled": True}]
     apiacc.save(accs)
     st = Settings(tmp / "st_api.json")
     st["api_roots"] = roots
@@ -429,8 +429,10 @@ def test_api_tab(tmp: Path):
     gaps = [b[0] - a[0] for a, b in zip(sent, sent[1:])]
     check(all(g >= 0.95 for g in gaps), f"每条之间歇够间隔 -> {[round(g, 2) for g in gaps]}")
     out = tmp / "发布" / "10.15已发布"
-    check(sorted(os.listdir(out)) == ["c1.mp4", "c2.mp4", "e1.mp4"] and os.path.isfile(os.path.join(esp, "e1.jpg")),
-          "发完挪到「10.15已发布」(只挪视频,和旧软件一样)")
+    check(sorted(os.listdir(out / "CSGO")) == ["c1.mp4", "c2.mp4"] and os.listdir(out / "电竞赛事") == ["e1.mp4"]
+          and os.path.isfile(os.path.join(esp, "e1.jpg")), "发完挪走,按游戏分子文件夹(名字 = 旧软件「账号」),只挪视频")
+    check(apisrc.archive_dir({"api_archive_by_game": False}, "10.15", accs[0]).endswith("企鹅号软件发布")
+          and apisrc.archive_dir({}, "10.15", accs[0]).endswith("企鹅号软件发布" + os.sep + "CSGO"), "不勾「按游戏分」就平铺")
     check(len([r for r in rec.rows("10.15") if r["employee"] == "接口" and r["status"] == "已发"]) == 3, "记进记录(员工 = 接口)")
     for f in ("c3.mp4", "c4.mp4"):
         (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15" / f).write_bytes(b"x")

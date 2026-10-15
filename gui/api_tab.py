@@ -756,10 +756,13 @@ class ApiTab(QWidget):
         par = max(1, int(self.st.get("api_threads") or 1))
         gap = max(0.0, float(self.st.get("api_interval", 5) or 0))
         how = "一条一条发" if par == 1 else f"{par} 个号一起发"
+        by_game = bool(self.st.get("api_archive_by_game", True))
+        subs = "、".join(dict.fromkeys(apisrc.game_folder(accs[n]) for n in by_acc))
         msg = (f"用接口发 {len(rows)} 条({len(by_acc)} 个号:{'、'.join(by_acc)})" +
                (f",有问题的 {held} 条不发" if held else "") +
                f"。\n\n标题、简介 = 文件名;分类按号;声明「非 AI 生成」;封面平台自己截。\n"
-               f"{how},每条之间歇 {gap:g} 秒。\n发成了挪到:\n{dest}\n\n发吗?")
+               f"{how},每条之间歇 {gap:g} 秒。\n发成了挪到:\n{dest}" +
+               (f"\n下面按游戏分子文件夹:{subs}" if by_game else "") + "\n\n发吗?")
         if QMessageBox.question(self, "发布", msg) != QMessageBox.StandardButton.Yes:
             return
         vs = self.videos
@@ -812,7 +815,7 @@ class ApiTab(QWidget):
                 self.rec.api_result(v, "已发", note)
                 sent += 1
                 try:
-                    v.path = apisrc.move_published(v.path, dest)
+                    v.path = apisrc.move_published(v.path, apisrc.archive_dir(self.st, d, a))
                 except OSError as e:
                     emit(-1, f"「{v.title}」发了,但挪不走:{e}")
                 emit(i, "已发" if r["status"] == "成功" else "已发(平台处理中)")

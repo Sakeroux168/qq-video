@@ -109,9 +109,20 @@ def _videos_in(d: str, nick: str, date: str) -> list[ApiVideo]:
     return out
 
 
-def archive_dir(st, date: str) -> str:
+def archive_dir(st, date: str, acc: dict | None = None) -> str:
+    """发完挪到哪。设置里勾了「按游戏分子文件夹」(默认勾)且给了号:再进一层游戏名文件夹。"""
     month = date.split(".")[0] if date else "?"
-    return str(st.get("api_archive") or DEFAULT_ARCHIVE).replace("{month}", month).replace("{date}", date)
+    d = str(st.get("api_archive") or DEFAULT_ARCHIVE).replace("{month}", month).replace("{date}", date)
+    if acc is not None and st.get("api_archive_by_game", True):
+        d = os.path.join(d, game_folder(acc))
+    return d
+
+
+def game_folder(acc: dict) -> str:
+    """号的游戏名文件夹 = 旧软件「账号」那一栏(CSGO / DNF / 光与夜之恋 / 暗区突围 …,
+    和用户在「企鹅号软件发布」下面自己建的子文件夹一样,2026-10-15 对过)。"""
+    name = str(acc.get("source_name") or acc.get("nick") or "其它").strip()
+    return re.sub(r'[<>:"/\\|?*]', "", name) or "其它"
 
 
 def move_published(path: str, dest_dir: str) -> str:

@@ -59,7 +59,8 @@ DEFAULTS = {
     "api_roots": [r"X:\知乎视频\游戏视频", r"X:\知乎视频\动漫视频"],
     "api_archive": r"X:\知乎视频\内容查看\{month}月发布视频\企鹅号\企鹅号软件发布",
     "api_threads": 1,          # 几个号一起发(旧软件「线程 1」)
-    "api_interval": 5,         # 每条之间歇几秒(旧软件「间隔 5 秒」)
+    "api_interval": 5,
+    "api_archive_by_game": True,   # 发完挪走时按游戏分子文件夹(CSGO / DNF …,用户的习惯)         # 每条之间歇几秒(旧软件「间隔 5 秒」)
     "api_picked": {},          # 手动给号选的文件夹:{日期: {号: 文件夹}}(像旧软件的「选择」)
     "topic_model": "qwen-plus",
 }
