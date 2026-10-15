@@ -52,6 +52,27 @@ class Records:
             self.conn.commit()
             return cur.rowcount
 
+    def manual_published(self, v, note: str = "人手动发的") -> None:
+        """人在罐头里自己发了(软件没摆成 / 没摆):记成已发,发布时间 = 现在(补记)。"""
+        with _LOCK:
+            self.conn.execute(
+                "INSERT INTO posts(date,account,employee,title,path,cover_kind,batch,status,prepared_at,published_at,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (v.date, v.account, v.employee, v.title, v.path, v.cover_kind, "手动", "已发", "", bj_str(), note))
+            self.conn.commit()
+
+    def failed_in_batch(self, batch: str) -> list[dict]:
+        """这批里没摆成、后来也没记已发的(人可能在罐头里手动补好一起发了)。"""
+        with _LOCK:
+            rows = [dict(r) for r in self.conn.execute("SELECT * FROM posts WHERE batch=? AND status='没摆成'", (batch,))]
+        return [r for r in rows if self.status_of(r["path"]) != "已发"]
+
+    def mark_failed_published(self, batch: str) -> int:
+        with _LOCK:
+            cur = self.conn.execute("UPDATE posts SET status='已发', published_at=?, note=note || '(人手动补好一起发的)' "
+                                    "WHERE batch=? AND status='没摆成'", (bj_str(), batch))
+            self.conn.commit()
+            return cur.rowcount
+
     def drop_batch(self, batch: str) -> int:
         """这批没发(人在罐头里删了 / 不要了):摆好的记录作废,下次还能再摆。"""
         with _LOCK:

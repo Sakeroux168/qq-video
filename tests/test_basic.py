@@ -136,6 +136,70 @@ def test_records(tmp: Path):
     check(wb.sheetnames == ["明细", "按员工汇总"] and wb["明细"].max_row == 3, "导出 Excel")
 
 
+def test_failed_steps(tmp: Path):
+    print("[封面没成也接着做声明 / 手动发的标成已发]")
+    from qe import prepare as P
+    from qe.folders import Video
+    from qe.records import Records
+    done = []
+
+    class FakeRunner(P.Runner):
+        def __init__(self):
+            self.log, self.stopped, self.shot_dir, self.page = (lambda m: None), (lambda: False), "", None
+
+        def open_account(self, name):
+            pass
+
+        def pending_videos(self):
+            return []
+
+        def go_create(self):
+            pass
+
+        def upload(self, vs):
+            pass
+
+        def ensure_visible(self):
+            pass
+
+        def select_tab(self, t):
+            pass
+
+        def wait_uploaded(self, t):
+            pass
+
+        def set_cover(self, v):
+            done.append(("封面", v.title))
+            if v.title == "坏封面":
+                raise P.PrepError("企鹅号说封面图尺寸太小")
+
+        def set_declaration(self):
+            done.append(("自主声明",))
+
+        def set_ai_declaration(self):
+            done.append(("AI",))
+
+        def shot(self, name):
+            pass
+
+        def _close_dialog(self):
+            pass
+
+    vs = [Video(path="a", title="坏封面", account="号", employee="员", date="1.1"),
+          Video(path="b", title="好的", account="号", employee="员", date="1.1")]
+    res = FakeRunner().prepare_batch("号", vs)
+    check(done[:3] == [("封面", "坏封面"), ("自主声明",), ("AI",)], f"封面没成:自主声明、AI 补充照样做 -> {done[:3]}")
+    check(not res[0][1] and "封面" in res[0][2] and "手动补" in res[0][2] and res[1][1], f"这条算没摆成,说清楚是封面 -> {res[0][2]}")
+    r = Records(tmp / "rf.sqlite")
+    r.prepared(vs[1], "B")
+    r.failed(vs[0], "B", "封面")
+    check([x["title"] for x in r.failed_in_batch("B")] == ["坏封面"], "这批里没摆成的认得出")
+    check(r.mark_failed_published("B") == 1 and r.status_of("a") == "已发", "手动补好一起发了:也记成已发")
+    c = Video(path="c", title="手动发的", account="号", employee="员", date="1.1")
+    r.manual_published(c)
+    check(r.status_of("c") == "已发" and r.rows("1.1")[-1]["published_at"], "「选中的标成已发」:记已发、有时间")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -303,6 +367,7 @@ if __name__ == "__main__":
     test_folders(tmp)
     test_cover(tmp)
     test_records(tmp)
+    test_failed_steps(tmp)
     test_bj_time()
     test_guard()
     test_window(tmp)

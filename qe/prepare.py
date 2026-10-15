@@ -439,12 +439,6 @@ class Runner:
             try:
                 self.select_tab(v.title)
                 self.wait_uploaded(v.title)
-                self.set_cover(v)
-                self.set_declaration()
-                self.set_ai_declaration()
-                out.append((v, True, ""))
-                on_one(v, True, "")
-                self.log("  摆好了")
             except Stop:
                 raise
             except (PrepError, CdpError) as e:
@@ -453,15 +447,44 @@ class Runner:
                 out.append((v, False, str(e)))
                 on_one(v, False, str(e))
                 self.log(f"  ✘ {e}")
+                continue
+            # 用户:封面没传上去时以前把后面的自主声明、AI 补充也跳过了 —— 每一步各管各的,前面不成后面照样做
+            errs = []
+            for what, step in (("封面", lambda: self.set_cover(v)), ("自主声明", self.set_declaration),
+                               ("AI生成声明", self.set_ai_declaration)):
+                try:
+                    step()
+                except Stop:
+                    raise
+                except (PrepError, CdpError) as e:
+                    self.shot(f"出错_{what}_{v.title[:8]}")
+                    self._close_dialog()
+                    errs.append(f"{what}:{e}")
+                    self.log(f"  ✘ {what}:{e}")
+            if errs:
+                why = ";".join(errs) + "。没弄好的那几步在罐头里手动补一下"
+                out.append((v, False, why))
+                on_one(v, False, why)
+            else:
+                out.append((v, True, ""))
+                on_one(v, True, "")
+                self.log("  摆好了")
         return out
 
     def _close_dialog(self):
-        """出错时把开着的弹框关掉(点右上角 ×,不点里面的按钮)。"""
-        try:
-            self.ev("""(() => { const d = window.__qe.dlg(); if (!d) return; const x = d.querySelector('.omui-dialog__close,[class*=close]'); if (x) x.click(); })()""")
+        """出错时把开着的弹框都关掉(点「取消」或右上角 ×,不点别的按钮)。换封面框和裁剪框可能同时开着,一个个关。"""
+        for _ in range(4):
+            try:
+                left = self.ev("""(() => { const ds = [...document.querySelectorAll('.omui-dialog')].filter(e => window.__qe.vis(e)); if (!ds.length) return 0;
+                    const d = ds.find(e => !e.querySelector('ezimage-cropper')) || ds[ds.length - 1];
+                    const b = [...d.querySelectorAll('button')].find(b => window.__qe.vis(b) && b.innerText.trim() === '取消');
+                    if (b) b.click(); else { const x = d.querySelector('.omui-dialog__close,[class*=close]'); if (x) x.click(); }
+                    return ds.length; })()""")
+            except Exception:
+                return
+            if not left:
+                return
             self.sleep(0.8)
-        except Exception:
-            pass
 
     def close(self):
         if self.page:

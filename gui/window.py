@@ -168,6 +168,9 @@ class MainWindow(QMainWindow):
         self.b_drop = QPushButton("这批不要了")
         self.b_drop.setToolTip("这批没发(在罐头里删了):记录作废,下次还会再摆这些视频。")
         self.b_drop.clicked.connect(self.batch_dropped)
+        self.b_manual = QPushButton("选中的标成已发")
+        self.b_manual.setToolTip("你在罐头里自己手动发了的(软件没摆成 / 没摆):选中点这个,记成已发,下次就不会再摆它")
+        self.b_manual.clicked.connect(self.mark_manual)
         self.b_preview = QPushButton("预览 / 调封面…")
         self.b_preview.setToolTip("看每个比例的裁剪框在哪;不满意就拖框(双击列表里一条也行)")
         self.b_preview.clicked.connect(lambda: self.preview_cover())
@@ -176,6 +179,7 @@ class MainWindow(QMainWindow):
         for b in (self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addStretch(1)
+        bar.addWidget(self.b_manual)
         bar.addWidget(self.b_preview)
         bar.addWidget(self.b_move)
         v.addLayout(bar)
@@ -330,6 +334,22 @@ class MainWindow(QMainWindow):
         self.lab_sum.setText(f"勾上的一共 {n} 条:已发 {st.count('已发')},摆好没发 {st.count('摆好')},还没发 {st.count('')}"
                              if n else "左边勾上要发的员工")
 
+    def mark_manual(self):
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
+        vids = [self.videos[r] for r in rows if self.rec.status_of(self.videos[r].path) != "已发"]
+        if not vids:
+            QMessageBox.information(self, "标成已发", "先在列表里选中你手动发了的那几条(已经是「已发」的不用选)。")
+            return
+        if QMessageBox.question(self, "标成已发", f"这 {len(vids)} 条你已经在罐头里手动发了?\n\n"
+                                + "\n".join(f"· {v.title[:30]}" for v in vids[:8])) != QMessageBox.StandardButton.Yes:
+            return
+        for v in vids:
+            self.rec.manual_published(v)
+        self.say(f"记下:{len(vids)} 条是你手动发的")
+        for r in rows:
+            self._fill_row(r)
+        self._update_sum()
+
     def preview_cover(self, row: int | None = None):
         """封面预览:看软件选的、拖框改。"""
         if self.cover_worker and self.cover_worker.isRunning():
@@ -434,6 +454,11 @@ class MainWindow(QMainWindow):
             return
         n = self.rec.mark_batch_published(self.batch_id)
         self.say(f"记下:这批 {n} 条发了({bj_str()})")
+        bad = self.rec.failed_in_batch(self.batch_id)
+        if bad and QMessageBox.question(self, "这批发好了", f"这批里还有 {len(bad)} 条软件没摆成(比如「{bad[0]['title'][:20]}」)。\n\n"
+                                        "你在罐头里手动补好、一起发出去了吗?") == QMessageBox.StandardButton.Yes:
+            m = self.rec.mark_failed_published(self.batch_id)
+            self.say(f"记下:没摆成的 {m} 条也是你手动补好一起发的")
         self.batch_id = ""
         self._after_batch()
 
