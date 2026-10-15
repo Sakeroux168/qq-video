@@ -186,8 +186,8 @@ class ApiTab(QWidget):
         self.b_check = QPushButton("检查")
         self.b_check.setToolTip("看每条:是不是竖屏、标题里有没有别的平台的名字、话题对不对。\n(换日期 / 刷新以后会自动检查新出现的)")
         self.b_check.clicked.connect(lambda: self.run_check())
-        self.b_vert = QPushButton("横屏转竖屏")
-        self.b_vert.setToolTip("上下糊底、中间原画面,转成 1080×1920。原片挪进同文件夹的「横屏原片」,不删。")
+        self.b_vert = QPushButton("转标准竖屏")
+        self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n原片挪进同文件夹的「横屏原片」,不删。")
         self.b_vert.clicked.connect(lambda: self.run_vertical())
         self.b_topic = QPushButton("整理话题")
         self.b_topic.setToolTip("一键把话题弄对:\n· 写法不对的(结尾空格、「# 话题」「##话题」、话题前粘的 n、重复的)按固定规矩改,不用 AI;\n"
@@ -465,7 +465,7 @@ class ApiTab(QWidget):
         for col, t in enumerate([v.title, res, "、".join(probs) if c else "", st]):
             it.setText(col, t)
             it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else t)
-        bg = GREEN if st.startswith("已发") else ORANGE if st == "结果不明" else RED if st.startswith(FAILED) or (c and "横屏" in probs) \
+        bg = GREEN if st.startswith("已发") else ORANGE if st == "结果不明" else RED if st.startswith(FAILED) or (c and checks.needs_vertical(c)) \
             else YELLOW if probs else None
         for col in range(len(COLS)):
             it.setBackground(col, bg if bg else QColor(0, 0, 0, 0))
@@ -625,7 +625,7 @@ class ApiTab(QWidget):
             mine = self.rows_of(nick)
             if sel:
                 for text, fn in ((f"检查选中的 {len(sel)} 条", lambda: self.run_check(sel)),
-                                 (f"横屏转竖屏(选中的 {len(sel)} 条)", lambda: self.run_vertical(sel)),
+                                 (f"转标准竖屏(选中的 {len(sel)} 条)", lambda: self.run_vertical(sel)),
                                  (f"整理话题(选中的 {len(sel)} 条)", lambda: self.run_topic(sel)),
                                  (f"只整理写法、不用 AI(选中的 {len(sel)} 条)", lambda: self.tidy_titles(sel)),
                                  (f"批量改话题(选中的 {len(sel)} 条)…", lambda: self.set_topic(sel)),
@@ -735,13 +735,13 @@ class ApiTab(QWidget):
                 if k % 20 == 0:
                     emit(PROGRESS, f"检查中 {k + 1}/{len(rows)}…")
             got = [vs[i] for i in rows]
-            land = sum(1 for v in got if v.checks.get("landscape"))
+            land = sum(1 for v in got if checks.needs_vertical(v.checks))
             plat = sum(1 for v in got if v.checks.get("platform"))
             many = sum(1 for v in got if len(v.checks.get("tags") or []) > 1)
             fmt = sum(1 for v in got if len(v.checks.get("tags") or []) <= 1 and topic.bad_format(v.title))
             unread = sum(1 for v in got if v.checks.get("bad_read"))
             ok = sum(1 for v in got if not checks.problems(v))
-            return (f"检查完:{len(got)} 条,能发 {ok};横屏 {land} · 标题有别的平台 {plat}(要你自己改)· "
+            return (f"检查完:{len(got)} 条,能发 {ok};横屏 / 偏方 {land} · 标题有别的平台 {plat}(要你自己改)· "
                     f"多个话题 {many} · 话题写法 / 结尾空格 {fmt}" + (f" · 视频读不出来 {unread}" if unread else "") +
                     ("" if ok == len(got) else "。话题问题点「整理话题」一键改"))
         self._start(fn, "" if quiet else f"检查中…({self._who(rows)})", quiet=quiet)
@@ -753,11 +753,11 @@ class ApiTab(QWidget):
     def run_vertical(self, only: list[int] | None = None):
         if self.busy():
             return
-        rows = [i for i in self.target_rows(only) if (self.videos[i].checks or {}).get("landscape") and not self._sent(i)]
+        rows = [i for i in self.target_rows(only) if checks.needs_vertical(self.videos[i].checks) and not self._sent(i)]
         if not rows:
-            QMessageBox.information(self, "横屏转竖屏", "这些里没有横屏的(没检查过的先点「检查」)。")
+            QMessageBox.information(self, "横屏转竖屏", "这些里没有横屏 / 偏方的(没检查过的先点「检查」)。")
             return
-        if not ask(self, "横屏转竖屏", f"{self._who(rows)}横屏转成竖屏?\n\n原片挪进同一个文件夹里的「横屏原片」,不删。", "转", "先不"):
+        if not ask(self, "横屏转竖屏", f"{self._who(rows)}转成标准竖屏(1080×1920)?横屏、偏方(3:4 / 正方形)的都转。\n\n原片挪进同一个文件夹里的「横屏原片」,不删。", "转", "先不"):
             return
         vs = self.videos
         ff = vertical.ffmpeg_path()

@@ -903,6 +903,29 @@ def test_ui_r1(tmp: Path):
     check(tab.minimumSizeHint().width() <= 1000, f"接口页选中号以后最小宽度 {tab.minimumSizeHint().width()} ≤ 1000")
 
 
+def test_squarish(tmp: Path):
+    print("[偏方的(3:4 / 正方形)也转成标准竖屏]")
+    from qe import checks, vertical
+
+    class V:
+        title = "a"
+    for (w, h), want in (((1080, 1920), []), ((720, 1280), []), ((1080, 1440), ["偏方,不是标准竖屏"]),
+                         ((1080, 1080), ["偏方,不是标准竖屏"]), ((1920, 1080), ["横屏"])):
+        V.checks = {"w": w, "h": h, "landscape": vertical.is_landscape({"w": w, "h": h}),
+                    "squarish": vertical.is_squarish({"w": w, "h": h}), "tags": []}
+        check(checks.problems(V) == want and checks.needs_vertical(V.checks) == bool(want), f"{w}×{h} -> {want or '能发'}")
+    ff = vertical.ffmpeg_path()
+    if ff:
+        import subprocess
+        d = tmp / "sq"
+        d.mkdir()
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=720x960:rate=25", "-t", "1",
+                        "-c:v", "libx264", str(d / "方.mp4")], check=True)
+        out, _orig = vertical.to_vertical(str(d / "方.mp4"), ff)
+        info = vertical.probe(out, ff)
+        check((info["w"], info["h"]) == (1080, 1920), f"3:4 转成 1080×1920 -> {info['w']}×{info['h']}")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1109,6 +1132,7 @@ if __name__ == "__main__":
     test_audit_r1(tmp)
     test_audit_r2(tmp)
     test_ui_r1(tmp)
+    test_squarish(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

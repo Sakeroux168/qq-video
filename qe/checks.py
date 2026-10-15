@@ -37,8 +37,14 @@ def check_one(v, words=None, ffmpeg: str = "") -> dict:
     info = vertical.probe(v.path, ffmpeg)
     tags = topic.split_topics(v.title)["tags"]
     v.checks = {"w": info["w"], "h": info["h"], "dur": info["dur"], "landscape": vertical.is_landscape(info),
+                "squarish": vertical.is_squarish(info),
                 "bad_read": not info["w"], "platform": platform_hits(v.title, words), "tags": tags}
     return v.checks
+
+
+def needs_vertical(c: dict) -> bool:
+    """要转成标准竖屏的:横屏,或者竖着但偏方(3:4 / 正方形)。"""
+    return bool((c or {}).get("landscape") or (c or {}).get("squarish"))
 
 
 def problems(v) -> list[str]:
@@ -49,6 +55,8 @@ def problems(v) -> list[str]:
         out.append("视频读不出来")
     elif c.get("landscape"):
         out.append("横屏")
+    elif c.get("squarish"):
+        out.append("偏方,不是标准竖屏")
     if c.get("platform"):
         out.append("标题有「" + "、".join(c["platform"]) + "」")
     if len(c.get("tags") or []) > 1:

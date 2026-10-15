@@ -61,6 +61,17 @@ def is_landscape(info: dict) -> bool:
     return info.get("w", 0) > info.get("h", 0) > 0
 
 
+# 标准竖屏 9:16 = 0.5625;宽 / 高超过 0.6 就算「不够竖」(3:4 = 0.75、正方形 = 1),
+# 用户 2026-10-15:「偏正方形的视频 尽量处理成标准竖屏」—— 和横屏一样一键转成 1080×1920(上下糊底,中间原画面)。
+VERTICAL_MAX = 0.6
+
+
+def is_squarish(info: dict) -> bool:
+    """竖着但不够竖(3:4、正方形这种);横屏不算在这里。"""
+    w, h = info.get("w", 0), info.get("h", 0)
+    return w > 0 and h > 0 and w <= h and w / h > VERTICAL_MAX
+
+
 def _cmd(ff: str, src: str, dst: str, nvenc: bool) -> list[str]:
     enc = (["-c:v", "h264_nvenc", "-preset", "fast", "-b:v", "6M"] if nvenc
            else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21"])
