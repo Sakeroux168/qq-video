@@ -710,6 +710,105 @@ def test_audit_r1(tmp: Path):
     check(gap >= 0.95, f"间隔:上一条发完以后歇够了再发 -> {gap:.2f} 秒")
 
 
+def test_audit_r2(tmp: Path):
+    print("[审查第 1 轮(教育 / 数据安全)修的:挪文件不留两份 / 设置不互相冲 / 坏文件留底 / 路径写法 / 停了的批次 / 没 png 不挡路]")
+    import json
+    from qe import fsops
+    from qe import folders as F
+    from qe.config import Settings
+    from qe.records import Records
+
+    # 1. 挪一天:有文件被占着 → 占着的留在原处,其它挪过去,不会两边各一份;关掉再挪接着挪,没有 (2)
+    root = tmp / "mv_src"
+    d = root / "10.15" / "小天地" / "张三"
+    d.mkdir(parents=True)
+    for n in ("a", "b", "c"):
+        (d / f"{n}.mp4").write_bytes(n.encode() * 10)
+    st = {"material_root": str(root), "archive_root": str(tmp / "mv_dst" / "{month}月")}
+    fh = open(d / "b.mp4", "rb")
+    try:
+        try:
+            F.move_date(st, "10.15")
+            err = ""
+        except fsops.MoveError as e:
+            err = str(e)
+    finally:
+        fh.close()
+    dst = tmp / "mv_dst" / "10月" / "10.15" / "小天地" / "张三"
+    both = [n for n in os.listdir(d) if (dst / n).exists()] if d.exists() else []
+    check(err and "b.mp4" in err and not both, f"挪一天:被占着的留在原处、不留两份 -> {err[:30]}")
+    F.move_date(st, "10.15", merge=True)
+    check(sorted(os.listdir(dst)) == ["a.mp4", "b.mp4", "c.mp4"] and not (root / "10.15").exists(),
+          "关掉再挪:接着挪完,没有 (2)")
+    try:
+        F.move_date({"material_root": str(root), "archive_root": ""}, "10.15")
+        err = ""
+    except Exception as e:
+        err = str(e)
+    check("发完挪到" in err, "「发完挪到」空着:说人话")
+
+    # 4. 设置:两份各改各的,不互相冲掉
+    sp = tmp / "st_merge.json"
+    a = Settings(sp)
+    b = Settings(sp)
+    b["api_picked"] = {"10.15": {"号": "X"}}
+    b.save()
+    a["last_date"] = "10.16"
+    a.save()
+    disk = json.loads(sp.read_text("utf-8"))
+    check(disk.get("api_picked") == {"10.15": {"号": "X"}} and disk.get("last_date") == "10.16" and a["api_picked"] == b["api_picked"],
+          "设置:各改各的,后保存的不会冲掉先保存的")
+
+    # 5. 设置文件坏了:原文件留底
+    bad = tmp / "st_bad.json"
+    bad.write_text('{"material_root": "Q:\\\\x", ', "utf-8")
+    c = Settings(bad)
+    check(c.broken and os.path.exists(c.broken) and c["material_root"] == r"X:\知乎视频\小学生教育", "设置坏了:原文件改名留着,用默认")
+    nul = tmp / "st_null.json"
+    nul.write_text("null", "utf-8")
+    check(Settings(nul).broken, "设置内容是 null:不崩")
+
+    # 7. 路径写法不同也认得出发过
+    r = Records(tmp / "a2.sqlite")
+
+    class V:
+        date, account, employee, title, cover_kind = "10.15", "号", "员", "t", ""
+        path = r"X:\知乎视频\小学生教育\10.15\a.mp4"
+    r.manual_published(V)
+    check(r.status_of("x:/知乎视频/小学生教育/10.15/a.mp4") == "已发", "素材文件夹换个写法(x:/),发过的照样认得")
+
+    # 6. 补记没摆成:已经记过已发的不再记,汇总不多算
+    class W:
+        date, account, employee, title, cover_kind = "10.15", "号", "员", "w", ""
+        path = r"X:\w.mp4"
+    r.failed(W, "B1", "封面没成")
+    r.manual_published(W)
+    r.mark_failed_published("B1")
+    srow = [x for x in r.summary("10.15") if x["employee"] == "员"][0]
+    check(srow["sent"] == 2, f"补记没摆成:不重复算 -> 已发 {srow['sent']}")
+
+    # 2. 摆到一半停了:已经摆好的那几条照样等人确认
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    QApplication.instance() or QApplication([])
+    from gui.window import MainWindow
+    st2 = Settings(tmp / "aw.json")
+    st2["material_root"] = str(tmp / "nothing")
+    st2["api_roots"] = [str(tmp / "nothing")]
+    st2["ai_key"] = "test"
+    rec = Records(tmp / "aw.sqlite")
+    w = MainWindow(st2, rec)
+    w.batch_id = "B9"
+    rec.prepared(V, "B9")
+    real_w = QMessageBox.warning
+    QMessageBox.warning = staticmethod(lambda *a, **k: None)
+    try:
+        w._batch_done(None, "停下了")
+    finally:
+        QMessageBox.warning = real_w
+    check(w.batch_id == "B9" and w.b_sent.isEnabled(), "摆到一半停了:摆好的那几条还能点「这批发好了 / 不要了」")
+    w.close()
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -753,6 +852,8 @@ def test_window(tmp: Path):
         _img(e / f"{i:02d}.第{i}条视频标题够长.jpg", 270, 480)
     st = Settings(tmp / "sw.json")
     st["material_root"] = str(root)
+    st["api_roots"] = [str(tmp / "api_none")]
+    st["ai_key"] = "test"
     w = MainWindow(st, Records(tmp / "rw.sqlite"))
     check(w.c_date.currentData() == "" and w.c_date.count() == 3, "打开时不自动选日期,要人选")
     w.c_date.setCurrentIndex(w.c_date.findData("10.16"))
@@ -901,6 +1002,7 @@ if __name__ == "__main__":
     test_api(tmp)
     test_api_tab(tmp)
     test_audit_r1(tmp)
+    test_audit_r2(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

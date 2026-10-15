@@ -183,7 +183,7 @@ class ApiTab(QWidget):
     def say(self, m: str):
         """日志写在这页下面(也照样写到主窗口)。"""
         self.logbox.appendPlainText(f"[{bj_str()[11:]}] {m}")
-        self._say_main(m)
+        self._say_main(f"[接口] {m}")
 
     def _busy(self, on: bool):
         for b in (self.b_check, self.b_vert, self.b_tidy, self.b_topic, self.b_settopic, self.b_undo, self.b_pub, self.b_clear,

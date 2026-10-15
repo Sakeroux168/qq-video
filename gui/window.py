@@ -278,8 +278,9 @@ class MainWindow(QMainWindow):
 
     def _load_tree(self):
         date = self.c_date.currentData() or ""
-        self.st["last_date"] = date
-        self.st.save()
+        if self.st.get("last_date") != date:          # 真换了日期才存(审查:原来一打开就存一次,会冲掉别处改的设置)
+            self.st["last_date"] = date
+            self.st.save()
         self.tree.blockSignals(True)
         self.tree.clear()
         if date:
@@ -468,7 +469,7 @@ class MainWindow(QMainWindow):
 
     def next_batch(self) -> tuple[str, list]:
         """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
-        todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why)]
+        todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and v.cover]
         if not todo:
             return "", []
         acc = todo[0].account
@@ -490,12 +491,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "企鹅号发布助手", "勾上的员工里没有要发的了(都发过 / 摆好了)。")
             return
         warn = [v for v in vids if v.warn]
-        nocover = [v for v in vids if not v.cover]
-        if nocover:
-            QMessageBox.warning(self, "摆下一批", f"这批里有 {len(nocover)} 条没有无字封面(png),比如「{nocover[0].title[:24]}」。\n\n"
-                                "jpg 有字不能用,让员工补上 png 再摆。")
-            return
+        # 没有无字封面(png)的不摆,跳过(审查:原来一条没 png 就挡住这个号后面所有的)
+        nocover = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and not v.cover]
         msg = f"在罐头里给「{acc}」摆 {len(vids)} 条:\n\n" + "\n".join(f"· {v.title[:30]}" for v in vids)
+        if nocover:
+            msg += (f"\n\n另有 {len(nocover)} 条没有无字封面(png)先跳过,比如「{nocover[0].title[:24]}」"
+                    "(jpg 有字不能用,让员工补上 png)。")
         if warn:
             msg += f"\n\n其中 {len(warn)} 条封面标黄,建议先点「预览 / 调封面」看一眼。"
         auto = self.k_auto.isChecked()
@@ -532,7 +533,8 @@ class MainWindow(QMainWindow):
     def _batch_done(self, res, err, pub=""):
         ok = [x for x in (res or []) if x[1]]
         bad = [x for x in (res or []) if not x[1]]
-        if not ok:
+        ready = self.rec.ready_in_batch(self.batch_id) if self.batch_id else 0
+        if not ok and not ready:
             self.batch_id = ""                         # 一条都没摆上:不用等人确认
         if pub == "ok":
             n = self.rec.mark_batch_published(self.batch_id)
@@ -543,15 +545,19 @@ class MainWindow(QMainWindow):
                 self.say("3 秒后摆下一批…(点「停」不再继续)")
                 self._chain_stop = False
                 from PySide6.QtCore import QTimer
-                QTimer.singleShot(3000, lambda: None if getattr(self, "_chain_stop", False) else self.start_batch(chained=True))
+                QTimer.singleShot(3000, lambda: None if getattr(self, "_chain_stop", False) or not self.k_auto.isChecked()
+                                  else self.start_batch(chained=True))
             elif self.k_auto.isChecked():
                 QMessageBox.information(self, "发完了", "勾上的员工都发完了。")
             return
         if pub:
             self.say(f"⚠ {pub}")
         if err:
-            self.say(f"✘ 没摆完:{err}")
-            QMessageBox.warning(self, "摆下一批", f"没摆完:{err}" + (f"\n\n已经摆好 {len(ok)} 条,在罐头里看看。" if ok else ""))
+            n_ok = max(len(ok), ready)
+            self.say(f"✘ 没摆完:{err}" + (f"(已经摆好 {n_ok} 条,在罐头里看看)" if n_ok else ""))
+            QMessageBox.warning(self, "摆下一批", f"没摆完:{err}" + (
+                f"\n\n已经摆好 {n_ok} 条,在罐头里看看:要发就点「发布 → 全部发布」再回来点「这批发好了」;"
+                "不要就在罐头里删掉,回来点「这批不要了」。" if n_ok else ""))
         elif ok:
             text = f"「{self.batch_videos[0].account}」摆好 {len(ok)} 条。\n\n去罐头里检查,没问题就点「发布 → 全部发布」,再回来点「这批发好了」。"
             if bad:
@@ -615,28 +621,70 @@ class MainWindow(QMainWindow):
             msg += f"\n注意:里面还有 {len(left)} 条软件没记成「已发」(比如「{left[0].title[:20]}」)。"
         if QMessageBox.question(self, "这天发完了,挪走", msg + "\n挪吗?") != QMessageBox.StandardButton.Yes:
             return
+        from qe.fsops import MoveError
         try:
-            F.move_date(self.st, date)
+            self._bg(f"正在把「{date}」挪走…(网络盘上可能要一会儿)", lambda: F.move_date(self.st, date))
         except FileExistsError:
             # 先留的口子(用户:「先留个功能接口 后面我搞清楚在做」):目标已有同名日期文件夹,问人要不要合并
             if QMessageBox.question(self, "已经有了", f"那边已经有「{date}」文件夹了:\n{dst}\n\n把这边的东西合并进去吗?(同名的文件不覆盖,改名加 (2))"
                                     ) != QMessageBox.StandardButton.Yes:
                 return
             try:
-                F.move_date(self.st, date, merge=True)
-            except OSError as e:
-                QMessageBox.warning(self, "挪走", f"合并时出错:{e}")
+                self._bg(f"正在把「{date}」合并过去…", lambda: F.move_date(self.st, date, merge=True))
+            except MoveError as e:
+                QMessageBox.warning(self, "挪走", str(e))
+                self._load_dates()
                 return
+            except OSError as e:
+                QMessageBox.warning(self, "挪走", f"合并时出错:{e.strerror or e}")
+                return
+        except MoveError as e:
+            QMessageBox.warning(self, "挪走", str(e))
+            self._load_dates()
+            return
         except OSError as e:
-            QMessageBox.warning(self, "挪走", f"挪不动:{e}\n\n(有文件开着?关掉再试)")
+            QMessageBox.warning(self, "挪走", f"挪不动:{e.strerror or e}\n\n(有文件开着?关掉再试)")
             return
         self.say(f"「{date}」挪到了 {dst}")
         self._load_dates()
 
+    def _bg(self, title: str, fn):
+        """fn 放到后台线程跑(挪网络盘上几个 G 的文件夹,窗口不卡成「未响应」),期间转个圈。返回 fn 的结果,出错照样抛出来。"""
+        from PySide6.QtCore import QEventLoop, QThread
+        from PySide6.QtWidgets import QProgressDialog
+        res = {}
+
+        class T(QThread):
+            def run(self_):
+                try:
+                    res["v"] = fn()
+                except BaseException as e:            # 交回界面线程再抛
+                    res["e"] = e
+        t = T(self)
+        loop = QEventLoop()
+        t.finished.connect(loop.quit)
+        dlg = QProgressDialog(title, None, 0, 0, self)
+        dlg.setWindowTitle("请稍等")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(400)
+        t.start()
+        if t.isRunning():
+            loop.exec()
+        t.wait()
+        dlg.close()
+        if "e" in res:
+            raise res["e"]
+        return res.get("v")
+
     # ---------------- 记录 ----------------
     def refresh_records(self):
         cur = self.c_rec_date.currentData()
-        dates = sorted({r["date"] for r in self.rec.rows()})
+        def _dk(d):
+            try:
+                return tuple(int(x) for x in str(d).split(".")[:2])
+            except ValueError:
+                return (99, 99)
+        dates = sorted({r["date"] for r in self.rec.rows()}, key=_dk)
         self.c_rec_date.blockSignals(True)
         self.c_rec_date.clear()
         self.c_rec_date.addItem("全部", "")
@@ -665,6 +713,8 @@ class MainWindow(QMainWindow):
         try:
             self.rec.export_xlsx(p, date)
             QMessageBox.information(self, "导出", f"导出到了:\n{p}")
+        except PermissionError:
+            QMessageBox.warning(self, "导出", "导不出来:这个文件在 Excel 里开着,关掉再导(或者换个文件名)。")
         except Exception as e:
             QMessageBox.warning(self, "导出", f"导不出来:{e}")
 
@@ -722,7 +772,8 @@ class MainWindow(QMainWindow):
                     accs.append({"name": n.strip(), "aliases": [x.strip() for x in a.replace(",", "、").replace("，", "、").split("、") if x.strip()]})
             elif line.strip():
                 accs.append({"name": line.strip(), "aliases": []})
-        self.st.update(material_root=e_root.text().strip(), archive_root=e_arc.text().strip(), accounts=accs or self.st["accounts"],
+        self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
+                       archive_root=e_arc.text().strip() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
                        api_threads=sp_thr.value(), api_interval=sp_gap.value(),
                        api_archive=e_api_arc.text().strip() or self.st.get("api_archive", ""),
@@ -732,6 +783,9 @@ class MainWindow(QMainWindow):
         self._load_dates()
 
     def closeEvent(self, e):
+        if self.cover_worker and self.cover_worker.isRunning():
+            self.cover_worker.stop = True
+            self.cover_worker.wait(10000)
         if self.worker and self.worker.isRunning():
             if QMessageBox.question(self, "企鹅号发布助手", "还在摆,要停下来关掉吗?") != QMessageBox.StandardButton.Yes:
                 e.ignore()

@@ -126,14 +126,8 @@ def game_folder(acc: dict) -> str:
 
 
 def move_published(path: str, dest_dir: str) -> str:
-    """发完把视频挪到「X月发布视频 / 企鹅号 / 企鹅号软件发布」(平铺,和旧软件一样只挪视频)。重名加 (2)。返回新位置。"""
-    import shutil
+    """发完把视频挪到「X月发布视频 / 企鹅号 / 企鹅号软件发布 / 游戏名」(平铺,和旧软件一样只挪视频)。重名加 (2)。返回新位置。
+    走 fsops.safe_move_file:被占着就报错留在原处,不会原处和归档各一份。"""
+    from .fsops import safe_move_file, unique
     os.makedirs(dest_dir, exist_ok=True)
-    stem, ext = os.path.splitext(os.path.basename(path))
-    dst = os.path.join(dest_dir, stem + ext)
-    k = 2
-    while os.path.exists(dst):
-        dst = os.path.join(dest_dir, f"{stem} ({k}){ext}")
-        k += 1
-    shutil.move(path, dst)
-    return dst
+    return safe_move_file(path, unique(os.path.join(dest_dir, os.path.basename(path))))

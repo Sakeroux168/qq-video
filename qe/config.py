@@ -67,22 +67,75 @@ DEFAULTS = {
 
 
 class Settings(dict):
+    """设置。保存时只写这次改过的键,别的键以文件里最新的为准(审查:两份软件 / 别的进程写过设置,
+    后保存的一方会把对方改的全冲掉)。设置文件坏了:原文件改名留着(设置.json.坏了-时间),用默认值,broken 里记着。"""
+
     def __init__(self, path: Path | None = None):
         super().__init__()
         self.path = Path(path) if path else data_dir() / "设置.json"
-        self.update(json.loads(json.dumps(DEFAULTS)))
-        try:
-            self.update(json.loads(self.path.read_text("utf-8")))
-        except (OSError, ValueError):
-            pass
+        self.broken = ""
+        self._dirty: set = set()
+        super().update(json.loads(json.dumps(DEFAULTS)))
+        disk = self._read()
+        if disk is not None:
+            super().update(disk)
         self.pop("api_parallel", None)         # 早先的名字(默认 3 个号一起发),改成 api_threads 默认 1
+
+    def _read(self):
+        """读文件:没有 → None;坏了 → 改名留着,返回 None。"""
+        try:
+            txt = self.path.read_text("utf-8")
+        except OSError:
+            return None
+        try:
+            d = json.loads(txt)
+            if isinstance(d, dict):
+                return d
+        except ValueError:
+            pass
+        bad = self.path.with_name(f"{self.path.name}.坏了-{bj_now().strftime('%Y%m%d-%H%M%S')}")
+        try:
+            os.replace(self.path, bad)
+            self.broken = str(bad)
+        except OSError:
+            pass
+        return None
+
+    def __setitem__(self, k, v):
+        self._dirty.add(k)
+        super().__setitem__(k, v)
+
+    def update(self, *a, **kw):
+        d = dict(*a, **kw)
+        self._dirty.update(d)
+        super().update(d)
+
+    def pop(self, k, *default):
+        if k in self:
+            self._dirty.add(k)
+        return super().pop(k, *default)
 
     def save(self):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            disk = {}
+            try:
+                d = json.loads(self.path.read_text("utf-8"))
+                disk = d if isinstance(d, dict) else {}
+            except (OSError, ValueError):
+                disk = {}
+            for k in list(self._dirty):           # 只把这次改过的盖上去;别人改的别的键保留
+                if k in self:
+                    disk[k] = self[k]
+                else:
+                    disk.pop(k, None)
+            for k, v in disk.items():             # 内存里也跟上别人改的
+                if k not in self._dirty:
+                    super().__setitem__(k, v)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(dict(self), ensure_ascii=False, indent=1), "utf-8")
+            tmp.write_text(json.dumps(disk, ensure_ascii=False, indent=1), "utf-8")
             os.replace(tmp, self.path)
+            self._dirty.clear()
         except OSError:
             pass
 

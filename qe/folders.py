@@ -4,7 +4,6 @@
 """
 import os
 import re
-import shutil
 from dataclasses import dataclass, field
 
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".flv", ".wmv")
@@ -155,42 +154,24 @@ def archive_target(st, date: str) -> str:
     return os.path.join(root, date)
 
 
-def move_date(st, date: str, merge: bool = False) -> str:
+def move_date(st, date: str, merge: bool = False, on_file=None) -> str:
     """把整个日期文件夹剪切到归档那里。目标已经有同名文件夹:merge=False 抛 FileExistsError(界面上问人);
-    merge=True 把里面的东西挪进去(同名文件不覆盖,改名加 (2))。返回目标路径。"""
+    merge=True 把里面的东西挪进去(同名文件不覆盖,改名加 (2))。返回目标路径。
+    一个文件一个文件挪(qe/fsops.move_tree):被占着的留在原处、报出来,不会两边各一份;关掉占用的再点一次接着挪。"""
+    from .fsops import MoveError, move_tree
     src = os.path.join(st["material_root"], date)
+    if not month_of(date):
+        raise MoveError(f"「{date}」这个文件夹名认不出月份(要像 10.15 这样),没挪")
+    if not str(st.get("archive_root") or "").strip():
+        raise MoveError("设置里「发完挪到」是空的,先填好再挪")
     dst = archive_target(st, date)
     if not os.path.isdir(src):
         raise FileNotFoundError(src)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if not os.path.exists(dst):
-        shutil.move(src, dst)
-        return dst
-    if not merge:
+    if os.path.exists(dst) and not merge:
         raise FileExistsError(dst)
-    _merge(src, dst)
-    try:
-        shutil.rmtree(src) if not _has_files(src) else None
-    except OSError:
-        pass
+    n, errs = move_tree(src, dst, on_file=on_file)
+    if errs:
+        nl = "\n"
+        raise MoveError(f"挪了 {n} 个文件,还有 {len(errs)} 个挪不动(留在原处,没有重复):{nl}" + nl.join(errs[:5]) +
+                        (f"{nl}…" if len(errs) > 5 else "") + f"{nl}{nl}关掉占着的程序后再点一次「挪走」,会接着挪剩下的。")
     return dst
-
-
-def _has_files(d: str) -> bool:
-    return any(files for _r, _d, files in os.walk(d))
-
-
-def _merge(src: str, dst: str):
-    os.makedirs(dst, exist_ok=True)
-    for n in os.listdir(src):
-        s, t = os.path.join(src, n), os.path.join(dst, n)
-        if os.path.isdir(s):
-            _merge(s, t)
-            continue
-        if os.path.exists(t):
-            stem, ext = os.path.splitext(n)
-            k = 2
-            while os.path.exists(t):
-                t = os.path.join(dst, f"{stem} ({k}){ext}")
-                k += 1
-        shutil.move(s, t)

@@ -2,10 +2,16 @@
 
 「发的时间」= 用户在罐头里点完「全部发布」、回软件点「这批发好了」的时间(发布是人点的,软件只能这么记)。
 """
+import os
 import sqlite3
 import threading
 
 from .config import bj_str, data_dir
+
+
+def pkey(path: str) -> str:
+    """路径的统一写法(大小写、斜杠、..):设置里素材文件夹换个写法(X:/ x:\\),发过的也认得出来(审查第 7 条)。"""
+    return os.path.normcase(os.path.normpath(str(path or "")))
 
 _LOCK = threading.RLock()
 _SCHEMA = """
@@ -24,10 +30,37 @@ CREATE INDEX IF NOT EXISTS i_posts_date ON posts(date, account);
 class Records:
     def __init__(self, path=None):
         self.path = str(path or (data_dir() / "发布记录.sqlite"))
-        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+        self.conn = self._open()
         self.conn.row_factory = sqlite3.Row
+        self.conn.create_function("nk", 1, pkey, deterministic=True)
         with _LOCK:
             self.conn.executescript(_SCHEMA)
+            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)")]
+            if "pkey" not in cols:
+                self.conn.execute("ALTER TABLE posts ADD COLUMN pkey TEXT")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS i_posts_pkey ON posts(pkey)")
+            self.conn.commit()
+            self._fill()
+
+    def _open(self):
+        """打开记录库;库坏了(不是 sqlite 文件)就把坏的改名留着,建个新的(审查:原来直接开不起来、也没提示)。"""
+        self.broken = ""
+        conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+        try:
+            conn.execute("PRAGMA schema_version").fetchone()
+            return conn
+        except sqlite3.DatabaseError:
+            conn.close()
+            from .config import bj_now
+            bad = f"{self.path}.坏了-{bj_now().strftime('%Y%m%d-%H%M%S')}"
+            os.replace(self.path, bad)
+            self.broken = bad
+            return sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+
+    def _fill(self):
+        """新记录(不管是哪个版本的软件写的)补上 pkey。有索引,没有要补的时候很快。"""
+        with _LOCK:
+            self.conn.execute("UPDATE posts SET pkey=nk(path) WHERE pkey IS NULL")
             self.conn.commit()
 
     def prepared(self, v, batch: str, note: str = "") -> int:
@@ -95,10 +128,11 @@ class Records:
     def resolve_unsure(self, path: str, sent: bool) -> int:
         """人去后台看过了:发了 → 已发;没发 → 没发成(能再发)。"""
         with _LOCK:
+            self._fill()
             cur = self.conn.execute(
                 "UPDATE posts SET status=?, published_at=CASE WHEN ?='已发' THEN ? ELSE published_at END, "
-                "note=note || '(人去后台确认过)' WHERE path=? AND status IN ('发布中','结果不明')",
-                ("已发" if sent else "没发成", "已发" if sent else "", bj_str(), path))
+                "note=note || '(人去后台确认过)' WHERE pkey=? AND status IN ('发布中','结果不明')",
+                ("已发" if sent else "没发成", "已发" if sent else "", bj_str(), pkey(path)))
             self.conn.commit()
             return cur.rowcount
 
@@ -110,10 +144,17 @@ class Records:
 
     def mark_failed_published(self, batch: str) -> int:
         with _LOCK:
+            self._fill()
             cur = self.conn.execute("UPDATE posts SET status='已发', published_at=?, note=note || '(人手动补好一起发的)' "
-                                    "WHERE batch=? AND status='没摆成'", (bj_str(), batch))
+                                    "WHERE batch=? AND status='没摆成' AND pkey NOT IN (SELECT pkey FROM posts WHERE status='已发')",
+                                    (bj_str(), batch))
             self.conn.commit()
             return cur.rowcount
+
+    def ready_in_batch(self, batch: str) -> int:
+        """这批里摆好了、还没确认发没发的条数(摆到一半停了 / 出错了也要人确认)。"""
+        with _LOCK:
+            return int(self.conn.execute("SELECT COUNT(*) FROM posts WHERE batch=? AND status='摆好'", (batch,)).fetchone()[0])
 
     def drop_batch(self, batch: str) -> int:
         """这批没发(人在罐头里删了 / 不要了):摆好的记录作废,下次还能再摆。"""
@@ -126,7 +167,8 @@ class Records:
         """这条视频现在的状态:已发 > 结果不明(接口发了一半 / 没收到回话,不能自动再发) > 摆好 > ''
         (没摆过 / 没摆成 / 没发成 / 作废都算没发)。"""
         with _LOCK:
-            rows = [r["status"] for r in self.conn.execute("SELECT status FROM posts WHERE path=?", (path,))]
+            self._fill()
+            rows = [r["status"] for r in self.conn.execute("SELECT status FROM posts WHERE pkey=?", (pkey(path),))]
         if "已发" in rows:
             return "已发"
         if "发布中" in rows or "结果不明" in rows:
@@ -140,7 +182,7 @@ class Records:
         return self.status_of(path) in ("已发", "结果不明")
 
     def rows(self, date: str = "", account: str = "", employee: str = "") -> list[dict]:
-        q, a = "SELECT * FROM posts WHERE status IN ('已发','摆好','结果不明','发布中')", []
+        q, a = "SELECT * FROM posts WHERE status IN ('已发','摆好','结果不明','发布中','没发成')", []
         for k, val in (("date", date), ("account", account), ("employee", employee)):
             if val:
                 q += f" AND {k}=?"
@@ -150,7 +192,7 @@ class Records:
 
     def summary(self, date: str = "") -> list[dict]:
         """按 日期 / 号 / 员工 数:已发几条、摆好还没发几条。"""
-        q = ("SELECT date, account, employee, SUM(status='已发') AS sent, SUM(status='摆好') AS ready, "
+        q = ("SELECT date, account, employee, COUNT(DISTINCT CASE WHEN status='已发' THEN path END) AS sent, COUNT(DISTINCT CASE WHEN status='摆好' THEN path END) AS ready, "
              "MIN(CASE WHEN status='已发' THEN published_at END) AS first_at, MAX(CASE WHEN status='已发' THEN published_at END) AS last_at "
              "FROM posts WHERE status IN ('已发','摆好')" + (" AND date=?" if date else "") +
              " GROUP BY date, account, employee ORDER BY date, account, employee")

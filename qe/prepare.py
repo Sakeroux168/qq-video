@@ -18,6 +18,7 @@ import time
 
 from . import cover as C
 from .cdp import CdpError, Page, find_ports, targets
+from .config import bj_now
 
 QE_HOST = "om.qq.com"
 HOME_HOST = "czgts.cn"
@@ -111,7 +112,7 @@ class Runner:
     def shot(self, name: str):
         if self.shot_dir and self.page:
             os.makedirs(self.shot_dir, exist_ok=True)
-            self.page.shot(os.path.join(self.shot_dir, f"{time.strftime('%H%M%S')}_{name}.png"))
+            self.page.shot(os.path.join(self.shot_dir, f"{bj_now().strftime('%H%M%S')}_{name}.png"))
 
     # ---------------- 找号、进发布页 ----------------
     def _home(self) -> Page:
@@ -544,6 +545,8 @@ class Runner:
                 raise PrepError(f"点完发布弹出了一个框,软件不认识,停下来了(请你看一眼):{dlg}")
             if err:
                 raise PrepError(f"点完发布页面上提示:{err}")
+            if "login" in (path or "").lower() or "passport" in (path or "").lower():
+                raise PrepError("点完发布页面跳到了登录页(掉登录了?),不知道发没发出去,请你去后台看一眼")
             if not left or "/creation/video" not in (path or ""):
                 self.log("这批发出去了")
                 return "ok"
