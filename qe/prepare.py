@@ -8,7 +8,9 @@
   5. AI 生成声明(「进行补充>」→ 不勾 →「提交」,只提交这份声明)
 分类不选。
 
-红线:**绝不点 发布 / 定时发布 / 存草稿**。所有点击都过 _guard,带这些字的一律拒绝。
+红线:平时**绝不点 发布 / 定时发布 / 存草稿**。所有点击都过 _guard,带这些字的一律拒绝。
+唯一例外:用户在界面上勾了「摆好后软件自己点全部发布」(2026-10-15 用户同意),走 publish_all —— 只在整批都摆好、
+没有标黄时才点;点完弹出没见过的框就停下交给人。
 """
 import os
 import re
@@ -496,6 +498,56 @@ class Runner:
                 on_one(v, True, "")
                 self.log("  摆好了")
         return out
+
+    # ---------------- 软件自己点「全部发布」(用户 2026-10-15 同意,要在界面上勾选才会做) ----------------
+    def publish_all(self, titles: list[str]) -> str:
+        """这批都摆好了:鼠标移到「发布」上 → 弹出「全部发布 / 单条发布」→ 点「全部发布」(只有一条时没有菜单,直接点「发布」)。
+        点完等发布页上这批视频的小页签都没了 = 发出去了。返回 "ok";
+        弹出没见过的框 / 报错 / 等不到结果:抛 PrepError(一个字都不再点,交给人看)。"""
+        self.ensure_visible()
+        pend = self.pending_videos()
+        if sorted(pend) != sorted(titles):
+            raise PrepError(f"发布页上的视频和这批对不上(页面上 {len(pend)} 条,这批 {len(titles)} 条),不敢点发布")
+        if self.ev("!!window.__qe.dlg()"):
+            raise PrepError("发布页上还开着弹框,不敢点发布")
+        btn = self.ev("""(() => { const b = [...document.querySelectorAll('button')].filter(e => window.__qe.vis(e) && e.innerText.trim() === '发布').pop();
+            if (!b) return null; b.scrollIntoView({block: 'nearest'}); const x = b.getBoundingClientRect(); return [x.left + x.width / 2, x.top + x.height / 2]; })()""")
+        if not btn:
+            raise PrepError("找不到「发布」按钮")
+        for dx in (-30, -10, 0):                        # 鼠标慢慢移上去,菜单才弹出来
+            self.page.cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": btn[0] + dx, "y": btn[1]})
+            self.sleep(0.3)
+        self.sleep(0.8)
+        menu = self.ev("""(() => { const b = [...document.querySelectorAll('button.tool_batch_publish,button')].find(e => window.__qe.vis(e) && e.innerText.trim() === '全部发布');
+            if (!b) return null; const x = b.getBoundingClientRect(); return [x.left + x.width / 2, x.top + x.height / 2]; })()""")
+        if len(titles) > 1 and not menu:
+            raise PrepError("鼠标移到「发布」上没弹出「全部发布」")
+        n_msg0 = len(self.ev("document.body.innerText") or "")
+        if menu:
+            self.log(f"点「全部发布」({len(titles)} 条)")
+            self.page.click_xy(menu[0], menu[1])
+        else:
+            self.log("只有 1 条:点「发布」")
+            self.page.click_xy(btn[0], btn[1])
+        end = time.time() + 180
+        while time.time() < end:
+            self.sleep(1.5)
+            try:
+                left = self.pending_videos()
+                path = self.page.ev("location.pathname")
+                dlg = self.ev("(() => { const d = window.__qe.dlg(); return d ? (d.innerText || '').replace(/\\s+/g, ' ').slice(0, 120) : ''; })()")
+                err = self.ev("""[...document.querySelectorAll('[class*=message],[class*=toast],[class*=notice]')].filter(e => window.__qe.vis(e))
+                    .map(e => (e.innerText || '').trim()).filter(t => /失败|错误|不能|未通过|请/.test(t)).slice(0, 2).join(' / ')""")
+            except CdpError:
+                continue                                # 页面在跳转
+            if dlg:
+                raise PrepError(f"点完发布弹出了一个框,软件不认识,停下来了(请你看一眼):{dlg}")
+            if err:
+                raise PrepError(f"点完发布页面上提示:{err}")
+            if not left or "/creation/video" not in (path or ""):
+                self.log("这批发出去了")
+                return "ok"
+        raise PrepError("点完发布 3 分钟还没看到发出去(发布页上视频还在),请你看一眼")
 
     def _close_dialog(self):
         """出错时把开着的弹框都关掉(点「取消」或右上角 ×,不点别的按钮)。换封面框和裁剪框可能同时开着,一个个关。"""

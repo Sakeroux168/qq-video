@@ -52,11 +52,12 @@ class CoverWorker(QThread):
 class BatchWorker(QThread):
     log = Signal(str)
     one = Signal(object, bool, str)
-    finished_batch = Signal(object, str)      # (结果列表 or None, 出错说明)
+    finished_batch = Signal(object, str, str)      # (结果列表 or None, 出错说明, 自动发布:""没发 / "ok"发了 / 其它 = 为什么没发)
 
-    def __init__(self, account, videos, shot_dir, parent=None):
+    def __init__(self, account, videos, shot_dir, parent=None, auto_publish: bool = False):
         super().__init__(parent)
         self.account, self.videos, self.shot_dir = account, videos, shot_dir
+        self.auto_publish = auto_publish
         self._stop = False
 
     def stop(self):
@@ -68,13 +69,26 @@ class BatchWorker(QThread):
         try:
             r = Runner(log=self.log.emit, stopped=lambda: self._stop, shot_dir=self.shot_dir)
             res = r.prepare_batch(self.account, self.videos, on_one=lambda v, ok, why: self.one.emit(v, ok, why))
-            self.finished_batch.emit(res, "")
+            pub = ""
+            if self.auto_publish:
+                bad = [v for v, ok, _w in res if not ok]
+                yellow = [v for v, ok, _w in res if ok and v.warn]
+                if bad:
+                    pub = f"有 {len(bad)} 条没摆好,没自动发布"
+                elif yellow:
+                    pub = f"有 {len(yellow)} 条封面标黄(要人看一眼),没自动发布"
+                else:
+                    try:
+                        pub = r.publish_all([v.title for v in self.videos])
+                    except PrepError as e:
+                        pub = f"自动发布停下了:{e}"
+            self.finished_batch.emit(res, "", pub)
         except Stop:
-            self.finished_batch.emit(None, "停下了")
+            self.finished_batch.emit(None, "停下了", "")
         except PrepError as e:
-            self.finished_batch.emit(None, str(e))
+            self.finished_batch.emit(None, str(e), "")
         except Exception as e:
-            self.finished_batch.emit(None, f"{type(e).__name__}: {e}")
+            self.finished_batch.emit(None, f"{type(e).__name__}: {e}", "")
         finally:
             if r:
                 r.close()
@@ -169,6 +183,12 @@ class MainWindow(QMainWindow):
         self.b_sent = QPushButton("这批发好了")
         self.b_sent.setToolTip("你在罐头里点完「发布 → 全部发布」以后点这个:记下发布时间。")
         self.b_sent.clicked.connect(self.batch_sent)
+        from PySide6.QtWidgets import QCheckBox
+        self.k_auto = QCheckBox("摆好后软件自己点「全部发布」,接着摆下一批")
+        self.k_auto.setToolTip("勾上:整批都摆好、没有标黄的,软件自己在罐头里点「发布 → 全部发布」,记下发布时间,再摆下一批,直到勾上的都发完。\n"
+                               "有一条没摆好、或者有标黄的,就停下来叫你。点完发布弹出没见过的框也停下来。")
+        self.k_auto.setChecked(bool(self.st.get("auto_publish", False)))
+        self.k_auto.toggled.connect(self._auto_toggled)
         self.b_drop = QPushButton("这批不要了")
         self.b_drop.setToolTip("这批没发(在罐头里删了):记录作废,下次还会再摆这些视频。")
         self.b_drop.clicked.connect(self.batch_dropped)
@@ -185,6 +205,7 @@ class MainWindow(QMainWindow):
         self.b_move.clicked.connect(self.move_day)
         for b in (self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
+        bar.addWidget(self.k_auto)
         bar.addStretch(1)
         bar.addWidget(self.b_open)
         bar.addWidget(self.b_manual)
@@ -437,7 +458,7 @@ class MainWindow(QMainWindow):
     def _refresh_buttons(self):
         running = bool(self.worker and self.worker.isRunning())
         self.b_go.setEnabled(not running and not self.batch_id)
-        self.b_stop.setEnabled(running)
+        self.b_stop.setEnabled(True)
         self.b_sent.setEnabled(not running and bool(self.batch_id))
         self.b_drop.setEnabled(not running and bool(self.batch_id))
         self.b_move.setEnabled(not running and bool(self.c_date.currentData()))
@@ -451,7 +472,13 @@ class MainWindow(QMainWindow):
         n = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
         return acc, [v for v in todo if v.account == acc][:n]
 
-    def start_batch(self):
+    def _auto_toggled(self, on: bool):
+        self.st["auto_publish"] = bool(on)
+        self.st.save()
+        if on:
+            self.say("已勾上:摆好后软件自己点「全部发布」,接着摆下一批(有问题会停下来叫你)")
+
+    def start_batch(self, chained: bool = False):
         if self.cover_worker and self.cover_worker.isRunning():
             QMessageBox.information(self, "企鹅号发布助手", "封面还在认人,等几秒再点。")
             return
@@ -468,13 +495,15 @@ class MainWindow(QMainWindow):
         msg = f"在罐头里给「{acc}」摆 {len(vids)} 条:\n\n" + "\n".join(f"· {v.title[:30]}" for v in vids)
         if warn:
             msg += f"\n\n其中 {len(warn)} 条封面标黄,建议先点「预览 / 调封面」看一眼。"
-        msg += "\n\n软件只摆好,不点发布。摆的时候别在罐头里切到别的号。开始吗?"
-        if QMessageBox.question(self, "摆下一批", msg) != QMessageBox.StandardButton.Yes:
+        auto = self.k_auto.isChecked()
+        msg += ("\n\n摆好后软件自己点「全部发布」,接着摆下一批(有标黄 / 没摆好的会停下来叫你)。" if auto else
+                "\n\n软件只摆好,不点发布。") + "摆的时候别在罐头里切到别的号。开始吗?"
+        if not chained and QMessageBox.question(self, "摆下一批", msg) != QMessageBox.StandardButton.Yes:
             return
         self.batch_id = f"{acc}-{bj_str().replace(' ', '_').replace(':', '')}"
         self.batch_videos = vids
         shots = str(data_dir() / "截图" / bj_str()[:10])
-        self.worker = BatchWorker(acc, vids, shots, self)
+        self.worker = BatchWorker(acc, vids, shots, self, auto_publish=self.k_auto.isChecked())
         self.worker.log.connect(self.say)
         self.worker.one.connect(self._one_done)
         self.worker.finished_batch.connect(self._batch_done)
@@ -483,6 +512,7 @@ class MainWindow(QMainWindow):
         self._refresh_buttons()
 
     def stop_batch(self):
+        self._chain_stop = True                         # 自动接着摆的那 3 秒里点了停:不再接着摆
         if self.worker:
             self.worker.stop()
             self.say("正在停…")
@@ -496,11 +526,26 @@ class MainWindow(QMainWindow):
             self._fill_row(self.videos.index(v))
         self._update_sum()
 
-    def _batch_done(self, res, err):
+    def _batch_done(self, res, err, pub=""):
         ok = [x for x in (res or []) if x[1]]
         bad = [x for x in (res or []) if not x[1]]
         if not ok:
             self.batch_id = ""                         # 一条都没摆上:不用等人确认
+        if pub == "ok":
+            n = self.rec.mark_batch_published(self.batch_id)
+            self.say(f"软件点了「全部发布」:这批 {n} 条发出去了({bj_str()})")
+            self.batch_id = ""
+            self._after_batch()
+            if self.k_auto.isChecked() and self.next_batch()[1]:
+                self.say("3 秒后摆下一批…(点「停」不再继续)")
+                self._chain_stop = False
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(3000, lambda: None if getattr(self, "_chain_stop", False) else self.start_batch(chained=True))
+            elif self.k_auto.isChecked():
+                QMessageBox.information(self, "发完了", "勾上的员工都发完了。")
+            return
+        if pub:
+            self.say(f"⚠ {pub}")
         if err:
             self.say(f"✘ 没摆完:{err}")
             QMessageBox.warning(self, "摆下一批", f"没摆完:{err}" + (f"\n\n已经摆好 {len(ok)} 条,在罐头里看看。" if ok else ""))
@@ -510,6 +555,8 @@ class MainWindow(QMainWindow):
                 text += f"\n\n有 {len(bad)} 条没摆成(在罐头里也把它们的小页签关掉,或者手动弄好):\n" + "\n".join(
                     f"· {v.title[:24]}:{why}" for v, _o, why in bad[:6])
             self.say(f"摆好 {len(ok)} 条,等你在罐头里点发布")
+            if pub:
+                text = f"{pub}。\n\n" + text
             QMessageBox.information(self, "摆好了", text)
         self._refresh_buttons()
         self._update_sum()
