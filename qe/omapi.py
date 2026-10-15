@@ -8,6 +8,7 @@ aigc_userstatement = "2"(非 AI);不传封面(平台自己截一帧)。
 密钥只在这台电脑上解开用,不写日志、不显示。
 """
 import hashlib
+import json
 import os
 import time
 
@@ -128,7 +129,9 @@ class Client:
         body = {"title": title, "tags": tags, "vid": vid, "cat": int(cat), "desc": (desc or title)[:200],
                 "aigc_userstatement": aigc}
         if self_declare is not None:
-            body["ext_info"] = f"self_declare={int(self_declare)}"
+            # ext_info 必须是 JSON(写成文档里的 "self_declare=0" 平台报 40002 must be a valid JSON encoding;
+            # 2026-10-15 用假 vid 试过 {"self_declare": 0} 能过格式检查)
+            body["ext_info"] = json.dumps({"self_declare": int(self_declare)})
         return self._call("POST", "/articlev2/clientpubvideo", "发布", json=body)
 
     def wait_done(self, tid: str, timeout: float = 600, stop=None) -> str:
