@@ -19,6 +19,7 @@ class Video:
     employee: str              # 哪个员工整理的(员工文件夹名)
     date: str                  # 日期文件夹名,如 10.15
     png: str = ""              # 无字封面(用这个)
+    vpng: str = ""             # 无字竖封面(员工「梁」的 竖屏9x16.png;有的话将来可以给竖的比例用)
     jpg: str = ""              # 原封面(带字,不用;只是认出来提醒)
     cover: str = ""            # 这次用哪张(cover.decide 填)
     cover_kind: str = ""       # 横 / 竖
@@ -77,8 +78,43 @@ def employees(account_dir: str) -> list[str]:
         return []
 
 
+COVER_DIR = "封面"
+
+
+def norm_name(s: str) -> str:
+    """对名字用:去掉空格、下划线、标点(「C 位」和「C_位」、全角半角冒号算一样)。"""
+    return re.sub(r"[\W_]+", "", s or "").lower()
+
+
+def _landscape(path: str) -> bool:
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.size[0] >= im.size[1]
+    except Exception:
+        return False
+
+
+def covers_from_dir(d: str) -> tuple[str, str]:
+    """员工「梁」的放法:<员工>/封面/<视频标题>/ 里 横屏16x9.png / 竖屏9x16.png / 修改 (1).png 是他改过的无字版,
+    原图.png 带字不要,_thumb.jpg 是缩略图不要。返回 (横的, 竖的),没有的给 ""。"""
+    try:
+        files = sorted(os.listdir(d))
+    except OSError:
+        return "", ""
+    imgs = [f for f in files if os.path.splitext(f)[1].lower() in (".png", ".jpg", ".jpeg", ".webp")
+            and not f.startswith("原图") and not f.startswith("_thumb")]
+    h = next((f for f in imgs if f.startswith("横屏")), "")
+    v = next((f for f in imgs if f.startswith("竖屏")), "")
+    if not h:                                   # 没有「横屏」:「修改 (1).png」这类,横的那张
+        h = next((f for f in imgs if f != v and _landscape(os.path.join(d, f))), "")
+    return (os.path.join(d, h) if h else ""), (os.path.join(d, v) if v else "")
+
+
 def videos_in(emp_dir: str, account: str, date: str) -> list[Video]:
-    """员工文件夹里的视频,带上同名的横 / 竖封面。按文件名排。"""
+    """员工文件夹里的视频,带上无字封面。按文件名排。封面两种放法:
+    ① 视频旁边同名的 .png(.jpg 是带字的原封面,不用);
+    ② <员工>/封面/<视频标题>/横屏16x9.png 等(员工「梁」,标题里空格 / 下划线 / 标点对不齐也认)。"""
     try:
         names = sorted(os.listdir(emp_dir))
     except OSError:
@@ -87,6 +123,13 @@ def videos_in(emp_dir: str, account: str, date: str) -> list[Video]:
     for n in names:
         stem, ext = os.path.splitext(n)
         by_stem.setdefault(stem, {})[ext.lower()] = os.path.join(emp_dir, n)
+    cdir = os.path.join(emp_dir, COVER_DIR)
+    sub = {}
+    if os.path.isdir(cdir):
+        try:
+            sub = {norm_name(d): os.path.join(cdir, d) for d in os.listdir(cdir) if os.path.isdir(os.path.join(cdir, d))}
+        except OSError:
+            sub = {}
     out = []
     emp = os.path.basename(emp_dir.rstrip("\\/"))
     for stem in sorted(by_stem):
@@ -94,8 +137,14 @@ def videos_in(emp_dir: str, account: str, date: str) -> list[Video]:
         vid = next((d[e] for e in VIDEO_EXTS if e in d), "")
         if not vid:
             continue
-        out.append(Video(path=vid, title=stem.strip(), account=account, employee=emp, date=date,
-                         png=d.get(".png", ""), jpg=d.get(".jpg", "") or d.get(".jpeg", "")))
+        png, vpng = d.get(".png", ""), ""
+        if norm_name(stem) in sub:
+            h, vv = covers_from_dir(sub[norm_name(stem)])
+            png, vpng = h or png, vv
+        v = Video(path=vid, title=stem.strip(), account=account, employee=emp, date=date,
+                  png=png, jpg=d.get(".jpg", "") or d.get(".jpeg", ""))
+        v.vpng = vpng
+        out.append(v)
     return out
 
 

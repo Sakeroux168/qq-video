@@ -11,7 +11,7 @@ import time
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -133,6 +133,8 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderLabels(["号 / 员工", "条数"])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.itemChanged.connect(self._tree_changed)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
         sp.addWidget(self.tree)
         right = QWidget()
         rv = QVBoxLayout(right)
@@ -146,6 +148,8 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setToolTip("双击一条:预览封面、拖裁剪框")
         self.table.cellDoubleClicked.connect(lambda r, _c: self.preview_cover(r))
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_menu)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for i, wd in ((1, 100), (2, 90), (3, 260), (4, 150)):
@@ -171,6 +175,9 @@ class MainWindow(QMainWindow):
         self.b_manual = QPushButton("选中的标成已发")
         self.b_manual.setToolTip("你在罐头里自己手动发了的(软件没摆成 / 没摆):选中点这个,记成已发,下次就不会再摆它")
         self.b_manual.clicked.connect(self.mark_manual)
+        self.b_open = QPushButton("打开所在文件夹")
+        self.b_open.setToolTip("在资源管理器里打开选中这条视频所在的文件夹,并选中它(右键列表 / 左边员工也有)")
+        self.b_open.clicked.connect(lambda: self.open_selected("video"))
         self.b_preview = QPushButton("预览 / 调封面…")
         self.b_preview.setToolTip("看每个比例的裁剪框在哪;不满意就拖框(双击列表里一条也行)")
         self.b_preview.clicked.connect(lambda: self.preview_cover())
@@ -179,6 +186,7 @@ class MainWindow(QMainWindow):
         for b in (self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addStretch(1)
+        bar.addWidget(self.b_open)
         bar.addWidget(self.b_manual)
         bar.addWidget(self.b_preview)
         bar.addWidget(self.b_move)
@@ -333,6 +341,65 @@ class MainWindow(QMainWindow):
         st = [self.rec.status_of(v.path) for v in self.videos]
         self.lab_sum.setText(f"勾上的一共 {n} 条:已发 {st.count('已发')},摆好没发 {st.count('摆好')},还没发 {st.count('')}"
                              if n else "左边勾上要发的员工")
+
+    # ---------- 打开文件所在位置 ----------
+    @staticmethod
+    def reveal(path: str) -> bool:
+        """在资源管理器里打开 path 所在的文件夹并选中它(path 是文件夹就直接打开)。"""
+        import subprocess
+        if not path or not os.path.exists(path):
+            return False
+        if os.path.isdir(path):
+            os.startfile(path)
+        else:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        return True
+
+    def open_selected(self, what: str = "video"):
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
+        if not rows:
+            d = self._cur_dir()
+            if d and self.reveal(d):
+                return
+            QMessageBox.information(self, "打开所在文件夹", "先在列表里选中一条视频(或者左边点一个员工)。")
+            return
+        v = self.videos[rows[0]]
+        path = v.cover if what == "cover" else v.path
+        if not self.reveal(path):
+            QMessageBox.information(self, "打开所在文件夹", f"找不到这个文件了(被挪走了?):{path}")
+
+    def _cur_dir(self) -> str:
+        it = self.tree.currentItem()
+        if it is None:
+            return ""
+        d = it.data(0, Qt.ItemDataRole.UserRole)
+        if d:
+            return d
+        date = self.c_date.currentData() or ""
+        return os.path.join(self.st["material_root"], date) if date else self.st["material_root"]
+
+    def _table_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        if not self.table.item(row, 0) or not self.table.item(row, 0).isSelected():
+            self.table.selectRow(row)
+        m = QMenu(self)
+        m.addAction("打开视频所在文件夹", lambda: self.open_selected("video"))
+        m.addAction("打开封面所在文件夹", lambda: self.open_selected("cover"))
+        m.addSeparator()
+        m.addAction("预览 / 调封面…", lambda: self.preview_cover(row))
+        m.addAction("标成已发(我手动发了)", self.mark_manual)
+        m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _tree_menu(self, pos):
+        it = self.tree.itemAt(pos)
+        if it is None:
+            return
+        self.tree.setCurrentItem(it)
+        m = QMenu(self)
+        m.addAction("打开这个文件夹", lambda: self.reveal(self._cur_dir()))
+        m.exec(self.tree.viewport().mapToGlobal(pos))
 
     def mark_manual(self):
         rows = sorted({ix.row() for ix in self.table.selectedIndexes()})

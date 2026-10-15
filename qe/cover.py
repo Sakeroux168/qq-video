@@ -126,8 +126,10 @@ def decide(v) -> None:
         v.cover_why = "1 个人,框对准他" if len(faces) == 1 else f"{len(faces)} 个人挨得近,框得下"
         return
     big = max(faces, key=lambda x: x[2] * x[3])
-    v.plan, v.warn = dict(focus_of([big]), faces=[list(big)]), True
-    v.cover_why = f"{len(faces)} 个人分得开,框对准脸最大的(看一眼)"
+    # 用户(2026-10-15 截图):两个人挨着坐,框只对准大人把小孩切了一半 —— 应该框两个人中间。
+    # 「all」= 认出来的所有人:每个比例框得下所有人就对准他们中间(crop_rect),框不下的窄比例才对准脸最大的
+    v.plan, v.warn = dict(focus_of([big]), faces=[list(big)], all=[list(f) for f in faces]), True
+    v.cover_why = f"{len(faces)} 个人:宽的比例框所有人,窄的框不下就对准脸最大的(看一眼)"
 
 
 WIDE_NOTE = {"crop": ";2.35:1 切掉一点头顶(不挡脸)", "ai": ";2.35:1 要 AI 扩图(看一眼)"}
@@ -167,7 +169,7 @@ WIDE = 2.35
 
 def _face_band(plan: dict, img_h: float):
     """要躲开标题区的那几张脸:从头顶(脸框往上 22%)到下巴(脸框往下 3%),图的像素。没有脸返回 None。"""
-    fs = (plan or {}).get("faces") or []
+    fs = (plan or {}).get("all") or (plan or {}).get("faces") or []      # 2.35:1 框跟图一样宽,所有人都在里面:都要躲开标题区
     if not fs:
         return None
     return min(f[1] - f[3] * 0.22 for f in fs) * img_h, max(f[1] + f[3] * 1.03 for f in fs) * img_h
@@ -190,7 +192,7 @@ def title_fit(img_w: float, img_h: float, plan: dict):
 def crop_fit(img_w: float, img_h: float, plan: dict):
     """办法一(用户选的):挪框躲不开时,允许切掉一点头顶 —— 下巴刚好在标题区上面。
     最多切到眼睛上面(眼睛往上留脸高的 22%,眉毛额头要在),再多就不行。返回 (行不行, 框上沿 y)。"""
-    fs = (plan or {}).get("faces") or []
+    fs = (plan or {}).get("all") or (plan or {}).get("faces") or []
     if not fs:
         return True, None
     bh = min(img_h, img_w / WIDE)
@@ -333,6 +335,12 @@ def crop_rect(img_w: float, img_h: float, ratio: float, plan: dict) -> tuple[flo
         tx, ty = man[0] * img_w - bw / 2, man[1] * img_h - bh / 2
     elif plan and "cx" in plan:
         tx = plan["cx"] * img_w - bw / 2
+        group = plan.get("all") or []
+        if len(group) > 1:                                   # 几个人:这个框装得下所有人就对准他们中间
+            gx0 = min(f[0] - f[2] * 0.3 for f in group) * img_w
+            gx1 = max(f[0] + f[2] * 1.3 for f in group) * img_w
+            if gx1 - gx0 <= bw:
+                tx = (gx0 + gx1) / 2 - bw / 2
         ty = plan["cy"] * img_h - bh * 0.45                   # 脸放在框里偏上一点
         if ratio >= 2 and plan.get("faces"):
             mode, t2 = wide_mode(img_w, img_h, plan)          # 2.35:1:让脸躲开下面的标题区(挪框 / 切掉点头顶)

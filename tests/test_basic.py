@@ -67,6 +67,32 @@ def test_folders(tmp: Path):
     check((Path(dst) / "研习空间/31条/a.第一条 (2).mp4").is_file() and not (root / "10.15").exists(), "合并:同名不覆盖,改名 (2)")
 
 
+def test_cover_dir(tmp: Path):
+    print("[员工「梁」的放法:封面\标题\横屏16x9.png]")
+    from qe import folders as F
+    e = tmp / "梁"
+    (e / "封面" / "湖南省科技馆_C_馆上新").mkdir(parents=True)
+    (e / "封面" / "两个都有").mkdir(parents=True)
+    (e / "封面" / "只有修改").mkdir(parents=True)
+    (e / "封面" / "心理学视角：区分情绪，减少吼叫").mkdir(parents=True)
+    for n in ("湖南省科技馆 C 馆上新", "两个都有", "只有修改", "心理学视角：区分情绪,减少吼叫"):
+        (e / f"{n}.mp4").write_bytes(b"x")
+        (e / f"{n}.jpg").write_bytes(b"x")
+    _img(e / "封面" / "湖南省科技馆_C_馆上新" / "横屏16x9.png", 320, 180)
+    _img(e / "封面" / "两个都有" / "横屏16x9.png", 320, 180)
+    _img(e / "封面" / "两个都有" / "竖屏9x16.png", 180, 320)
+    _img(e / "封面" / "两个都有" / "原图.png", 320, 180)
+    _img(e / "封面" / "只有修改" / "原图.png", 320, 180)
+    _img(e / "封面" / "只有修改" / "修改 (1).png", 320, 180)
+    _img(e / "封面" / "心理学视角：区分情绪，减少吼叫" / "横屏16x9.png", 320, 180)
+    vs = {v.title: v for v in F.videos_in(str(e), "号", "10.15")}
+    check(vs["湖南省科技馆 C 馆上新"].png.endswith("横屏16x9.png"), "名字里空格 / 下划线对不齐也认")
+    check(vs["心理学视角：区分情绪,减少吼叫"].png.endswith("横屏16x9.png"), "全角半角逗号对不齐也认")
+    check(vs["两个都有"].png.endswith("横屏16x9.png") and vs["两个都有"].vpng.endswith("竖屏9x16.png"), "横屏、竖屏都认出来")
+    check(vs["只有修改"].png.endswith("修改 (1).png"), "没有横屏:用「修改 (1).png」,不用原图")
+    check(all("原图" not in v.png and not v.png.endswith(".jpg") for v in vs.values()), "原图、带字的 jpg 一律不用")
+
+
 def test_cover(tmp: Path):
     print("[封面]")
     from qe import cover as C
@@ -308,6 +334,19 @@ def test_title_zone(tmp: Path):
     C.AI_KEY = old_key
 
 
+def test_group(tmp: Path):
+    print("[两个人挨着:框得下就框两个人中间]")
+    from qe import cover as C
+    # 2848×1600,小孩脸在 0.33,大人脸在 0.55(像用户截图那张)
+    kid, mom = [0.30, 0.25, 0.07, 0.13, 0.30], [0.52, 0.12, 0.08, 0.15, 0.17]
+    plan = dict(C.focus_of([mom]), faces=[mom], all=[kid, mom])
+    for tag, r in (("3:4", 0.75), ("1:1", 1.0)):
+        x, y, w, h = C.crop_rect(2848, 1600, r, plan)
+        check(x <= (kid[0] - 0.02) * 2848 and x + w >= (mom[0] + mom[2] + 0.02) * 2848, f"{tag}:两个人都在框里")
+    x, y, w, h = C.crop_rect(2848, 1600, 9 / 16, plan)
+    check(x <= mom[0] * 2848 and x + w >= (mom[0] + mom[2]) * 2848, "9:16 太窄框不下两个人:对准脸大的那个")
+
+
 def test_preview(tmp: Path):
     print("[封面预览 / 手动拖框]")
     from PySide6.QtCore import QPointF, Qt
@@ -365,6 +404,7 @@ def test_preview(tmp: Path):
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     test_folders(tmp)
+    test_cover_dir(tmp)
     test_cover(tmp)
     test_records(tmp)
     test_failed_steps(tmp)
@@ -373,6 +413,7 @@ if __name__ == "__main__":
     test_window(tmp)
     test_preview(tmp)
     test_title_zone(tmp)
+    test_group(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
