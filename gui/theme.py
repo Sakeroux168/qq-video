@@ -7,6 +7,13 @@ from PySide6.QtGui import QColor, QPalette
 BASE_FONT = "font-family:'Microsoft YaHei';font-size:13px;"
 
 THEMES = {
+    "抖音创作者": {
+        "desc": "白卡片、浅灰底、红粉色强调、大数字(用户 2026-10-15 选的)",
+        "pal": {"window": "#f5f6f7", "base": "#ffffff", "alt": "#fafafb", "text": "#161823", "button": "#ffffff",
+                "highlight": "#ffe8ed", "htext": "#161823", "mid": "#e6e7ea", "muted": "#8a8b91", "side": "#ffffff"},
+        "accent": "#fe2c55", "accent_hover": "#e8173f", "soft": "#fff0f3", "radius": 8,
+        "rows": {"yellow": "#fff7e0", "red": "#ffe7eb", "green": "#e6f7ec", "orange": "#ffeedd", "ready": "#eef4ff"},
+    },
     "清爽白": {
         "desc": "白底浅灰,蓝色按钮,圆角;看着干净,适合白天长时间用",
         "pal": {"window": "#f4f6f9", "base": "#ffffff", "alt": "#f7f9fc", "text": "#1f2329", "button": "#ffffff",
@@ -38,54 +45,87 @@ THEMES = {
 }
 
 
+def _get(t: dict) -> dict:
+    """补齐可选的颜色:muted(灰字)、side(导航栏底)、soft(强调色的浅底)。"""
+    p = dict(t["pal"])
+    p.setdefault("muted", "#8a8f99")
+    p.setdefault("side", p["base"])
+    return p
+
+
 def qss(t: dict) -> str:
-    p, a, r = t["pal"], t["accent"], t["radius"]
+    p, a, r = _get(t), t["accent"], t["radius"]
+    soft = t.get("soft", p["highlight"])
     return f"""
 QWidget {{ {BASE_FONT} color:{p['text']}; }}
-QMainWindow, QDialog {{ background:{p['window']}; }}
+QMainWindow, QDialog, QWidget#page, QStackedWidget {{ background:{p['window']}; }}
+QFrame#sidebar {{ background:{p['side']}; border-right:1px solid {p['mid']}; }}
+QLabel#brand {{ font-size:18px; font-weight:bold; color:{a}; padding-left:6px; }}
+QLabel#brandSub {{ font-size:12px; color:{p['muted']}; padding-left:6px; }}
+QPushButton#nav {{ text-align:left; padding:9px 14px; border:none; border-radius:{r}px; background:transparent;
+    font-size:14px; color:{p['text']}; }}
+QPushButton#nav:hover {{ background:{p['window']}; color:{p['text']}; }}
+QPushButton#nav:checked {{ background:{soft}; color:{a}; font-weight:bold; }}
+QLabel#pageTitle {{ font-size:18px; font-weight:bold; padding:2px 0 4px 0; }}
+QFrame#stat {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r + 2}px; }}
+QLabel#statLbl {{ color:{p['muted']}; font-size:13px; }}
+QLabel#statVal {{ font-size:26px; font-weight:bold; color:{p['text']}; }}
+QLabel#statVal[tone="good"] {{ color:#1aa260; }}
+QLabel#statVal[tone="warn"] {{ color:{a}; }}
+QLabel#statSub {{ color:{p['muted']}; font-size:12px; }}
 QTabWidget::pane {{ border:1px solid {p['mid']}; border-radius:{r}px; background:{p['window']}; top:-1px; }}
 QTabBar::tab {{ background:transparent; padding:7px 16px; margin-right:2px; border:none; color:{p['text']}; }}
 QTabBar::tab:selected {{ color:{a}; border-bottom:2px solid {a}; font-weight:bold; }}
-QPushButton {{ background:{p['button']}; border:1px solid {p['mid']}; border-radius:{r}px; padding:5px 14px; }}
+QPushButton {{ background:{p['button']}; border:1px solid {p['mid']}; border-radius:{r}px; padding:6px 14px; }}
 QPushButton:hover {{ border-color:{a}; color:{a}; }}
-QPushButton:disabled {{ color:#9aa0a6; border-color:{p['mid']}; }}
-QPushButton#primary {{ background:{a}; color:#ffffff; border:1px solid {a}; font-weight:bold; padding:6px 22px; }}
+QPushButton:disabled {{ color:{p['muted']}; border-color:{p['mid']}; background:{p['window']}; }}
+QPushButton#primary {{ background:{a}; color:#ffffff; border:1px solid {a}; font-weight:bold; padding:7px 24px; }}
 QPushButton#primary:hover {{ background:{t['accent_hover']}; color:#ffffff; }}
-QPushButton#primary:disabled {{ background:{p['mid']}; color:#ffffff; border-color:{p['mid']}; }}
-QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r}px; padding:4px 6px; }}
+QPushButton#primary:disabled {{ background:{p['mid']}; color:{p['muted']}; border-color:{p['mid']}; }}
+QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r}px; padding:5px 8px; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color:{a}; }}
+QComboBox::drop-down {{ border:none; width:22px; }}
+QComboBox QAbstractItemView {{ background:{p['base']}; border:1px solid {p['mid']}; selection-background-color:{soft}; selection-color:{a}; }}
+QPlainTextEdit {{ color:{p['muted']}; }}
 QTreeWidget, QTableWidget {{ background:{p['base']}; alternate-background-color:{p['alt']}; border:1px solid {p['mid']};
-    border-radius:{r}px; gridline-color:{p['mid']}; }}
-QTreeWidget::item, QTableWidget::item {{ padding:3px 2px; }}
-QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{a}; color:#ffffff; }}
-QHeaderView::section {{ background:{p['window']}; border:none; border-bottom:1px solid {p['mid']}; padding:6px 6px; font-weight:bold; }}
-QGroupBox {{ border:1px solid {p['mid']}; border-radius:{r}px; margin-top:14px; padding:10px 8px 6px 8px; }}
-QGroupBox::title {{ subcontrol-origin:margin; left:10px; padding:0 4px; color:{a}; font-weight:bold; }}
+    border-radius:{r + 2}px; gridline-color:{p['mid']}; }}
+QTreeWidget::item, QTableWidget::item {{ padding:4px 2px; }}
+QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{p['highlight']}; color:{p['htext']}; }}
+QHeaderView::section {{ background:{p['base']}; border:none; border-bottom:1px solid {p['mid']}; padding:8px 6px;
+    font-weight:bold; color:{p['muted']}; }}
+QGroupBox {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r + 2}px; margin-top:16px; padding:12px 10px 8px 10px; }}
+QGroupBox::title {{ subcontrol-origin:margin; left:12px; padding:0 4px; color:{a}; font-weight:bold; }}
 QCheckBox::indicator {{ width:15px; height:15px; }}
 QScrollBar:vertical {{ background:transparent; width:10px; margin:0; }}
 QScrollBar::handle:vertical {{ background:{p['mid']}; border-radius:5px; min-height:30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height:0; }}
 QToolTip {{ background:{p['base']}; color:{p['text']}; border:1px solid {p['mid']}; padding:4px; }}
+QMenu {{ background:{p['base']}; border:1px solid {p['mid']}; padding:4px; }}
+QMenu::item {{ padding:6px 18px; border-radius:{r}px; }}
+QMenu::item:selected {{ background:{soft}; color:{a}; }}
 """
 
 
 def palette(t: dict) -> QPalette:
-    p = t["pal"]
+    p = _get(t)
     pal = QPalette()
     for role, key in ((QPalette.ColorRole.Window, "window"), (QPalette.ColorRole.Base, "base"),
                       (QPalette.ColorRole.AlternateBase, "alt"), (QPalette.ColorRole.Text, "text"),
                       (QPalette.ColorRole.WindowText, "text"), (QPalette.ColorRole.ButtonText, "text"),
                       (QPalette.ColorRole.Button, "button"), (QPalette.ColorRole.Highlight, "highlight"),
                       (QPalette.ColorRole.HighlightedText, "htext"), (QPalette.ColorRole.ToolTipBase, "base"),
-                      (QPalette.ColorRole.ToolTipText, "text"), (QPalette.ColorRole.PlaceholderText, "mid")):
+                      (QPalette.ColorRole.ToolTipText, "text"), (QPalette.ColorRole.PlaceholderText, "muted")):
         pal.setColor(role, QColor(p[key]))
     return pal
 
 
+DEFAULT = "抖音创作者"
+
+
 def apply(app, name: str) -> str:
-    """套用主题;名字不认识就用「清爽白」。返回实际用的名字。也把列表状态行的底色换成这套的。"""
+    """套用主题;名字不认识就用默认的。返回实际用的名字。也把列表状态行的底色换成这套的。"""
     if name not in THEMES:
-        name = "清爽白"
+        name = DEFAULT
     t = THEMES[name]
     app.setStyle("Fusion")
     app.setPalette(palette(t))
@@ -95,5 +135,6 @@ def apply(app, name: str) -> str:
     from PySide6.QtGui import QBrush
     A.YELLOW, A.RED, A.GREEN, A.ORANGE = (QColor(t["rows"][k]) for k in ("yellow", "red", "green", "orange"))
     W.YELLOW, W.GREEN = QBrush(QColor(t["rows"]["yellow"])), QBrush(QColor(t["rows"]["green"]))
-    W.GREY = QBrush(QColor(t["pal"]["alt"]))
+    # 教育页「摆好」那行:要和背景分得开(审查:原来用 alt,几乎和底色一样看不出来)
+    W.GREY = QBrush(QColor(t["rows"].get("ready") or t["rows"]["orange"]))
     return name

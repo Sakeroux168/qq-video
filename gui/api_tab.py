@@ -98,8 +98,13 @@ class ApiTab(QWidget):
 
     # ---------------- 界面 ----------------
     def _build(self):
+        from gui.widgets import StatCards
         v = QVBoxLayout(self)
-        v.setContentsMargins(10, 8, 10, 8)
+        v.setContentsMargins(20, 16, 20, 12)
+        v.setSpacing(10)
+        title = QLabel("16 个号 · 游戏 / 动漫,用官方接口发")
+        title.setObjectName("pageTitle")
+        v.addWidget(title)
         top = QHBoxLayout()
         top.addWidget(QLabel("要发哪天的:"))
         self.c_date = QComboBox()
@@ -126,6 +131,8 @@ class ApiTab(QWidget):
         top.addWidget(b)
         v.addLayout(top)
 
+        self.cards = StatCards([("all", "今日待发"), ("ok", "能发"), ("bad", "要处理"), ("sent", "已发"), ("accs", "号发完")])
+        v.addWidget(self.cards)
         view = QHBoxLayout()
         b = QPushButton("全部展开")
         b.clicked.connect(lambda: self.expand_all(True))
@@ -217,7 +224,7 @@ class ApiTab(QWidget):
         self.logbox = QPlainTextEdit()
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(3000)
-        self.logbox.setMaximumHeight(140)
+        self.logbox.setMaximumHeight(96)
         v.addWidget(self.logbox)
         self.tree.itemSelectionChanged.connect(self._update_scope)
 
@@ -520,9 +527,13 @@ class ApiTab(QWidget):
         for i, v in enumerate(self.videos):
             accs.setdefault(v.account, []).append(self.state.get(i, "").startswith("已发"))
         done = sum(1 for xs in accs.values() if all(xs))
-        self.lab_sum.setText(f"共 {n} 条 · 能发 {ok} · 有问题 {bad}" + (f" · 没发成 {fail}" if fail else "") +
-                             f" · 已发 {sent}" + (f" · {len(accs)} 个号发完 {done} 个" if accs else "") +
-                             ("" if len(checked) >= n or not n else f" · {n - len(checked)} 条还没检查"))
+        unsure = sum(1 for i in range(n) if self.state.get(i, "") == "结果不明")
+        self.lab_sum.setText("" if len(checked) >= n or not n else f"{n - len(checked)} 条还没检查完…")
+        self.cards.set(all=n, ok=(ok, "good" if ok else ""), bad=(bad + fail + unsure, "warn" if bad + fail + unsure else ""),
+                       sent=sent, accs=(f"{done} / {len(accs)}" if accs else "–", "good" if accs and done == len(accs) else ""),
+                       bad_sub=" · ".join(x for x in ((f"有问题 {bad}" if bad else ""), (f"没发成 {fail}" if fail else ""),
+                                                       (f"结果不明 {unsure}" if unsure else "")) if x),
+                       ok_sub="点「发布」发这些" if ok else "", accs_sub="")
 
     def _hidden(self, i: int) -> bool:
         key = self.e_find.text().strip().lower()

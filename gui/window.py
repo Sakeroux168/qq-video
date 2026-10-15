@@ -119,11 +119,14 @@ class MainWindow(QMainWindow):
 
     # ---------------- 界面 ----------------
     def _build(self):
-        tabs = QTabWidget()
-        self.setCentralWidget(tabs)
+        from gui.widgets import StatCards, shell
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(10, 8, 10, 8)
+        v.setContentsMargins(20, 16, 20, 12)
+        v.setSpacing(10)
+        title = QLabel("教育号 · 在创作罐头里摆好,人点发布")
+        title.setObjectName("pageTitle")
+        v.addWidget(title)
         top = QHBoxLayout()
         top.addWidget(QLabel("要发哪天的:"))
         self.c_date = QComboBox()
@@ -135,12 +138,14 @@ class MainWindow(QMainWindow):
         top.addWidget(b)
         top.addSpacing(16)
         self.lab_root = QLabel("")
-        self.lab_root.setStyleSheet("color:#777")
+        self.lab_root.setStyleSheet("color:#8a8b91")
+        from PySide6.QtWidgets import QSizePolicy
+        self.lab_root.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)   # 路径太长就截,不撑宽窗口
         top.addWidget(self.lab_root, 1)
-        b = QPushButton("设置…")
-        b.clicked.connect(self.edit_settings)
-        top.addWidget(b)
+        self._top = top
         v.addLayout(top)
+        self.cards = StatCards([("all", "勾上的视频"), ("sent", "已发"), ("ready", "摆好没发"), ("todo", "还没发")])
+        v.addWidget(self.cards)
 
         sp = QSplitter(Qt.Orientation.Horizontal)
         self.tree = QTreeWidget()
@@ -208,24 +213,24 @@ class MainWindow(QMainWindow):
             bar.addWidget(b)
         bar.addWidget(self.k_auto)
         bar.addStretch(1)
-        bar.addWidget(self.b_open)
-        bar.addWidget(self.b_manual)
-        bar.addWidget(self.b_preview)
-        bar.addWidget(self.b_move)
+        for b in (self.b_open, self.b_manual, self.b_preview, self.b_move):   # 次要的放上面一行右边,底下只留摆 / 发相关
+            self._top.addWidget(b)
         v.addLayout(bar)
         self.logbox = QPlainTextEdit()
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(3000)
-        self.logbox.setMaximumHeight(170)
+        self.logbox.setMaximumHeight(110)
         v.addWidget(self.logbox)
-        tabs.addTab(w, "发视频(教育,罐头)")
         from gui.api_tab import ApiTab
         self.api_tab = ApiTab(self.st, self.rec, self.say, self)
-        tabs.addTab(self.api_tab, "接口发(16个号)")
 
         # 记录页
         r = QWidget()
         rv2 = QVBoxLayout(r)
+        rv2.setContentsMargins(20, 16, 20, 12)
+        title = QLabel("数据记录 · 每条哪天、哪个号、什么时候发的")
+        title.setObjectName("pageTitle")
+        rv2.addWidget(title)
         rh = QHBoxLayout()
         rh.addWidget(QLabel("日期:"))
         self.c_rec_date = QComboBox()
@@ -253,8 +258,11 @@ class MainWindow(QMainWindow):
         self.t_rec.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.t_rec.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         rv2.addWidget(self.t_rec, 1)
-        tabs.addTab(r, "记录")
-        tabs.currentChanged.connect(lambda i: i == 2 and self.refresh_records())
+        # 外壳:左边导航(教育号 / 16 个号 / 数据记录 / 设置),右边一页一页换(用户选的「抖音创作者中心」那种)
+        root, self.nav, self.stack = shell([("", "教育号", w), ("", "16 个号", self.api_tab), ("", "数据记录", r)],
+                                           self.edit_settings, f"第 {APP_VERSION} 版")
+        self.setCentralWidget(root)
+        self.stack.currentChanged.connect(lambda i: i == 2 and self.refresh_records())
 
     def say(self, m: str):
         self.logbox.appendPlainText(f"[{bj_str()[11:]}] {m}")
@@ -365,8 +373,10 @@ class MainWindow(QMainWindow):
     def _update_sum(self):
         n = len(self.videos)
         st = [self.rec.status_of(v.path) for v in self.videos]
-        self.lab_sum.setText(f"勾上的一共 {n} 条:已发 {st.count('已发')},摆好没发 {st.count('摆好')},还没发 {st.count('')}"
-                             if n else "左边勾上要发的员工")
+        self.lab_sum.setText("" if n else "左边勾上要发的员工")
+        self.lab_sum.setVisible(not n)
+        self.cards.set(all=n, sent=(st.count("已发"), "good" if n and st.count("已发") == n else ""),
+                       ready=(st.count("摆好"), "warn" if st.count("摆好") else ""), todo=st.count(""))
 
     # ---------- 打开文件所在位置 ----------
     @staticmethod
