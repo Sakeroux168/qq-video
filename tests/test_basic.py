@@ -509,8 +509,9 @@ def test_api_tab(tmp: Path):
     check("3 条" in tab.groups["CSGO战神君"].text(0) and "有问题 3" in tab.groups["CSGO战神君"].text(2)
           and "没检查" not in tab.groups["CSGO战神君"].text(2), "号那一行有统计;刷新后自动检查了")
     from PySide6.QtWidgets import QInputDialog
-    real_t, real_i = QInputDialog.getText, QMessageBox.information
+    real_t, real_i, real_gi = QInputDialog.getText, QMessageBox.information, QInputDialog.getItem
     QInputDialog.getText = staticmethod(lambda *a, **k: ("英雄联盟", True))
+    QInputDialog.getItem = staticmethod(lambda *a, **k: ("英雄联盟", True))
     QMessageBox.information = staticmethod(lambda *a, **k: None)
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
     try:
@@ -534,6 +535,7 @@ def test_api_tab(tmp: Path):
         check(any(v.title == "c3" for v in tab.videos), "再撤销一次:批量改话题也撤回去")
     finally:
         QInputDialog.getText, QMessageBox.question, QMessageBox.information = real_t, real_q, real_i
+        QInputDialog.getItem = real_gi
     tab.e_find.setText("c1")
     vis = [tab.videos[i].title for i, it in tab.items.items() if not it.isHidden()]
     check(vis == [], "搜标题(c1 发掉了,搜不到)")
@@ -891,10 +893,10 @@ def test_ui_r1(tmp: Path):
     finally:
         omapi.Client = real
     sts = {v.title: tab.state.get(i, "") for i, v in enumerate(tab.videos)}
-    check(sts["号A1"] == "已发" and sts["号B1"].startswith("没发成:号的密钥") and sts["号B2"].startswith("没轮到"),
+    check(sts["号A1"] == "已发" and sts["号B1"].startswith("没发成:号的密钥") and sts["号B2"].startswith("没发:号的密钥坏了"),
           f"号密钥坏了:第一条没发成,剩下的标「没轮到」-> {sts['号B1']} / {sts['号B2']}")
     check("号B" in tab.groups and "能发 0" in tab.groups["号B"].text(3), "号那一行:没发成的不算「能发」")
-    check(tab.logbox.toPlainText().count("发完了:成功 3 · 没发成 1") == 1 and "没轮到 2" in tab.logbox.toPlainText(),
+    check(tab.logbox.toPlainText().count("发完了:成功 3 · 没发成 1") == 1 and "号的密钥坏了没发 2" in tab.logbox.toPlainText(),
           "发完总结:成功 / 没发成 / 没轮到都写")
 
     # 窗口能缩窄:接口页最小宽度不超过 1000

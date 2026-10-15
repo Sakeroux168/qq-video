@@ -25,6 +25,7 @@ from qe.records import Records
 YELLOW = QBrush(QColor("#FFF3C4"))
 GREEN = QBrush(QColor("#DDF3E2"))
 GREY = QBrush(QColor("#EEEEEE"))
+RED = QBrush(QColor("#FFE1E1"))
 
 
 class CoverWorker(QThread):
@@ -146,6 +147,12 @@ class MainWindow(QMainWindow):
         v.addLayout(top)
         self.cards = StatCards([("all", "勾上的视频"), ("sent", "已发"), ("ready", "摆好没发"), ("todo", "还没发")])
         v.addWidget(self.cards)
+        self.hint = QLabel("")
+        self.hint.setObjectName("hint")
+        self.hint.setWordWrap(True)
+        self.hint.hide()
+        v.addWidget(self.hint)
+        self.row_note: dict[str, str] = {}            # 这一批里每条的临时状态:排队中 / 没摆成:原因
 
         sp = QSplitter(Qt.Orientation.Horizontal)
         self.tree = QTreeWidget()
@@ -216,8 +223,10 @@ class MainWindow(QMainWindow):
             bar.addWidget(b)
         bar.addWidget(self.k_auto)
         bar.addStretch(1)
-        for b in (self.b_open, self.b_manual, self.b_preview, self.b_move):   # 次要的放上面一行右边,底下只留摆 / 发相关
+        for b in (self.b_open, self.b_move):          # 次要的放上面一行右边;「标成已发」「预览封面」在列表右键里
             self._top.addWidget(b)
+        self.b_manual.hide()
+        self.b_preview.hide()
         v.addLayout(bar)
         self.logbox = QPlainTextEdit()
         self.logbox.setObjectName("log")
@@ -235,6 +244,8 @@ class MainWindow(QMainWindow):
         title = QLabel("数据记录 · 每条哪天、哪个号、什么时候发的")
         title.setObjectName("pageTitle")
         rv2.addWidget(title)
+        self.rec_cards = StatCards([("sent", "已发"), ("fail", "没发成"), ("unsure", "不确定发没发"), ("ready", "摆好没发")])
+        rv2.addWidget(self.rec_cards)
         rh = QHBoxLayout()
         rh.addWidget(QLabel("日期:"))
         self.c_rec_date = QComboBox()
@@ -307,7 +318,8 @@ class MainWindow(QMainWindow):
                     for emp in F.employees(d):
                         vids = F.videos_in(os.path.join(d, emp), acc, date)
                         sent = sum(1 for x in vids if self.rec.status_of(x.path) == "已发")
-                        it = QTreeWidgetItem([f"{emp}   ({os.path.basename(d)})", f"{len(vids)} 条" + (f",发了 {sent}" if sent else "")])
+                        it = QTreeWidgetItem([emp, f"{len(vids)} 条" + (f",发了 {sent}" if sent else "")])
+                        it.setToolTip(0, f"{emp}({os.path.basename(d)})")
                         it.setData(0, Qt.ItemDataRole.UserRole, os.path.join(d, emp))
                         it.setData(0, Qt.ItemDataRole.UserRole + 1, acc)
                         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -362,13 +374,18 @@ class MainWindow(QMainWindow):
             return
         v = self.videos[i]
         stt = self.rec.status_of(v.path)
+        note = "" if stt else self.row_note.get(v.path, "")
         cov = v.cover_why if (v.cover_kind or v.warn) else "认人中…"
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt or "没发"]):
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt or note or "没发"]):
             it = QTableWidgetItem(t)
+            if c == 4 and note:
+                it.setToolTip(note)
             if stt == "已发":
                 it.setBackground(GREEN)
             elif stt == "摆好":
                 it.setBackground(GREY)
+            elif note.startswith("没摆成"):
+                it.setBackground(RED)
             elif v.warn and c == 3:
                 it.setBackground(YELLOW)
             if c == 0 and len(v.title) > 64:
@@ -477,6 +494,23 @@ class MainWindow(QMainWindow):
     # ---------------- 一批 ----------------
     def _refresh_buttons(self):
         running = bool(self.worker and self.worker.isRunning())
+        waiting = bool(self.batch_id) and not running
+        for b, main in ((self.b_go, not waiting), (self.b_sent, waiting)):
+            if (b.objectName() == "primary") != main:
+                b.setObjectName("primary" if main else "")
+                b.style().unpolish(b)
+                b.style().polish(b)
+        if running:
+            self.hint.setText("正在摆…摆的时候别在罐头里切到别的号。要停就点「停」。")
+            self.hint.show()
+        elif waiting:
+            n = self.rec.ready_in_batch(self.batch_id)
+            acc = self.batch_videos[0].account if self.batch_videos else ""
+            self.hint.setText(f"「{acc}」这批 {n} 条摆好了 → 去罐头里检查,点「发布 → 全部发布」→ 回来点「这批发好了」"
+                              "(不要了就在罐头里删掉,点「这批不要了」)")
+            self.hint.show()
+        else:
+            self.hint.hide()
         self.b_go.setEnabled(not running and not self.batch_id)
         self.b_stop.setEnabled(running)
         self.b_sent.setEnabled(not running and bool(self.batch_id))
@@ -492,9 +526,9 @@ class MainWindow(QMainWindow):
         n = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
         return acc, [v for v in todo if v.account == acc][:n]
 
-    def _ask(self, title: str, text: str, yes: str, no: str) -> bool:
+    def _ask(self, title: str, text: str, yes: str, no: str, default_no: bool = False) -> bool:
         import gui.api_tab as A                       # 中文动词按钮的确认框(和接口页同一个)
-        return A.ask(self, title, text, yes, no)
+        return A.ask(self, title, text, yes, no, default_no=default_no)
 
     def _nothing_left(self) -> str:
         """没有能摆的了:说清楚是真发完了,还是剩下的缺无字封面(png)。"""
@@ -540,6 +574,10 @@ class MainWindow(QMainWindow):
         self.worker.one.connect(self._one_done)
         self.worker.finished_batch.connect(self._batch_done)
         self.worker.start()
+        for v in vids:                                # 这批的行先写「排队中」,摆到哪条一眼看得出
+            self.row_note[v.path] = "排队中"
+            if v in self.videos:
+                self._fill_row(self.videos.index(v))
         self.say(f"开始给「{acc}」摆 {len(vids)} 条…")
         self._refresh_buttons()
 
@@ -552,13 +590,20 @@ class MainWindow(QMainWindow):
     def _one_done(self, v, ok, why):
         if ok:
             self.rec.prepared(v, self.batch_id)
+            self.row_note.pop(v.path, None)
         else:
             self.rec.failed(v, self.batch_id, why)
+            self.row_note[v.path] = f"没摆成:{why}"
         if v in self.videos:
             self._fill_row(self.videos.index(v))
         self._update_sum()
 
     def _batch_done(self, res, err, pub=""):
+        for v in self.batch_videos:                   # 没轮到摆的(停了 / 出错)不再写「排队中」
+            if self.row_note.get(v.path) == "排队中":
+                self.row_note.pop(v.path, None)
+                if v in self.videos:
+                    self._fill_row(self.videos.index(v))
         ok = [x for x in (res or []) if x[1]]
         bad = [x for x in (res or []) if not x[1]]
         ready = self.rec.ready_in_batch(self.batch_id) if self.batch_id else 0
@@ -583,7 +628,8 @@ class MainWindow(QMainWindow):
         if err:
             n_ok = max(len(ok), ready)
             self.say(f"没摆完:{err}" + (f"(已经摆好 {n_ok} 条,在罐头里看看)" if n_ok else ""))
-            box = QMessageBox.information if err == "停下了" else QMessageBox.warning
+            box = (lambda *a: None) if err == "停下了" and not n_ok else \
+                QMessageBox.information if err == "停下了" else QMessageBox.warning
             box(self, "摆下一批", ("你点了「停」,停下来了。" if err == "停下了" else f"没摆完:{err}") + (
                 f"\n\n已经摆好 {n_ok} 条,在罐头里看看:要发就点「发布 → 全部发布」再回来点「这批发好了」;"
                 "不要就在罐头里删掉,回来点「这批不要了」。" if n_ok else ""))
@@ -628,6 +674,8 @@ class MainWindow(QMainWindow):
         self._after_batch()
 
     def _after_batch(self):
+        for v in self.batch_videos:                   # 这批确认完了:临时状态清掉(没摆成的原因在记录里)
+            self.row_note.pop(v.path, None)
         for i in range(len(self.videos)):
             self._fill_row(i)
         self._update_sum()
@@ -655,7 +703,7 @@ class MainWindow(QMainWindow):
                 per[f"{v.account} · {v.employee}"] = per.get(f"{v.account} · {v.employee}", 0) + 1
             msg += f"\n注意:里面还有 {len(left)} 条软件没记成「已发」:\n" + "\n".join(f"  · {k}:{n} 条" for k, n in per.items())
             msg += "\n(手动发了的可以先选中点「标成已发」)"
-        if not self._ask("这天发完了,挪走", msg + "\n\n挪吗?", "挪走", "先不"):
+        if not self._ask("这天发完了,挪走", msg + "\n\n挪吗?", "挪走", "先不", default_no=bool(left)):
             return
         from qe.fsops import MoveError
         try:
@@ -737,6 +785,10 @@ class MainWindow(QMainWindow):
         self.c_rec_date.blockSignals(False)
         date = self.c_rec_date.currentData() or ""
         s = self.rec.summary(date)
+        tot = {k: sum(int(x[k] or 0) for x in s) for k in ("sent", "failed", "unsure", "ready")}
+        self.rec_cards.set(sent=(tot["sent"], "good" if tot["sent"] else ""), fail=(tot["failed"], "warn" if tot["failed"] else ""),
+                           unsure=(tot["unsure"], "warn" if tot["unsure"] else ""), ready=tot["ready"],
+                           sent_sub="" if date else "全部日期")
         self.t_sum.setRowCount(len(s))
         def short(t):                              # 「2026-10-15 18:42:45」→「10-15 18:42:45」(审查:时分秒被截掉了)
             return str(t or "")[5:] if str(t or "")[:2] == "20" else str(t or "")
@@ -748,7 +800,12 @@ class MainWindow(QMainWindow):
         self.t_rec.setRowCount(len(rows))
         for i, x in enumerate(rows):
             for c, k in enumerate(["date", "account", "employee", "title", "status", "prepared_at", "published_at", "note"]):
-                it = QTableWidgetItem(short(x[k]) if k.endswith("_at") else str(x[k] or ""))
+                val = short(x[k]) if k.endswith("_at") else str(x[k] or "")
+                if k == "employee" and val == "接口":
+                    val = "16 个号"                       # 接口发的,员工一栏写人话
+                if k == "note" and val.startswith("article_id="):
+                    val = ""                              # 发成了的编号放鼠标悬停,不占地方
+                it = QTableWidgetItem(val)
                 it.setToolTip(str(x[k] or ""))
                 self.t_rec.setItem(i, c, it)
             if x["status"] in ("没发成", "结果不明", "发布中"):
@@ -759,6 +816,11 @@ class MainWindow(QMainWindow):
         for c in (0, 1, 2, 4, 5, 6):
             self.t_rec.resizeColumnToContents(c)
         self.t_sum.resizeColumnsToContents()
+        self.t_sum.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for i in range(self.t_sum.rowCount()):
+            it = self.t_sum.item(i, 2)
+            if it and it.text() == "接口":
+                it.setText("16 个号")
 
     def export_records(self):
         date = self.c_rec_date.currentData() or ""
@@ -778,8 +840,19 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QCheckBox, QGroupBox
         d = QDialog(self)
         d.setWindowTitle("设置")
-        d.resize(760, 560)
-        outer = QVBoxLayout(d)
+        from PySide6.QtWidgets import QScrollArea
+        d.resize(780, 640)
+        avail = self.screen().availableGeometry().height() if self.screen() else 900
+        d.setMaximumHeight(max(480, avail - 60))
+        dv = QVBoxLayout(d)
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QScrollArea.Shape.NoFrame)
+        inner = QWidget()
+        inner.setObjectName("page")
+        outer = QVBoxLayout(inner)
+        sa.setWidget(inner)
+        dv.addWidget(sa, 1)
 
         def path_row(text: str) -> tuple[QWidget, QLineEdit]:
             """路径框 + 「选…」按钮(审查:路径框太短看不全,也没法点选文件夹)。{month} 这种模板就只取前面那截当起点。"""
@@ -812,7 +885,15 @@ class MainWindow(QMainWindow):
         sp.setValue(int(self.st.get("batch_size", 10)))
         f.addRow("素材文件夹", w_root)
         f.addRow("一天发完挪到", w_arc)
-        f.addRow("", QLabel("{month} 会换成日期的月份,比如 10.15 → 10"))
+        prev = QLabel("")
+        prev.setStyleSheet("color:#8a8b91")
+        prev.setWordWrap(True)
+
+        def show_prev():
+            prev.setText("比如 10.15 那天的会挪到:" + os.path.join(e_arc.text().replace("{month}", "10"), "10.15"))
+        e_arc.textChanged.connect(lambda _t: show_prev())
+        show_prev()
+        f.addRow("", prev)
         f.addRow("号和缩写", e_acc)
         f.addRow("一批几条", sp)
         outer.addWidget(g1)
@@ -827,13 +908,13 @@ class MainWindow(QMainWindow):
         sp_gap.setSuffix(" 秒")
         sp_gap.setValue(int(self.st.get("api_interval", 5) or 0))
         w_api, e_api_arc = path_row(self.st.get("api_archive", ""))
-        k_game = QCheckBox("下面按游戏分子文件夹(CSGO、DNF、光与夜之恋 …,名字 = 旧软件「账号」那一栏)")
+        k_game = QCheckBox("按游戏放进子文件夹(CSGO、DNF、光与夜之恋 …)")
         k_game.setChecked(bool(self.st.get("api_archive_by_game", True)))
         f2.addRow("发成了挪到", w_api)
         f2.addRow("", k_game)
         f2.addRow("几个号一起发", sp_thr)
         f2.addRow("每条间隔", sp_gap)
-        f2.addRow("", QLabel("旧软件是「线程 1、间隔 5 秒」:一条一条发,上一条发完歇 5 秒再发下一条"))
+        f2.addRow("", QLabel("1 = 一个号一个号地发,最稳;间隔 = 上一条发完歇几秒再发下一条"))
         b_mig = QPushButton("从旧软件搬账号…")
         b_mig.setToolTip("从旧软件「企鹅号批量发布」的数据库(qepm.db)把 16 个号搬过来。密钥加密存在这台电脑上,不显示。")
         b_mig.clicked.connect(self.api_tab.migrate)
@@ -850,7 +931,7 @@ class MainWindow(QMainWindow):
             c_theme.addItem(f"{n} —— {t['desc']}", n)
         c_theme.setCurrentIndex(max(0, c_theme.findData(self.st.get("theme", ""))))
         f4.addRow("界面风格", c_theme)
-        f4.addRow("", QLabel("换了以后关掉软件再打开生效"))
+        f4.addRow("", QLabel("换了以后关掉软件再打开就是新的样子"))
         outer.addWidget(g4)
         g3 = QGroupBox("AI(两边共用)")
         f3 = QFormLayout(g3)
@@ -863,7 +944,7 @@ class MainWindow(QMainWindow):
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(d.accept)
         bb.rejected.connect(d.reject)
-        outer.addWidget(bb)
+        dv.addWidget(bb)
         if d.exec() != QDialog.DialogCode.Accepted:
             return
         accs = []

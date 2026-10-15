@@ -8,10 +8,10 @@ BASE_FONT = "font-family:'Microsoft YaHei';font-size:13px;"
 
 THEMES = {
     "抖音创作者": {
-        "desc": "白卡片、浅灰底、红粉色强调、大数字(用户 2026-10-15 选的)",
+        "desc": "白卡片、浅灰底、红粉色强调、大数字",
         "pal": {"window": "#f5f6f7", "base": "#ffffff", "alt": "#fafafb", "text": "#161823", "button": "#ffffff",
                 "highlight": "#ffe8ed", "htext": "#161823", "mid": "#e6e7ea", "muted": "#8a8b91", "side": "#ffffff"},
-        "accent": "#fe2c55", "accent_hover": "#e8173f", "soft": "#fff0f3", "radius": 8,
+        "accent": "#fe2c55", "accent_hover": "#e8173f", "soft": "#fff0f3", "select": "#e3ecff", "radius": 8,
         "rows": {"yellow": "#fff7e0", "red": "#ffe7eb", "green": "#e6f7ec", "orange": "#ffeedd", "ready": "#eef4ff"},
     },
     "清爽白": {
@@ -108,7 +108,14 @@ QPlainTextEdit#log {{ color:{p['muted']}; }}
 QTreeWidget, QTableWidget {{ background:{p['base']}; alternate-background-color:{p['alt']}; border:1px solid {p['mid']};
     border-radius:{r + 2}px; gridline-color:{p['mid']}; }}
 QTreeWidget::item, QTableWidget::item {{ padding:4px 2px; }}
-QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{soft}; color:{p['text']}; }}
+QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{t.get('select') or soft}; color:{p['text']}; }}
+QLabel#scope {{ color:#1aa260; font-weight:bold; padding:4px 0; }}
+QLabel#scope[sel="true"] {{ background:{soft}; color:{a}; border-radius:{r}px; padding:4px 10px; }}
+QLabel#hint {{ background:{soft}; color:{a}; border:1px solid {_blend(a, p['base'], 0.35)}; border-radius:{r}px; padding:8px 12px;
+    font-weight:bold; }}
+QFrame#stat[click="true"]:hover {{ border-color:{a}; }}
+QPushButton#link {{ border:none; background:transparent; color:{p['muted']}; padding:2px 6px; }}
+QPushButton#link:hover {{ color:{a}; }}
 QHeaderView::section {{ background:{p['base']}; border:none; border-bottom:1px solid {p['mid']}; padding:8px 6px;
     font-weight:bold; color:{p['muted']}; }}
 QGroupBox {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r + 2}px; margin-top:16px; padding:12px 10px 8px 10px; }}
@@ -155,4 +162,5 @@ def apply(app, name: str) -> str:
     W.YELLOW, W.GREEN = QBrush(QColor(t["rows"]["yellow"])), QBrush(QColor(t["rows"]["green"]))
     # 教育页「摆好」那行:要和背景分得开(审查:原来用 alt,几乎和底色一样看不出来)
     W.GREY = QBrush(QColor(t["rows"].get("ready") or t["rows"]["orange"]))
+    W.RED = QBrush(QColor(t["rows"]["red"]))
     return name

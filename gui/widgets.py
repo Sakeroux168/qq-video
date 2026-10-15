@@ -1,6 +1,6 @@
 """界面小部件:大数字卡片、左边导航栏(用户 2026-10-15 选的「抖音创作者中心」那种:白卡片、大数字、红粉色强调)。
 颜色都在 gui/theme.py 的 QSS 里按 objectName 配(#stat / #statVal / #sidebar / #nav …),这里只管摆。"""
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
                                QWidget)
 
@@ -9,7 +9,9 @@ class StatCards(QWidget):
     """一排大数字卡片:StatCards([("all", "今日待发"), ("ok", "能发"), ...]);set(all=51, ok=43, ...)。
     tone:"" 普通 / "good" 绿 / "warn" 红(要处理)/ "muted" 灰。"""
 
-    def __init__(self, items: list[tuple[str, str]], parent=None):
+    clicked = Signal(str)                                # 点了哪张卡片(只有 clickable 里的才发)
+
+    def __init__(self, items: list[tuple[str, str]], parent=None, clickable: tuple = ()):
         super().__init__(parent)
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
@@ -33,8 +35,19 @@ class StatCards(QWidget):
             v.addWidget(val)
             v.addWidget(sub)
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            if key in clickable:
+                card.setProperty("click", True)
+                card.setProperty("key", key)
+                card.setCursor(Qt.CursorShape.PointingHandCursor)
+                card.setToolTip({"bad": "点这里:只看要处理的", "ok": "点这里:看全部"}.get(key, ""))
+                card.installEventFilter(self)
             h.addWidget(card, 1)
             self.vals[key], self.subs[key] = val, sub
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.MouseButtonRelease and obj.property("key"):
+            self.clicked.emit(obj.property("key"))
+        return False
 
     def set(self, **kw):
         for k, x in kw.items():
