@@ -55,13 +55,21 @@ def join_topic(parts: dict, tag: str) -> str:
     return f"{parts['body']}{parts['sep']}#{tag}"
 
 
-def bad_format(stem: str) -> bool:
-    """只有一个话题,但写成「# 话题」(# 后面带空格)/「##话题」/ 全角「＃」—— 平台可能不认成话题。
-    结尾多个空格、话题前粘个 n 这种不算(不影响认话题,用户嫌标黄太多)。"""
+def tidy(stem: str) -> str | None:
+    """话题写法整理(不用 AI,规矩固定):结尾空格去掉、「# 话题」「##话题」「＃话题」→「#话题」、
+    话题前粘的 n(丢了反斜杠的换行)去掉、重复的话题去掉。不用改返回 None。
+    挂了好几个不同话题的不在这管(那个要 AI 挑),返回 None。"""
     p = split_topics(stem)
-    if len(p["tags"]) != 1:
-        return False
-    return re.search(r"[#＃]\s|[#＃]{2}|＃", stem[len(p["body"]):]) is not None
+    if len(p["tags"]) > 1:
+        return None
+    out = join_topic(p, p["tags"][0]) if p["tags"] else stem
+    out = sanitize(out)
+    return None if out == stem else out
+
+
+def bad_format(stem: str) -> bool:
+    """话题写法不对(要严格:用户 2026-10-15「就是得判严格」)= tidy 会改它。"""
+    return tidy(stem) is not None
 
 
 def clean_tag(tag: str) -> str:

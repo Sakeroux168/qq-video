@@ -151,6 +151,10 @@ class ApiTab(QWidget):
         self.b_settopic.setToolTip("话题全换成你填的那一个,比如填「英雄联盟」→ 结尾变成 #英雄联盟。原来没话题的就接在后面。能撤销。\n"
                                    "这个必须先选(选号 = 这个号全部),免得把别的游戏 / 动漫的号也改了。")
         self.b_settopic.clicked.connect(lambda: self.set_topic())
+        self.b_tidy = QPushButton("整理话题写法")
+        self.b_tidy.setToolTip("「话题写法不对」的一键改好,不用 AI、不花钱:\n"
+                               "结尾空格去掉;「# 话题」「##话题」→「#话题」;话题前粘的 n 去掉;重复的话题去掉。能撤销。")
+        self.b_tidy.clicked.connect(lambda: self.tidy_titles())
         self.b_undo = QPushButton("撤销上次改名")
         self.b_undo.setToolTip("把上一次改话题 / 批量改话题 / 改标题改回去")
         self.b_undo.clicked.connect(self.undo_topic)
@@ -161,7 +165,7 @@ class ApiTab(QWidget):
         self.b_pub.clicked.connect(lambda: self.run_publish())
         self.b_stop = QPushButton("停")
         self.b_stop.clicked.connect(self.stop)
-        for b in (self.b_check, self.b_vert, self.b_topic, self.b_settopic, self.b_undo):
+        for b in (self.b_check, self.b_vert, self.b_tidy, self.b_topic, self.b_settopic, self.b_undo):
             bar.addWidget(b)
         bar.addStretch(1)
         bar.addWidget(self.b_pub)
@@ -182,7 +186,7 @@ class ApiTab(QWidget):
         self._say_main(m)
 
     def _busy(self, on: bool):
-        for b in (self.b_check, self.b_vert, self.b_topic, self.b_settopic, self.b_undo, self.b_pub, self.b_clear,
+        for b in (self.b_check, self.b_vert, self.b_tidy, self.b_topic, self.b_settopic, self.b_undo, self.b_pub, self.b_clear,
                   self.c_date):
             b.setEnabled(not on)
         self.b_stop.setEnabled(on)
@@ -209,6 +213,7 @@ class ApiTab(QWidget):
         self.b_check.setText(f"检查({tag})")
         self.b_vert.setText(f"横屏转竖屏({tag})")
         self.b_topic.setText(f"话题只留一个 AI({tag})")
+        self.b_tidy.setText(f"整理话题写法({tag})")
         self.b_settopic.setText(f"批量改话题…({tag})" if sel else "批量改话题…(先选)")
         self.b_pub.setText(f"发布({tag}里能发的)")
 
@@ -465,6 +470,7 @@ class ApiTab(QWidget):
             mine = self.rows_of(nick)
             for text, fn in ((f"检查选中的 {len(sel)} 条", lambda: self.run_check(sel)),
                              (f"横屏转竖屏(选中的 {len(sel)} 条)", lambda: self.run_vertical(sel)),
+                             (f"整理话题写法(选中的 {len(sel)} 条)", lambda: self.tidy_titles(sel)),
                              (f"话题只留一个(AI,选中的 {len(sel)} 条)", lambda: self.run_topic(sel)),
                              (f"批量改话题(选中的 {len(sel)} 条)…", lambda: self.set_topic(sel)),
                              (f"发布选中的 {len(sel)} 条", lambda: self.run_publish(sel)),
@@ -638,6 +644,18 @@ class ApiTab(QWidget):
         self.st.save()
         n = self._rename_rows(rows, lambda t: topic.with_topic(t, tag), f"改成 #{tag}")
         self.say(f"批量改话题:{n} 条改成 #{tag}")
+
+    def tidy_titles(self, only: list[int] | None = None):
+        rows = [i for i in self.target_rows(only) if topic.bad_format(self.videos[i].title) and not self._sent(i)]
+        if not rows:
+            QMessageBox.information(self, "整理话题写法", "这些里没有话题写法不对的。")
+            return
+        ex = "\n".join(f"{self.videos[i].title!r}\n  → {topic.tidy(self.videos[i].title)!r}" for i in rows[:3])
+        if QMessageBox.question(self, "整理话题写法", f"{self._who(rows)}话题写法不对,一键改好?(不用 AI)\n\n比如:\n{ex}\n\n"
+                                                     "同名封面跟着改。改错了点「撤销上次改名」。") != QMessageBox.StandardButton.Yes:
+            return
+        n = self._rename_rows(rows, topic.tidy, "整理写法")
+        self.say(f"整理话题写法:改了 {n} 条")
 
     def edit_title(self, i: int):
         if not (0 <= i < len(self.videos)) or self._sent(i):
