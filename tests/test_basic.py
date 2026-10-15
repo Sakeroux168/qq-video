@@ -364,8 +364,9 @@ def test_api(tmp: Path):
         omapi.TRUNK = real_trunk
     check(b"".join(s2.trunks) == bytes(range(10)) and len(s2.trunks) == 4, "分片上传:一片接一片,传完不多传(end_offset 含最后一个字节)")
     check(r == {"vid": "V7", "article_id": "A9", "transaction_id": "P1", "status": "成功"}, "发布流程:传 → vid → 发 → 等成功")
-    check(pub == {"title": v.title, "tags": "", "vid": "V7", "cat": 1604, "desc": v.title, "aigc_userstatement": "2"},
-          "发的内容和旧软件一样(标题 = 简介 = 文件名,非 AI)")
+    check(pub == {"title": v.title, "tags": "", "vid": "V7", "cat": 1604, "desc": v.title, "aigc_userstatement": "2",
+                  "ext_info": "self_declare=0"},
+          "发的内容:标题 = 简介 = 文件名,分类按号,AI 声明非 AI,自主声明无需标注(self_declare=0)")
     dst = apisrc.move_published(v.path, str(tmp / "已发布"))
     check(os.path.isfile(dst) and not os.path.exists(v.path), "发完挪走")
 

@@ -776,9 +776,11 @@ class ApiTab(QWidget):
         how = "一条一条发" if par == 1 else f"{par} 个号一起发"
         by_game = bool(self.st.get("api_archive_by_game", True))
         subs = "、".join(dict.fromkeys(apisrc.game_folder(accs[n]) for n in by_acc))
-        msg = (f"用接口发 {len(rows)} 条({len(by_acc)} 个号:{'、'.join(by_acc)})" +
+        cats = ";".join(f"{n} {apiacc.CATEGORIES.get(accs[n].get('category'), accs[n].get('category'))}" for n in by_acc)
+        msg = (f"用接口发 {len(rows)} 条({len(by_acc)} 个号)" +
                (f",有问题的 {held} 条不发" if held else "") +
-               f"。\n\n标题、简介 = 文件名;分类按号;声明「非 AI 生成」;封面平台自己截。\n"
+               f"。\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;封面平台自己截。\n"
+               f"分类:{cats}\n"
                f"{how},每条之间歇 {gap:g} 秒。\n发成了挪到:\n{dest}" +
                (f"\n下面按游戏分子文件夹:{subs}" if by_game else "") + "\n\n发吗?")
         if QMessageBox.question(self, "发布", msg) != QMessageBox.StandardButton.Yes:

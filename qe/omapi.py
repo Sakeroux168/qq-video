@@ -121,9 +121,14 @@ class Client:
             time.sleep(3)
         raise ApiError("上传完 5 分钟还没拿到 vid")
 
-    def publish(self, vid: str, title: str, cat: int, desc: str = "", aigc: str = "2", tags: str = "") -> dict:
+    def publish(self, vid: str, title: str, cat: int, desc: str = "", aigc: str = "2", tags: str = "",
+                self_declare: int | None = 0) -> dict:
+        """aigc "2" = AI 声明「非 AI 生成」;self_declare 0 = 自主声明「无需标注」(网页上选无需标注提交的就是 id 0;
+        文档:ext_info 里写 self_declare=值)。旧软件值是 0 时干脆不带,后台显示「添加内容自主声明」(空的),用户要的是无需标注。"""
         body = {"title": title, "tags": tags, "vid": vid, "cat": int(cat), "desc": (desc or title)[:200],
                 "aigc_userstatement": aigc}
+        if self_declare is not None:
+            body["ext_info"] = f"self_declare={int(self_declare)}"
         return self._call("POST", "/articlev2/clientpubvideo", "发布", json=body)
 
     def wait_done(self, tid: str, timeout: float = 600, stop=None) -> str:
@@ -140,14 +145,15 @@ class Client:
             time.sleep(5)
         return "处理中"
 
-    def send(self, path: str, title: str, cat: int, on_progress=None, stop=None, log=None) -> dict:
+    def send(self, path: str, title: str, cat: int, on_progress=None, stop=None, log=None,
+             self_declare: int | None = 0, aigc: str = "2") -> dict:
         """整条:传 → vid → 发 → 等结果。返回 {"vid","article_id","transaction_id","status"}。"""
         say = log or self.log
         say("上传中")
         tid = self.upload(path, on_progress=on_progress, stop=stop)
         vid = self.wait_vid(tid, stop=stop)
         say("发布中")
-        d = self.publish(vid, title, cat)
+        d = self.publish(vid, title, cat, aigc=aigc, self_declare=self_declare)
         ptid = d.get("transaction_id") or ""
         st = self.wait_done(ptid, stop=stop) if ptid else "处理中"
         return {"vid": vid, "article_id": str(d.get("article_id") or ""), "transaction_id": ptid, "status": st}
