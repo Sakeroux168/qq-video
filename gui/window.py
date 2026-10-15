@@ -487,6 +487,14 @@ class MainWindow(QMainWindow):
         n = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
         return acc, [v for v in todo if v.account == acc][:n]
 
+    def _nothing_left(self) -> str:
+        """没有能摆的了:说清楚是真发完了,还是剩下的缺无字封面(png)。"""
+        nocover = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and not v.cover]
+        if nocover:
+            return (f"能摆的都摆完了,但还有 {len(nocover)} 条没有无字封面(png),没摆,比如「{nocover[0].title[:24]}」。\n\n"
+                    "让员工补上 png 以后点「刷新」再摆。")
+        return "勾上的员工都发完了(或者都摆好了等你确认)。"
+
     def _auto_toggled(self, on: bool):
         self.st["auto_publish"] = bool(on)
         self.st.save()
@@ -499,7 +507,7 @@ class MainWindow(QMainWindow):
             return
         acc, vids = self.next_batch()
         if not vids:
-            QMessageBox.information(self, "企鹅号发布助手", "勾上的员工里没有要发的了(都发过 / 摆好了)。")
+            QMessageBox.information(self, "企鹅号发布助手", self._nothing_left())
             return
         warn = [v for v in vids if v.warn]
         # 没有无字封面(png)的不摆,跳过(审查:原来一条没 png 就挡住这个号后面所有的)
@@ -559,7 +567,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(3000, lambda: None if getattr(self, "_chain_stop", False) or not self.k_auto.isChecked()
                                   else self.start_batch(chained=True))
             elif self.k_auto.isChecked():
-                QMessageBox.information(self, "发完了", "勾上的员工都发完了。")
+                QMessageBox.information(self, "发完了", self._nothing_left())
             return
         if pub:
             self.say(f"⚠ {pub}")
@@ -677,12 +685,18 @@ class MainWindow(QMainWindow):
         dlg = QProgressDialog(title, None, 0, 0, self)
         dlg.setWindowTitle("请稍等")
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        dlg.setMinimumDuration(400)
-        t.start()
-        if t.isRunning():
-            loop.exec()
-        t.wait()
-        dlg.close()
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)                               # Qt6 要先 setValue 才会按时弹出来(审查)
+        dlg.show()
+        self.setEnabled(False)
+        try:
+            t.start()
+            if t.isRunning():
+                loop.exec()
+            t.wait()
+        finally:
+            dlg.close()
+            self.setEnabled(True)
         if "e" in res:
             raise res["e"]
         return res.get("v")
@@ -859,5 +873,13 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
             j.stop()
-            j.wait(60000)
+            from PySide6.QtWidgets import QApplication, QProgressDialog
+            dlg = QProgressDialog("正在停:手上这条做完就关(上传大文件可能要一会儿)…", None, 0, 0, self)
+            dlg.setWindowTitle("请稍等")
+            dlg.setMinimumDuration(0)
+            dlg.setValue(0)
+            dlg.show()
+            while not j.wait(200):
+                QApplication.processEvents()
+            dlg.close()
         super().closeEvent(e)

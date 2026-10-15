@@ -22,7 +22,7 @@ def _busy_name(path: str) -> str:
 def _replace(src: str, dst: str):
     for k in range(2):
         try:
-            os.replace(src, dst)
+            os.rename(src, dst)                       # 不用 os.replace:检查完到挪之间目标被建出来也不会被盖掉
             return
         except PermissionError:
             if k:
@@ -42,6 +42,8 @@ def safe_move_file(src: str, dst: str) -> str:
     try:
         _replace(src, dst)
         return dst
+    except FileExistsError:
+        raise MoveError(f"目标已经有「{_busy_name(dst)}」了,不覆盖")
     except MoveError:
         raise
     except OSError as e:

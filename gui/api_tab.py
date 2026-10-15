@@ -247,10 +247,13 @@ class ApiTab(QWidget):
 
     def _busy(self, on: bool):
         has = bool(self.items)
+        quiet = on and getattr(self, "_quiet", False)   # 只是后台自动检查:换日期 / 刷新 / 选文件夹照样能点
         for b in (self.b_check, self.b_vert, self.b_topic, self.b_settopic, self.b_pub):
             b.setEnabled(not on and has)
-        for b in (self.b_undo, self.b_clear, self.c_date, self.b_pick, self.b_reload):
+        for b in (self.b_undo, self.b_clear):
             b.setEnabled(not on)
+        for b in (self.c_date, self.b_pick, self.b_reload):
+            b.setEnabled(not on or quiet)
         self.b_stop.setEnabled(on)
         if not on:
             self._update_scope()
@@ -290,8 +293,9 @@ class ApiTab(QWidget):
         else:
             self.lab_scope.setText(f"没选:管全部 {len(rows)} 条" if rows else "这天没有视频")
         self.b_clear.setVisible(bool(sel))
-        n = sum(1 for i in rows if self._can_send(i))
-        self.b_pub.setText(f"发布({n} 条)" if n else "发布")
+        n = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
+        retry = sum(1 for i in rows if self._can_send(i) and self.state.get(i, "").startswith(FAILED))
+        self.b_pub.setText(f"发布 {n} 条" + (f" + 重试 {retry}" if retry else "") if n or retry else "发布")
         self.b_settopic.setText("批量改话题…" if sel else "批量改话题…(先选)")
 
     def roots(self) -> list[str]:
@@ -593,6 +597,9 @@ class ApiTab(QWidget):
         self.st.save()
 
     def pick_folder(self, nick: str = ""):
+        if self.busy() and getattr(self, "_quiet", False):
+            self.job.stop()
+            self.job.wait()
         if self.busy():
             QMessageBox.information(self, "给号选文件夹", "后台还在做事(发布 / 转竖屏 / 改话题 / 检查),做完或点「停」以后再换文件夹。")
             return
@@ -619,6 +626,9 @@ class ApiTab(QWidget):
         self.load()
 
     def unpick(self, nick: str):
+        if self.busy() and getattr(self, "_quiet", False):
+            self.job.stop()
+            self.job.wait()
         if self.busy():
             return
         d = self.c_date.currentText()
@@ -682,6 +692,7 @@ class ApiTab(QWidget):
         self.state[i] = "已发" if sent else "没发成"
         self.say(f"「{v.title}」记成" + ("已发(你去后台看过了)" if sent else "没发(你去后台看过了,可以再发)"))
         self._fill(i)
+        self._update_scope()
 
     def reveal(self, row: int):
         if 0 <= row < len(self.videos):
@@ -702,7 +713,14 @@ class ApiTab(QWidget):
         self.job.start()
         return True
 
+    def _stale(self) -> bool:
+        """信号是不是从已经被换掉的旧任务来的(换日期时停掉的自动检查):是就不理,免得刷到新列表的别的行上。"""
+        s = self.sender()
+        return s is not None and s is not self.job
+
     def _on_row(self, i: int, t: str):
+        if self._stale():
+            return
         if i == PROGRESS:
             self.lab_scope.setText(t)
             return
@@ -719,6 +737,9 @@ class ApiTab(QWidget):
             self._fill(i)
 
     def _on_done(self, msg: str):
+        if self._stale():
+            return
+        self._quiet = False
         self._busy(False)
         if msg:
             self.say(msg)
@@ -741,14 +762,24 @@ class ApiTab(QWidget):
         ff = vertical.ffmpeg_path()
 
         def fn(emit, stopped):
-            for k, i in enumerate(rows):
+            done = [0]
+            lock = threading.Lock()
+
+            def one(i):
                 if stopped():
-                    return "检查停下了"
+                    return
                 checks.check_one(vs[i], words, ff)
                 self._remember_check(vs[i])
                 emit(i, "")
-                if k % 20 == 0:
-                    emit(PROGRESS, f"检查中 {k + 1}/{len(rows)}…")
+                with lock:
+                    done[0] += 1
+                    k = done[0]
+                if k % 10 == 0 or k == len(rows):
+                    emit(PROGRESS, f"检查中 {k}/{len(rows)}…")
+            with ThreadPoolExecutor(4) as ex:            # 4 条一起读(网络盘上一条条读太慢)
+                list(ex.map(one, rows))
+            if stopped():
+                return "检查停下了"
             got = [vs[i] for i in rows]
             land = sum(1 for v in got if checks.needs_vertical(v.checks))
             plat = sum(1 for v in got if v.checks.get("platform"))

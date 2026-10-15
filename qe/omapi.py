@@ -192,6 +192,7 @@ class Client:
         vid = self.wait_vid(tid, stop=stop)
         if stop and stop():
             raise Stopped("停下了")
+        self.token()                                     # 换 token 出错 = 明确没发,不算结果不明
         if before_publish:
             before_publish(vid)
         say("发布中")

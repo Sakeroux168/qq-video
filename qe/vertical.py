@@ -135,7 +135,8 @@ def _convert(src: Path, tmp: Path, ff: str, stop) -> tuple[str, str]:
     out = src.with_suffix(".mp4")
     k = 2
     while out.exists() and os.path.normcase(str(out)) != os.path.normcase(str(src)):
-        out = src.with_name(f"{src.stem} ({k}).mp4")
+        from .topic import _numbered
+        out = src.with_name(f"{_numbered(src.stem, k)}.mp4")
         k += 1
     os.replace(src, orig)
     try:

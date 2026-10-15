@@ -926,6 +926,57 @@ def test_squarish(tmp: Path):
         check((info["w"], info["h"]) == (1080, 1920), f"3:4 转成 1080×1920 -> {info['w']}×{info['h']}")
 
 
+def test_audit_r3(tmp: Path):
+    print("[复审修的:GBK 设置不打不开 / 撤销遇到占用不出错 / 转竖屏撞名序号位置 / C# 不吃 / 话题间的 n / 挪文件不覆盖]")
+    from qe import fsops, topic, vertical
+    from qe.config import Settings
+
+    gbk = tmp / "st_gbk.json"
+    gbk.write_bytes("{'素材': 乱码}".encode("gbk"))
+    st = Settings(gbk)
+    check(st.broken and os.path.exists(st.broken), "设置文件是 GBK / 乱码:改名留着,照样打开")
+
+    d = tmp / "r3_undo"
+    d.mkdir()
+    (d / "甲 #a #b.mp4").write_bytes(b"x")
+    (d / "甲 #a #b.png").write_bytes(b"x")
+    led = topic.Ledger(tmp / "r3_led.json")
+    mv = topic.rename_logged(str(d / "甲 #a #b.mp4"), "甲 #a", led, "t¦整理话题¦1")
+    fh = open(mv[0][1], "rb")
+    try:
+        ok, bad, skipped = led.undo_last()
+    finally:
+        fh.close()
+    names = sorted(os.listdir(d))
+    check(bad >= 1 and names == ["甲 #a.mp4", "甲 #a.png"] and led.last(), f"撤销遇到被占用:不出错、封面不乱改、留着下次撤 -> {names}")
+    ok, bad, skipped = led.undo_last()
+    check(sorted(os.listdir(d)) == ["甲 #a #b.mp4", "甲 #a #b.png"], "关掉占用再撤一次:改回来了")
+
+    check(topic.tidy("学习C#") is None and topic.split_topics("打法 #王者荣耀n#英雄联盟")["tags"] == ["王者荣耀", "英雄联盟"],
+          "「学习C#」不吃掉 #;两个话题中间粘的 n 去掉")
+
+    ff = vertical.ffmpeg_path()
+    if ff:
+        import subprocess
+        vd = tmp / "r3_vert"
+        vd.mkdir()
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25", "-t", "1",
+                        "-c:v", "libx264", str(vd / "同名 #原神.mov")], check=True)
+        (vd / "同名 #原神.mp4").write_bytes(b"keep")
+        out, _o = vertical.to_vertical(str(vd / "同名 #原神.mov"), ff)
+        check(os.path.basename(out) == "同名 (2) #原神.mp4", f"转竖屏撞名:序号在话题前面 -> {os.path.basename(out)}")
+
+    a, b = tmp / "r3_a.txt", tmp / "r3_b.txt"
+    a.write_bytes(b"A")
+    b.write_bytes(b"B")
+    try:
+        fsops._replace(str(a), str(b))
+        over = b.read_bytes() == b"A"
+    except OSError:
+        over = False
+    check(not over and b.read_bytes() == b"B", "挪文件:目标已经有了就报错,不会盖掉")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1133,6 +1184,7 @@ if __name__ == "__main__":
     test_audit_r2(tmp)
     test_ui_r1(tmp)
     test_squarish(tmp)
+    test_audit_r3(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

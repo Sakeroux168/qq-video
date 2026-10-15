@@ -48,6 +48,7 @@ def split_topics(name: str) -> dict:
     run = m.group(1)
     seen, tags = set(), []
     for t in re.findall(_TAG, run):
+        t = re.sub(r"(?<=[\u4e00-\u9fff])n$", "", t)      # 中文话题后面粘的 n(丢了反斜杠的换行)
         if t.lower() in seen:
             continue
         seen.add(t.lower())
@@ -66,7 +67,7 @@ def tidy(stem: str) -> str | None:
     p = split_topics(stem)
     if len(p["tags"]) > 1:
         return None
-    out = join_topic(p, p["tags"][0]) if p["tags"] else re.sub(r"[\s#＃]+$", "", stem)
+    out = join_topic(p, p["tags"][0]) if p["tags"] else re.sub(r"(?<![A-Za-z0-9+#＃])[#＃]+$", "", stem.rstrip()).rstrip()
     out = sanitize(out)
     if not out:                                   # 整个标题都是空格 / #:改不了,交给人
         return None
@@ -274,15 +275,33 @@ class Ledger:
             return 0, 0, 0
         b = data.pop()
         ok = bad = skipped = 0
+        left = []
         for g in reversed(self.groups_of(b)):
-            if skip and g and skip(g[0][1]):
+            if not g:
+                continue
+            if skip and skip(g[0][1]):
                 skipped += 1
                 continue
-            for old, new in reversed(g):
-                if os.path.exists(new) and not os.path.exists(old):
-                    os.rename(new, old)
-                    ok += 1
-                else:
+            vold, vnew = g[0]
+            try:
+                if not os.path.exists(vnew) or os.path.exists(vold):
+                    raise OSError("文件不在了 / 原名被占了")
+                os.rename(vnew, vold)                 # 先改视频;改不回(被占着)就别动它的封面,免得名字对不上
+                ok += 1
+            except OSError:
+                bad += 1
+                left.append(g)
+                continue
+            for old, new in g[1:]:
+                try:
+                    if os.path.exists(new) and not os.path.exists(old):
+                        os.rename(new, old)
+                        ok += 1
+                    else:
+                        bad += 1
+                except OSError:
                     bad += 1
+        if left:                                      # 改不回的留着,关掉占用的程序后还能再撤一次
+            data.append({"at": b.get("at", ""), "groups": list(reversed(left))})
         self._save(data)
         return ok, bad, skipped

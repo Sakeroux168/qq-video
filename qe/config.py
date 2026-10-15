@@ -85,11 +85,11 @@ class Settings(dict):
     def _read(self):
         """读文件:没有 → None;坏了 → 改名留着,返回 None。"""
         try:
-            txt = self.path.read_text("utf-8")
+            raw = self.path.read_bytes()
         except OSError:
             return None
         try:
-            d = json.loads(txt)
+            d = json.loads(raw.decode("utf-8-sig"))
             if isinstance(d, dict):
                 return d
         except ValueError:

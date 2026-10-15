@@ -60,6 +60,8 @@ class Records:
     def _fill(self):
         """新记录(不管是哪个版本的软件写的)补上 pkey。有索引,没有要补的时候很快。"""
         with _LOCK:
+            if self.conn.execute("SELECT 1 FROM posts WHERE pkey IS NULL LIMIT 1").fetchone() is None:
+                return
             self.conn.execute("UPDATE posts SET pkey=nk(path) WHERE pkey IS NULL")
             self.conn.commit()
 
