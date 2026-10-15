@@ -1,0 +1,6 @@
+PySide6
+opencv-python>=4.8
+numpy
+Pillow
+openpyxl
+pyinstaller
