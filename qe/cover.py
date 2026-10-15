@@ -70,6 +70,33 @@ def focus_of(faces) -> dict:
     return {"cx": (x0 + x1) / 2, "cy": (y0 + y1) / 2 + (y1 - y0) * 0.3, "x0": max(0.0, x0), "x1": min(1.0, x1)}
 
 
+def subject_of(path: str) -> dict:
+    """没人的封面:找画面主体(用户:「没有人 那就以这个物的主体为中心」)。
+    频率调谐显著性(Achanta 2009):每个点的颜色离整张图的平均颜色有多远(Lab),主体一般和背景差得多;
+    再往画面中间压一点(边上多半是桌面、墙)。取最显眼的 15% 的重心。返回 {cx, cy}(0~1),读不出来返回 {}。
+    实测今天 8 张没人的:背影写作业的小孩、一盘鸡块、零食、书桌、手表、湖边远处的人都框得准。"""
+    import cv2
+    img = read_image(path)
+    if img is None:
+        return {}
+    h, w = img.shape[:2]
+    s = 640 / w
+    img = cv2.resize(img, (640, max(1, int(h * s))))
+    lab = cv2.cvtColor(cv2.GaussianBlur(img, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    sal = np.linalg.norm(lab - lab.reshape(-1, 3).mean(0), axis=2)
+    sal = cv2.GaussianBlur(sal, (0, 0), 6)
+    hh, ww = sal.shape
+    yy, xx = np.mgrid[0:hh, 0:ww]
+    prior = np.exp(-(((xx / ww - 0.5) / 0.45) ** 2 + ((yy / hh - 0.5) / 0.55) ** 2))
+    sal = sal * (0.6 + 0.4 * prior)
+    thr = np.quantile(sal, 0.85)
+    m = np.where(sal >= thr, sal - thr, 0)
+    tot = float(m.sum())
+    if tot <= 0:
+        return {}
+    return {"cx": float((m * xx).sum() / tot / ww), "cy": float((m * yy).sum() / tot / hh), "subject": True}
+
+
 def decide(v) -> None:
     """给一条视频定封面:填 v.cover / cover_kind / cover_why / plan / warn。"""
     v.warn = False
@@ -85,7 +112,12 @@ def decide(v) -> None:
         v.cover, v.cover_kind, v.cover_why, v.plan, v.warn = v.png, "横", f"认人出错({type(e).__name__}),框放中间", {}, True
         return
     if not faces:
-        v.cover, v.cover_kind, v.cover_why, v.plan, v.warn = v.png, "横", "没认出人,框放中间(看一眼)", {}, True
+        try:
+            plan = subject_of(v.png)
+        except Exception:
+            plan = {}
+        v.cover, v.cover_kind, v.plan = v.png, "横", plan
+        v.cover_why, v.warn = ("没人,框对准画面主体", False) if plan else ("没认出人,框放中间(看一眼)", True)
         return
     f = focus_of(faces)
     narrow_w = (h * NARROW) / w if w else 1.0          # 9:16 框占图宽的几成
@@ -105,7 +137,7 @@ def _use_jpg(v, why: str):
     v.cover, v.cover_kind, v.cover_why = v.jpg, "竖", why
     try:
         faces, _ = faces_in(v.jpg)
-        v.plan = focus_of(faces) if faces else {}
+        v.plan = focus_of(faces) if faces else subject_of(v.jpg)
     except Exception:
         v.plan = {}
 
@@ -121,7 +153,7 @@ def set_kind(v, kind: str) -> None:
         except Exception:
             faces = []
         v.cover, v.cover_kind, v.cover_why, v.warn = v.png, "横", "手动选的横封面", False
-        v.plan = focus_of(faces) if faces else {}
+        v.plan = focus_of(faces) if faces else subject_of(v.png)
 
 
 # ---------------- 裁剪框要拖多远 ----------------

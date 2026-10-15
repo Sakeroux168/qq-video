@@ -96,7 +96,10 @@ def test_cover(tmp: Path):
         check(v.cover_kind == "竖", f"三个小孩分得开:竖封面 -> {v.cover_why}")
         v = mk("十种添加剂含量较高零食，建议家长减少给孩子食用")
         C.decide(v)
-        check(v.cover_kind == "横" and v.warn and not v.plan, f"没人(零食):横封面放中间,标黄 -> {v.cover_why}")
+        check(v.cover_kind == "横" and not v.warn and 0.45 < v.plan.get("cx", 0) < 0.7, f"没人(零食):横封面,框对准零食堆 -> {v.cover_why} {v.plan}")
+        g = mk("五款辅助写作业工具，帮助改善孩子写作业专注力问题")
+        C.decide(g)
+        check(g.plan.get("cx", 0) > 0.58, f"背影写作业的小孩(认不出脸):框对准小孩那边 -> {g.plan.get('cx')}")
         C.set_kind(v, "竖")
         check(v.cover_kind == "竖" and v.cover.endswith(".jpg") and not v.warn, "手动改成竖的")
     else:
