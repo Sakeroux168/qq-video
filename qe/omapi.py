@@ -91,11 +91,14 @@ class Client:
                 chunk = f.read(TRUNK)
                 d = self._call("POST", "/video/clientuploadtrunk", "上传视频", timeout=600,
                                data={"transaction_id": tid, "start_offset": str(off)},
-                               files={"mediatrunk": (os.path.basename(path), chunk, "application/octet-stream")})
-                end = int(d.get("end_offset") or 0)
-                if end <= off:
+                               # 文件名只用英文:中文名平台报 invalid_file_upload(40023);旧软件也是传临时文件「qepm-chunk-*」
+                               files={"mediatrunk": (f"qepm-chunk-{off}", chunk, "application/octet-stream")})
+                # end_offset 是收到的最后一个字节的位置(从 0 数,含它):6498881 字节的文件传完回 6498880。
+                # 下一片从 end_offset + 1 开始;到文件大小就传完了(2026-10-15 真接口试出来的,按「= 文件大小」算会多传一次报 40023)
+                nxt = int(d.get("end_offset") or 0) + 1
+                if nxt <= off:
                     raise ApiError("上传视频:平台没收下这一片")
-                off = end
+                off = min(nxt, size)
                 if on_progress:
                     on_progress(off, size)
         return tid
@@ -107,7 +110,8 @@ class Client:
         end = time.time() + timeout
         while time.time() < end:
             d = self.transaction(tid)
-            vid = ((d.get("article_info") or {}).get("article_video_info") or {}).get("vid")
+            # 真接口(2026-10-15 试的):vid 在最外层 data.vid,article_info.article_video_info 是空的;文档写的是后者,两个都认
+            vid = d.get("vid") or ((d.get("article_info") or {}).get("article_video_info") or {}).get("vid")
             if vid:
                 return vid
             if "失败" in str(d.get("transaction_status") or ""):

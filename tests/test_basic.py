@@ -317,7 +317,7 @@ def test_api(tmp: Path):
 
     class S:
         def __init__(self):
-            self.calls, self.n = [], 0
+            self.calls, self.n, self.trunks = [], 0, []
 
         def post(self, url, **kw):
             self.calls.append(("token", kw["params"]["client_secret"]))
@@ -329,13 +329,19 @@ def test_api(tmp: Path):
             assert kw["params"]["access_token"] == "T"
             if path == "/video/clientuploadready":
                 return R({"code": "0", "data": {"transaction_id": "U1"}})
-            if path == "/video/clientuploadtrunk":
-                return R({"code": "0", "data": {"end_offset": 1}})
+            if path == "/video/clientuploadtrunk":       # 和真接口一样:end_offset = 收到的最后一个字节(含),文件名只能英文
+                off = int(kw["data"]["start_offset"])
+                name, chunk, _ct = kw["files"]["mediatrunk"]
+                assert name.isascii(), "文件名得是英文"
+                assert off == sum(len(c) for c in self.trunks), "多传 / 少传了"
+                self.trunks.append(chunk)
+                return R({"code": "0", "data": {"start_offset": off + len(chunk) - 1, "end_offset": off + len(chunk) - 1}})
             if path == "/articlev2/clientpubvideo":
                 return R({"code": "0", "data": {"transaction_id": "P1", "article_id": "A9"}})
             if path == "/transaction/infoclient":
                 if kw["params"]["transaction_id"] == "U1":
-                    return R({"code": "0", "data": {"article_info": {"article_video_info": {"vid": "V7"}}}})
+                    return R({"code": "0", "data": {"article_info": {"article_video_info": {}}, "transaction_status": "成功",
+                                                    "vid": "V7"}})       # 真接口 vid 在最外层
                 self.n += 1
                 return R({"code": "0", "data": {"transaction_status": "处理中" if self.n < 2 else "成功"}})
             return R({"code": "-1", "msg": "?"})
@@ -347,6 +353,16 @@ def test_api(tmp: Path):
     finally:
         omapi.time.sleep = real_sleep
     pub = [c[1] for c in s.calls if c[0] == "/articlev2/clientpubvideo"][0]
+    big = tmp / "big.mp4"
+    big.write_bytes(bytes(range(10)))
+    s2 = S()
+    real_trunk = omapi.TRUNK
+    omapi.TRUNK = 3
+    try:
+        omapi.Client("cid", "sec1", session=s2).upload(str(big))
+    finally:
+        omapi.TRUNK = real_trunk
+    check(b"".join(s2.trunks) == bytes(range(10)) and len(s2.trunks) == 4, "分片上传:一片接一片,传完不多传(end_offset 含最后一个字节)")
     check(r == {"vid": "V7", "article_id": "A9", "transaction_id": "P1", "status": "成功"}, "发布流程:传 → vid → 发 → 等成功")
     check(pub == {"title": v.title, "tags": "", "vid": "V7", "cat": 1604, "desc": v.title, "aigc_userstatement": "2"},
           "发的内容和旧软件一样(标题 = 简介 = 文件名,非 AI)")
