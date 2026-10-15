@@ -658,7 +658,7 @@ class ApiTab(QWidget):
             return len(topic.split_topics(v.title)["tags"]) > 1
 
         def fix_only(v):                                  # 只有一个话题,但写成「# 话题」:改成「#话题」,不用问 AI
-            return len(topic.split_topics(v.title)["tags"]) == 1 and topic.new_name(v.title) is not None
+            return topic.bad_format(v.title)
         rows = [i for i in only if (multi(self.videos[i]) or fix_only(self.videos[i])) and not self._sent(i)]
         if not rows:
             QMessageBox.information(self, "话题只留一个", "这些里没有挂了好几个话题的。")

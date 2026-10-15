@@ -55,6 +55,15 @@ def join_topic(parts: dict, tag: str) -> str:
     return f"{parts['body']}{parts['sep']}#{tag}"
 
 
+def bad_format(stem: str) -> bool:
+    """只有一个话题,但写成「# 话题」(# 后面带空格)/「##话题」/ 全角「＃」—— 平台可能不认成话题。
+    结尾多个空格、话题前粘个 n 这种不算(不影响认话题,用户嫌标黄太多)。"""
+    p = split_topics(stem)
+    if len(p["tags"]) != 1:
+        return False
+    return re.search(r"[#＃]\s|[#＃]{2}|＃", stem[len(p["body"]):]) is not None
+
+
 def clean_tag(tag: str) -> str:
     """用户填的话题:去掉 #、空格、文件名里不能用的字。"""
     return sanitize(re.sub(r"[#＃\s]+", "", str(tag or "")))
