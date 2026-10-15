@@ -19,6 +19,7 @@ class CropCanvas(QWidget):
         self.pm = QPixmap()
         self.iw = self.ih = 1
         self.rect_img = (0.0, 0.0, 1.0, 1.0)
+        self.title_zone = False          # 2.35:1:框下面 26% 是企鹅号的「标题区域」(会压上标题字)
         self._drag = None
         self.setMinimumSize(560, 380)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -55,6 +56,12 @@ class CropCanvas(QWidget):
         p.fillRect(QRectF(img.left(), box.bottom(), img.width(), img.bottom() - box.bottom()), dim)
         p.fillRect(QRectF(img.left(), box.top(), box.left() - img.left(), box.height()), dim)
         p.fillRect(QRectF(box.right(), box.top(), img.right() - box.right(), box.height()), dim)
+        if self.title_zone:
+            from qe.cover import TITLE_SAFE
+            tz = QRectF(box.left(), box.top() + box.height() * TITLE_SAFE, box.width(), box.height() * (1 - TITLE_SAFE))
+            p.fillRect(tz, QColor(30, 30, 30, 170))
+            p.setPen(QColor("#ffffff"))
+            p.drawText(tz, Qt.AlignmentFlag.AlignCenter, "标 题 区 域(字会压在这)")
         p.setPen(QPen(QColor("#FFD400"), 3))
         p.drawRect(box)
 
@@ -143,6 +150,7 @@ class CoverDialog(QDialog):
     def show_video(self):
         v = self.v
         self.pm = QPixmap(v.cover) if v.cover else QPixmap()
+        self._wide = None
         self.canvas.set_image(self.pm)
         self.lab_title.setText(f"{self.i + 1}/{len(self.videos)}  {v.title}")
         self.lab_why.setText(v.cover_why)
@@ -150,8 +158,24 @@ class CoverDialog(QDialog):
         self.b_next.setEnabled(self.i < len(self.videos) - 1)
         self.refresh()
 
+    def pix_for(self, k) -> QPixmap:
+        """这个比例用哪张图:2.35:1 是大头照(挪框也躲不开标题区)就用专用图,别的都用原图。"""
+        _tag, r = C.RATIOS[k]
+        if r >= 2 and not self.pm.isNull() and C.needs_wide(self.pm.width(), self.pm.height(), self.v.plan):
+            if self._wide is None:
+                try:
+                    self._wide = QPixmap(C.wide_cover(self.v.cover, self.v.plan))
+                except Exception:
+                    self._wide = QPixmap()
+            if not self._wide.isNull():
+                return self._wide
+        return self.pm
+
     def rect_for(self, k):
         _tag, r = C.RATIOS[k]
+        pm = self.pix_for(k)
+        if pm is not self.pm:
+            return (0.0, 0.0, float(pm.width()), float(pm.height()))      # 专用图就是 2.35:1,框 = 整张图
         return C.crop_rect(self.pm.width() or 1, self.pm.height() or 1, r, self.v.plan)
 
     def refresh(self):
@@ -161,12 +185,19 @@ class CoverDialog(QDialog):
             b.setText(tag + ("  ✎" if C.rkey(_r) in (self.v.plan or {}).get("manual", {}) else ""))
             if not self.pm.isNull():
                 x, y, w, h = self.rect_for(k)
-                th = self.pm.copy(int(x), int(y), int(w), int(h)).scaled(150, 110, Qt.AspectRatioMode.KeepAspectRatio,
+                th = self.pix_for(k).copy(int(x), int(y), int(w), int(h)).scaled(150, 110, Qt.AspectRatioMode.KeepAspectRatio,
                                                                           Qt.TransformationMode.SmoothTransformation)
                 b.setIcon(th)
                 b.setIconSize(th.size())
         if not self.pm.isNull():
+            pm = self.pix_for(self.ratio_i)
+            if pm is not self.canvas.pm:
+                self.canvas.set_image(pm)
+            self.canvas.title_zone = C.RATIOS[self.ratio_i][1] >= 2
             self.canvas.set_rect(self.rect_for(self.ratio_i))
+            wide = pm is not self.pm
+            self.canvas.setEnabled(not wide)
+            self.lab_why.setText(self.v.cover_why + ("    ·  2.35:1 是大头照,挪框躲不开标题区,用专用图(脸在标题区上面)" if wide else ""))
 
     def pick_ratio(self, k):
         self.ratio_i = k
@@ -174,7 +205,7 @@ class CoverDialog(QDialog):
 
     # ---- 改 ----
     def _dragged(self):
-        if self.pm.isNull():
+        if self.pm.isNull() or self.canvas.pm is not self.pm:
             return
         x, y, w, h = self.canvas.rect_img
         cx, cy = (x + w / 2) / self.pm.width(), (y + h / 2) / self.pm.height()

@@ -201,6 +201,27 @@ def test_window(tmp: Path):
     w.close()
 
 
+def test_title_zone(tmp: Path):
+    print("[2.35:1 标题区不挡脸]")
+    from qe import cover as C
+    # 一张 1600×900 的图,2.35:1 框高 = 1600/2.35 ≈ 681,能上下挪 219
+    small = {"cx": 0.5, "cy": 0.4, "faces": [[0.45, 0.25, 0.1, 0.18]]}        # 小脸在中间偏上
+    ok, ty = C.title_fit(1600, 900, small)
+    x, y, w, h = C.crop_rect(1600, 900, 2.35, small)
+    check(ok and y == ty and (0.25 + 0.18 * 1.03) * 900 <= y + h * C.TITLE_SAFE, "小脸:挪框就能让脸在标题区上面")
+    low = {"cx": 0.5, "cy": 0.7, "faces": [[0.45, 0.55, 0.1, 0.15]]}          # 脸偏下:框挪到底
+    ok, ty = C.title_fit(1600, 900, low)
+    check(ok and abs(ty - (900 - 1600 / 2.35)) < 1, f"脸偏下:框挪到最底下 -> {ty:.0f}")
+    big = {"cx": 0.5, "cy": 0.6, "faces": [[0.38, 0.15, 0.26, 0.63]]}         # 大头照(像今天 16 号)
+    check(C.needs_wide(1600, 900, big), "大头照:挪框躲不开,要专用图")
+    check(not C.needs_wide(1600, 900, dict(big, manual={C.rkey(2.35): [0.5, 0.5]})), "人手动拖过 2.35:1:按人的来,不用专用图")
+    check(not C.needs_wide(1600, 900, {"cx": 0.5, "cy": 0.5}), "没人:不管标题区")
+    _img(tmp / "big.png", 1600, 900)
+    out = C.wide_cover(str(tmp / "big.png"), big)
+    w2, h2 = C.image_size(out)
+    check(abs(w2 / h2 - 2.35) < 0.01, f"专用图就是 2.35:1 -> {w2}×{h2}")
+
+
 def test_preview(tmp: Path):
     print("[封面预览 / 手动拖框]")
     from PySide6.QtCore import QPointF, Qt
@@ -264,6 +285,7 @@ if __name__ == "__main__":
     test_guard()
     test_window(tmp)
     test_preview(tmp)
+    test_title_zone(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

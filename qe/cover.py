@@ -121,11 +121,11 @@ def decide(v) -> None:
     narrow_w = (h * NARROW) / w if w else 1.0          # 9:16 框占图宽的几成
     span = max(x[0] + x[2] for x in faces) - min(x[0] for x in faces)      # 几张脸从最左到最右(只算脸)
     if len(faces) == 1 or span <= narrow_w * 0.9:       # 一个人(脸再大也是他一个);几个人挨得近也框得下
-        v.plan = focus_of(faces)
+        v.plan = dict(focus_of(faces), faces=[list(f) for f in faces])
         v.cover_why = "1 个人,框对准他" if len(faces) == 1 else f"{len(faces)} 个人挨得近,框得下"
         return
     big = max(faces, key=lambda x: x[2] * x[3])
-    v.plan, v.warn = focus_of([big]), True
+    v.plan, v.warn = dict(focus_of([big]), faces=[list(big)]), True
     v.cover_why = f"{len(faces)} 个人分得开,框对准脸最大的(看一眼)"
 
 
@@ -135,6 +135,75 @@ RATIOS = [("3:4", 3 / 4), ("9:16", 9 / 16), ("2.35:1", 2.35), ("1:1", 1.0)]    #
 
 def rkey(ratio: float) -> str:
     return f"{ratio:.3f}"
+
+
+# 2.35:1(公众号推送大图)框的下面 26% 是「标题区域」,会压上标题字(用户:大头照脸上会有字,不行)。
+# 实测两张截图:标题区上沿在框高的 0.738、0.758 处 → 按 0.72 算(留点余量)。
+TITLE_SAFE = 0.72
+WIDE = 2.35
+
+
+def _face_band(plan: dict, img_h: float):
+    """要躲开标题区的那几张脸:从头顶(脸框往上 22%)到下巴(脸框往下 3%),图的像素。没有脸返回 None。"""
+    fs = (plan or {}).get("faces") or []
+    if not fs:
+        return None
+    return min(f[1] - f[3] * 0.22 for f in fs) * img_h, max(f[1] + f[3] * 1.03 for f in fs) * img_h
+
+
+def title_fit(img_w: float, img_h: float, plan: dict):
+    """2.35:1 框上下能挪的范围里,能不能让脸整个在标题区上面。返回 (能不能, 最合适的框上沿 y)。没有脸返回 (True, None)。"""
+    band = _face_band(plan, img_h)
+    if band is None:
+        return True, None
+    bh = min(img_h, img_w / WIDE)
+    top, bot = band
+    lo, hi = max(0.0, bot - TITLE_SAFE * bh), min(img_h - bh, top)
+    ideal = (top + bot) / 2 - TITLE_SAFE * bh / 2
+    if lo <= hi:
+        return True, min(max(ideal, lo), hi)
+    return False, min(max(bot - TITLE_SAFE * bh, 0.0), img_h - bh)
+
+
+def needs_wide(img_w: float, img_h: float, plan: dict) -> bool:
+    """这条的 2.35:1 要不要用「专用图」:挪框也躲不开标题区(大头照),人又没手动拖过 2.35:1。"""
+    if (plan or {}).get("manual", {}).get(rkey(WIDE)):
+        return False
+    return not title_fit(img_w, img_h, plan)[0]
+
+
+def wide_cover(path: str, plan: dict) -> str:
+    """给 2.35:1 做一张专用图(和框一样是 2.35:1):原图缩小放进去,整张脸落在标题区上面,
+    空出来的地方用原图放大、模糊、压暗填上(下面那块正好在标题区里,本来就压暗)。存在数据目录,返回路径。"""
+    import cv2
+    from .config import data_dir
+    img = read_image(path)
+    H, W = img.shape[:2]
+    W2, H2 = W, round(W / WIDE)
+    top, bot = _face_band(plan, H)
+    fs = plan.get("faces") or []
+    cx = (min(f[0] for f in fs) + max(f[0] + f[2] for f in fs)) / 2 * W
+    s = min(1.0, (TITLE_SAFE - 0.06) * H2 / max(1.0, bot - top))     # 脸(连头发下巴)占上面那段的大部分
+    ox = W2 / 2 - cx * s
+    oy = 0.03 * H2 - top * s
+    if oy + H * s < H2 * TITLE_SAFE:                                   # 图底下不能露在标题区上面
+        oy = H2 * TITLE_SAFE - H * s
+    small = cv2.resize(img, (max(1, round(W * s)), max(1, round(H * s))), interpolation=cv2.INTER_AREA)
+    k = max(W2 / W, H2 / H)
+    bg = cv2.resize(img, (round(W * k) + 1, round(H * k) + 1))
+    by, bx = (bg.shape[0] - H2) // 2, (bg.shape[1] - W2) // 2
+    bg = cv2.GaussianBlur(bg[by:by + H2, bx:bx + W2], (0, 0), 40)
+    bg = (bg * 0.75).astype(np.uint8)
+    x0, y0 = round(ox), round(oy)
+    sx0, sy0, dx0, dy0 = max(0, -x0), max(0, -y0), max(0, x0), max(0, y0)
+    ww, hh = min(small.shape[1] - sx0, W2 - dx0), min(small.shape[0] - sy0, H2 - dy0)
+    if ww > 0 and hh > 0:
+        bg[dy0:dy0 + hh, dx0:dx0 + ww] = small[sy0:sy0 + hh, sx0:sx0 + ww]
+    d = data_dir() / "2.35专用封面"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / (os.path.splitext(os.path.basename(path))[0][:60] + "_2.35.jpg")
+    cv2.imencode(".jpg", bg, [cv2.IMWRITE_JPEG_QUALITY, 93])[1].tofile(str(out))
+    return str(out)
 
 
 def crop_rect(img_w: float, img_h: float, ratio: float, plan: dict) -> tuple[float, float, float, float]:
@@ -150,7 +219,9 @@ def crop_rect(img_w: float, img_h: float, ratio: float, plan: dict) -> tuple[flo
         tx, ty = man[0] * img_w - bw / 2, man[1] * img_h - bh / 2
     elif plan and "cx" in plan:
         tx = plan["cx"] * img_w - bw / 2
-        ty = plan["cy"] * img_h - bh * 0.45                   # 脸放在框里偏上一点(2.35:1 下面有「标题区域」)
+        ty = plan["cy"] * img_h - bh * 0.45                   # 脸放在框里偏上一点
+        if ratio >= 2 and plan.get("faces"):
+            ty = title_fit(img_w, img_h, plan)[1]             # 2.35:1:让脸躲开下面的标题区
     else:
         tx, ty = (img_w - bw) / 2, (img_h - bh) / 2
     tx = min(max(tx, 0.0), img_w - bw)

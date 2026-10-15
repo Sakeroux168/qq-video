@@ -272,6 +272,9 @@ class Runner:
         self.wait("(() => { const d = window.__qe.dlg(); return d && !!d.querySelector('ezimage-cropper'); })()", 20, "裁剪页")
         self.sleep(1.2)
         iw, ih = C.image_size(upfile)
+        # 2.35:1 下面有「标题区域」:大头照挪框也躲不开 → 这一个比例「更换当前封面」换成专用图(脸在标题区上面),后面的比例再换回原图
+        wide = C.wide_cover(v.cover, v.plan) if C.needs_wide(iw, ih, v.plan) else ""
+        on_wide = False
         done = []
         for _step in range(8):
             self._chk()
@@ -283,10 +286,20 @@ class Runner:
             if not info:
                 raise PrepError("裁剪框读不出来")
             ratio = C.ratio_of(info["tag"])
-            x0, y0, x1, y1 = C.box_drag(info["canvas"], iw, ih, ratio, v.plan)
-            if abs(x1 - x0) > 1 or abs(y1 - y0) > 1:
-                self.page.drag(x0, y0, x1, y1)
-                self.sleep(0.6)
+            if ratio >= 2 and wide:
+                self._replace_current(wide)                    # 专用图就是 2.35:1,框正好是整张图,不用拖
+                on_wide = True
+                self.log("  2.35:1:大头照,换成专用图(脸在标题区上面)")
+            else:
+                if on_wide:
+                    self._replace_current(upfile)              # 企鹅号会「优先同步最新更换的封面图」:换回原图
+                    on_wide = False
+                    info["canvas"] = self.ev("""(() => { const r = window.__qe.dlg().querySelector('ezimage-cropper').shadowRoot.querySelector('.canvas-container').getBoundingClientRect();
+                        return {left: r.left, top: r.top, width: r.width, height: r.height}; })()""")
+                x0, y0, x1, y1 = C.box_drag(info["canvas"], iw, ih, ratio, v.plan)
+                if abs(x1 - x0) > 1 or abs(y1 - y0) > 1:
+                    self.page.drag(x0, y0, x1, y1)
+                    self.sleep(0.6)
             done.append(info["tag"] or "?")
             self.shot(f"裁剪_{info['tag'].replace(':', 'x')}_{v.title[:8]}")
             last = self.ev("(() => [...window.__qe.dlg().querySelectorAll('button')].some(b => window.__qe.vis(b) && b.innerText.trim() === '完成'))()")
@@ -305,6 +318,51 @@ class Runner:
                   " const t = ((f && f.closest('.omui-panel')) || document.body).innerText || ''; return tags.every(x => !x || t.includes(x)); })(%s)"
                   % _js_list([x for x in done if x != "?"]), 30, "封面出现在页面上")
         self.log(f"  封面:{v.cover_kind}({'、'.join(done)} 都对好了)")
+
+    def _replace_current(self, file: str):
+        """裁剪页上「更换当前封面」:只给当前这个比例换一张图(本地上传 → 下一步 → 回到裁剪页)。
+        弹出来的是另一个封面框(它和裁剪框同时开着,用「没有裁剪器、有本地上传」认它)。
+        第二次换的时候「本地上传」里还留着上次那张图、没有上传框:鼠标悬停在图上点「移除」图标再传。"""
+        NEST = ("[...document.querySelectorAll('.omui-dialog')].filter(e => window.__qe.vis(e) && !e.querySelector('ezimage-cropper')"
+                " && (e.innerText||'').includes('本地上传')).pop()")
+        r = self.ev("""(() => { const s = window.__qe.dlg().querySelector('ezimage-cropper').shadowRoot;
+            const b = [...s.querySelectorAll('button')].find(b => b.innerText.trim() === '更换当前封面'); if (!b) return 'no'; b.click(); return 'ok'; })()""")
+        if r != "ok":
+            raise PrepError("裁剪页上找不到「更换当前封面」")
+        self.wait(f"!!({NEST})", 20, "换封面的弹框")
+        self.ev(f"""(() => {{ const d = {NEST}; const t = [...d.querySelectorAll('li,div,span')].find(e => e.children.length === 0 && e.textContent.trim() === '本地上传'); if (t) t.click(); }})()""")
+        self.sleep(1.2)
+        has_input = f"(() => {{ const d = {NEST}; return !!d && [...d.querySelectorAll('input[type=file]')].some(i => (i.accept||'').includes('image')); }})()"
+        if not self.ev(has_input):
+            pt = self.ev(f"""(() => {{ const d = {NEST}; const i = [...d.querySelectorAll('img')].filter(e => window.__qe.vis(e)).pop(); if (!i) return null;
+                const b = i.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; }})()""")
+            if pt:
+                self.page.cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": pt[0], "y": pt[1]})
+                self.sleep(0.6)
+            ic = self.ev(f"""(() => {{ const d = {NEST}; const x = [...d.querySelectorAll('.omui-icon-remove')].filter(e => window.__qe.vis(e)).pop();
+                if (!x) return null; const b = x.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; }})()""")
+            if not ic:
+                raise PrepError("换封面时上一张图移除不掉(找不到移除图标)")
+            self.page.click_xy(ic[0], ic[1])                   # 只认真鼠标点(JS 点没反应)
+            self.wait(has_input, 10, "上一张图移除掉")
+        idx = self.ev(f"""(() => {{ const d = {NEST}; return [...document.querySelectorAll('input[type=file]')].findIndex(i => (i.accept||'').includes('image') && d.contains(i)); }})()""")
+        if idx is None or idx < 0:
+            raise PrepError("换封面的弹框里找不到传图片的地方")
+        self.page.set_files("input[type=file]", [file], index=int(idx))
+        end = time.time() + 60
+        while True:
+            self.sleep(0.6)
+            st = self.ev(f"""(() => {{ if (document.body.innerText.includes('封面图尺寸过小')) return 'small'; const d = {NEST};
+                return d && !d.innerText.includes('上传图片') && [...d.querySelectorAll('button')].some(b => window.__qe.vis(b) && b.innerText.trim() === '下一步') ? 'ok' : ''; }})()""")
+            if st == "ok":
+                break
+            if st == "small":
+                raise PrepError("企鹅号说换的封面图尺寸太小")
+            if time.time() > end:
+                raise PrepError("换的封面图 60 秒没传上去")
+        self.ev(f"""(() => {{ const d = {NEST}; [...d.querySelectorAll('button')].find(b => window.__qe.vis(b) && b.innerText.trim() === '下一步').click(); }})()""")
+        self.wait(f"!({NEST}) && !!window.__qe.dlg() && !!window.__qe.dlg().querySelector('ezimage-cropper')", 20, "回到裁剪页")
+        self.sleep(1.2)
 
     def _cover_done(self) -> bool:
         """这条的封面已经设过了(封面那一栏里有带比例字样的小图,没有那个大 + 号)。"""
