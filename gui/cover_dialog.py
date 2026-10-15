@@ -159,6 +159,7 @@ class CoverDialog(QDialog):
     def show_video(self):
         v = self.v
         self.pm = QPixmap(v.cover) if v.cover else QPixmap()
+        self._vpm = QPixmap(v.vcover) if getattr(v, "vcover", "") else QPixmap()     # 竖的比例用的竖屏图
         self._wide = None
         self.canvas.set_image(self.pm)
         self.lab_title.setText(f"{self.i + 1}/{len(self.videos)}  {v.title}")
@@ -168,8 +169,10 @@ class CoverDialog(QDialog):
         self.refresh()
 
     def pix_for(self, k) -> QPixmap:
-        """这个比例用哪张图:2.35:1 是大头照(挪框也躲不开标题区)就用专用图,别的都用原图。"""
+        """这个比例用哪张图:竖的比例有竖屏图用竖屏图;2.35:1 要专用图就用专用图;别的用横图。"""
         _tag, r = C.RATIOS[k]
+        if r < 1 and not self._vpm.isNull():
+            return self._vpm
         if r >= 2 and not self.pm.isNull() and C.needs_wide(self.pm.width(), self.pm.height(), self.v.plan):
             if self._wide is None:
                 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -189,6 +192,8 @@ class CoverDialog(QDialog):
     def rect_for(self, k):
         _tag, r = C.RATIOS[k]
         pm = self.pix_for(k)
+        if pm is self._vpm:
+            return C.crop_rect(pm.width() or 1, pm.height() or 1, r, self.v.vplan)
         if pm is not self.pm:
             return (0.0, 0.0, float(pm.width()), float(pm.height()))      # 专用图就是 2.35:1,框 = 整张图
         return C.crop_rect(self.pm.width() or 1, self.pm.height() or 1, r, self.v.plan)
@@ -210,7 +215,7 @@ class CoverDialog(QDialog):
                 self.canvas.set_image(pm)
             self.canvas.title_zone = C.RATIOS[self.ratio_i][1] >= 2
             self.canvas.set_rect(self.rect_for(self.ratio_i))
-            wide = pm is not self.pm
+            wide = pm is not self.pm and pm is not self._vpm
             self.canvas.setEnabled(not wide)
             self.lab_why.setText(self.v.cover_why)
         mode = C.wide_mode(self.pm.width() or 1, self.pm.height() or 1, self.v.plan)[0] if not self.pm.isNull() else "none"
@@ -225,16 +230,19 @@ class CoverDialog(QDialog):
 
     # ---- 改 ----
     def _dragged(self):
-        if self.pm.isNull() or self.canvas.pm is not self.pm:
+        pm = self.canvas.pm
+        if pm.isNull() or (pm is not self.pm and pm is not self._vpm):
             return
         x, y, w, h = self.canvas.rect_img
-        cx, cy = (x + w / 2) / self.pm.width(), (y + h / 2) / self.pm.height()
+        cx, cy = (x + w / 2) / pm.width(), (y + h / 2) / pm.height()
         _tag, r = C.RATIOS[self.ratio_i]
         v = self.v
-        self.adj.set_box(v.path, v.cover, C.rkey(r), cx, cy)
-        man = dict((v.plan or {}).get("manual", {}))
+        vert = pm is self._vpm
+        self.adj.set_box(v.path, v.vcover if vert else v.cover, C.rkey(r), cx, cy)
+        key = "vplan" if vert else "plan"
+        man = dict((getattr(v, key) or {}).get("manual", {}))
         man[C.rkey(r)] = [cx, cy]
-        v.plan = dict(v.plan or {}, manual=man)
+        setattr(v, key, dict(getattr(v, key) or {}, manual=man))
         v.warn = False
         if "手动" not in v.cover_why:
             v.cover_why += "(框手动调过)"

@@ -109,8 +109,10 @@ def test_cover(tmp: Path):
     x0, y0, x1, y1 = C.box_drag(cv, 2848, 1600, 2.35, {"cx": 0.5, "cy": 0.2})
     check(abs(x1 - x0) < 1 and y1 < y0, "2.35:1 框和图一样宽:只上下挪")
     check(C.ratio_of("3:4") == 0.75 and C.ratio_of("2.35:1") == 2.35 and C.ratio_of("") == 1.0, "比例字样认得")
-    real = r"X:\知乎视频\小学生教育\10.15\研习空间\31条"
-    if os.path.isdir(real):
+    import glob
+    found = glob.glob(r"X:\知乎视频\小学生教育\10.15\研习空间\31条*")          # 用户发完会改名成「31条（已发）」
+    real = found[0] if found else ""
+    if real and os.path.isdir(real):
         def mk(stem):
             return Video(path=os.path.join(real, stem + ".mp4"), title=stem, account="家长研习空间", employee="31条", date="10.15",
                          png=os.path.join(real, stem + ".png"), jpg=os.path.join(real, stem + ".jpg"))
@@ -126,6 +128,16 @@ def test_cover(tmp: Path):
         g = mk("五款辅助写作业工具，帮助改善孩子写作业专注力问题")
         C.decide(g)
         check(g.plan.get("cx", 0) > 0.58, f"背影写作业的小孩(认不出脸):框对准小孩那边 -> {g.plan.get('cx')}")
+        liang = r"X:\知乎视频\小学生教育\10.15\研习空间\梁"
+        if os.path.isdir(liang):
+            from qe import folders as F
+            lv = next((x for x in F.videos_in(liang, "家长研习空间", "10.15") if x.title.startswith("孩子遭遇同伴孤立")), None)
+            if lv:
+                C.decide(lv)
+                check(lv.vcover.endswith("竖屏9x16.png") and lv.cover.endswith("横屏16x9.png") and not lv.warn,
+                      f"两个人分得开、有无字竖屏:竖的比例用竖屏图 -> {lv.cover_why}")
+                check(C.pick_for(lv, 0.75)[0] == lv.vcover and C.pick_for(lv, 2.35)[0] == lv.cover and C.pick_for(lv, 1.0)[0] == lv.cover,
+                      "3:4 用竖图,2.35:1 / 1:1 用横图")
     else:
         print("  (网络盘上没有真封面,跳过)")
     v = Video(path="x.mp4", title="x", account="a", employee="e", date="d")

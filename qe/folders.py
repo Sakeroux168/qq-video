@@ -25,6 +25,8 @@ class Video:
     cover_kind: str = ""       # 横 / 竖
     cover_why: str = ""        # 为什么这么选(给人看)
     plan: dict = field(default_factory=dict)   # 裁剪要对准哪(cover.decide 填)
+    vcover: str = ""           # 竖的比例(3:4、9:16)改用这张竖图(几个人分得开、横图裁会切掉人时,用无字的 竖屏9x16.png)
+    vplan: dict = field(default_factory=dict)  # 竖图上的裁剪对准哪
     warn: bool = False         # 要人看一眼(没认出人 / 缺封面)
 
 

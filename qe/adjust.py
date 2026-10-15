@@ -54,6 +54,10 @@ class Adjustments:
         ai = self.ai235(v.path)
         if ai is not None and v.plan is not None:
             v.plan = dict(v.plan, ai235=bool(ai), no_ai=not ai)
+        if getattr(v, "vcover", ""):
+            vm = self.manual(v.path, v.vcover)
+            if vm:
+                v.vplan = dict(v.vplan or {}, manual=vm)
         man = self.manual(v.path, v.cover) if v.cover else {}
         if man:
             v.plan = dict(v.plan or {}, manual=man)

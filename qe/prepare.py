@@ -141,11 +141,28 @@ class Runner:
         self._chk()
         home = self._home()
         try:
-            r = home.ev("""((w) => { const e = [...document.querySelectorAll('div.name-UlOtte')].find(x => (x.textContent||'').trim() === w);
+            # 先看顶上已经开着的页签(用户在首页搜了别的号时,列表里就没有它了)
+            r = home.ev("""((w) => { const t = [...document.querySelectorAll('.title-name')].find(e => (e.textContent||'').trim() === w);
+                if (t) { (t.closest('.chrome-tab-content-wrapper') || t.parentElement).click(); t.click(); return 'tab'; }
+                const e = [...document.querySelectorAll('div.name-UlOtte')].find(x => (x.textContent||'').trim() === w);
                 if (!e) return 'notfound'; e.click(); return 'ok'; })(%r)""" % name)
+            if r == "notfound":
+                # 首页搜索框里有字(用户在搜别的号):清空了再找(真键盘删,罐头的搜索框认不了直接改值)
+                box = home.ev("""(() => { const i = document.querySelector("input[placeholder='账号、手机号等']"); if (!i || !i.value) return null;
+                    const b = i.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2, i.value]; })()""")
+                if box:
+                    self.log(f"罐头首页搜索框里是「{box[2]}」,清空了再找「{name}」")
+                    home.click_xy(box[0], box[1])
+                    home.cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2})
+                    home.cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2})
+                    home.key("Backspace", 8)
+                    home.key("Enter", 13)
+                    time.sleep(2.5)
+                    r = home.ev("""((w) => { const e = [...document.querySelectorAll('div.name-UlOtte')].find(x => (x.textContent||'').trim() === w);
+                        if (!e) return 'notfound'; e.click(); return 'ok'; })(%r)""" % name)
         finally:
             home.close()
-        if r != "ok":
+        if r not in ("ok", "tab"):
             raise PrepError(f"罐头里找不到「{name}」这个号")
         end = time.time() + 30
         while time.time() < end:
@@ -244,8 +261,10 @@ class Runner:
             self.log("  封面已经设好了,跳过")
             return
         upfile = C.upload_file(v.cover)
+        vfile = C.upload_file(v.vcover) if getattr(v, "vcover", "") and C.exists(v.vcover) else ""
         if upfile != v.cover:
             self.log("  封面图太小,放大了再传(会有点糊,最好让员工出大一点的图)")
+        first = vfile or upfile                             # 竖的比例在前(3:4 先来):有竖图就先传竖图
         r = self.ev("""(() => { const b = [...document.querySelectorAll('button[class*=commonThumb]')].find(e => window.__qe.vis(e));
             if (!b) return 'no'; b.scrollIntoView({block:'center'}); b.click(); return 'ok'; })()""")
         if r != "ok":
@@ -257,7 +276,7 @@ class Runner:
         if idx is None or idx < 0:
             raise PrepError("封面弹框里找不到传图片的地方")
         small0 = self._small_count()
-        self.page.set_files("input[type=file]", [upfile], index=int(idx))
+        self.page.set_files("input[type=file]", [first], index=int(idx))
         end = time.time() + 60
         while True:
             self.sleep(0.6)
@@ -281,7 +300,7 @@ class Runner:
             except Exception as e:                         # 没 Key / 接口不通:退回切头顶(能躲多少躲多少)
                 self.log(f"  ⚠ AI 扩图没成({e}),2.35:1 改成切掉一点头顶")
                 v.plan = dict(v.plan, no_ai=True, ai235=False)
-        on_wide = False
+        cur = first
         done = []
         for _step in range(8):
             self._chk()
@@ -293,17 +312,24 @@ class Runner:
             if not info:
                 raise PrepError("裁剪框读不出来")
             ratio = C.ratio_of(info["tag"])
+            # 这个比例用哪张图:2.35:1 要专用图就用专用图;竖的比例有竖图用竖图;别的用横图
             if ratio >= 2 and wide:
-                self._replace_current(wide)                    # 专用图就是 2.35:1,框正好是整张图,不用拖
-                on_wide = True
-                self.log("  2.35:1:换成 AI 扩的专用图(脸在标题区上面)")
+                want, plan = wide, None
+            elif ratio < 1 and vfile:
+                want, plan = vfile, v.vplan
             else:
-                if on_wide:
-                    self._replace_current(upfile)              # 企鹅号会「优先同步最新更换的封面图」:换回原图
-                    on_wide = False
-                    info["canvas"] = self.ev("""(() => { const r = window.__qe.dlg().querySelector('ezimage-cropper').shadowRoot.querySelector('.canvas-container').getBoundingClientRect();
-                        return {left: r.left, top: r.top, width: r.width, height: r.height}; })()""")
-                x0, y0, x1, y1 = C.box_drag(info["canvas"], iw, ih, ratio, v.plan)
+                want, plan = upfile, v.plan
+            if want != cur:
+                # 「更换当前封面」只换这一个比例;企鹅号会把后面的比例「优先同步最新更换的封面图」,所以 cur 跟着变
+                self._replace_current(want)
+                cur = want
+                self.log("  2.35:1:换成 AI 扩的专用图(脸在标题区上面)" if want == wide else
+                         ("  竖的比例换成竖屏图" if want == vfile else "  换回横图"))
+                info["canvas"] = self.ev("""(() => { const r = window.__qe.dlg().querySelector('ezimage-cropper').shadowRoot.querySelector('.canvas-container').getBoundingClientRect();
+                    return {left: r.left, top: r.top, width: r.width, height: r.height}; })()""")
+            if want != wide:                                   # 专用图就是 2.35:1,框正好是整张图,不用拖
+                iw, ih = C.image_size(want)
+                x0, y0, x1, y1 = C.box_drag(info["canvas"], iw, ih, ratio, plan)
                 if abs(x1 - x0) > 1 or abs(y1 - y0) > 1:
                     self.page.drag(x0, y0, x1, y1)
                     self.sleep(0.6)
@@ -324,7 +350,7 @@ class Runner:
         self.wait("((tags) => { const f = [...document.querySelectorAll('.omui-inputautogrowing__inner')].find(e => window.__qe.vis(e));"
                   " const t = ((f && f.closest('.omui-panel')) || document.body).innerText || ''; return tags.every(x => !x || t.includes(x)); })(%s)"
                   % _js_list([x for x in done if x != "?"]), 30, "封面出现在页面上")
-        self.log(f"  封面:{v.cover_kind}({'、'.join(done)} 都对好了)")
+        self.log(f"  封面:{'竖的比例用竖屏图,' if vfile else ''}{'、'.join(done)} 都对好了")
 
     def _replace_current(self, file: str):
         """裁剪页上「更换当前封面」:只给当前这个比例换一张图(本地上传 → 下一步 → 回到裁剪页)。

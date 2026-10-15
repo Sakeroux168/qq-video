@@ -99,8 +99,9 @@ def subject_of(path: str) -> dict:
 
 
 def decide(v) -> None:
-    """给一条视频定封面:填 v.cover / cover_kind / cover_why / plan / warn。只用 png。"""
+    """给一条视频定封面:填 v.cover / cover_kind / cover_why / plan / warn(还有 vcover / vplan)。只用无字的。"""
     v.warn = False
+    v.vcover, v.vplan = "", {}
     if not v.png:
         v.cover, v.cover_kind, v.plan, v.warn = "", "", {}, True
         v.cover_why = "没有无字封面(png)" + (",jpg 有字不能用" if v.jpg else "")
@@ -130,6 +131,32 @@ def decide(v) -> None:
     # 「all」= 认出来的所有人:每个比例框得下所有人就对准他们中间(crop_rect),框不下的窄比例才对准脸最大的
     v.plan, v.warn = dict(focus_of([big]), faces=[list(big)], all=[list(f) for f in faces]), True
     v.cover_why = f"{len(faces)} 个人:宽的比例框所有人,窄的框不下就对准脸最大的(看一眼)"
+    # 用户一开始定的:几个人、裁剪会把人切掉 / 切一半 → 用竖封面。带字的 jpg 不能用,员工「梁」做的 竖屏9x16.png 是无字的 →
+    # 竖的比例(3:4、9:16)用它;宽的比例(2.35:1、1:1)横图本来就框得下所有人,还用横图
+    if getattr(v, "vpng", "") and exists(v.vpng):
+        v.vcover, v.vplan, v.warn = v.vpng, plan_for_image(v.vpng), False
+        v.cover_why = f"{len(faces)} 个人:竖的比例用他做的竖屏图,宽的比例框所有人"
+
+
+def plan_for_image(path: str) -> dict:
+    """一张图该对准哪:有人对准人(几个人一起),没人对准画面主体。"""
+    try:
+        fs, _ = faces_in(path)
+    except Exception:
+        return {}
+    if fs:
+        return dict(focus_of(fs), faces=[list(f) for f in fs], all=[list(f) for f in fs])
+    try:
+        return subject_of(path)
+    except Exception:
+        return {}
+
+
+def pick_for(v, ratio: float) -> tuple[str, dict]:
+    """这个比例用哪张图、按哪个 plan 裁:竖的比例有竖图就用竖图,别的用横图。(2.35:1 的 AI 专用图另外算)"""
+    if ratio < 1 and getattr(v, "vcover", ""):
+        return v.vcover, v.vplan
+    return v.cover, v.plan
 
 
 WIDE_NOTE = {"crop": ";2.35:1 切掉一点头顶(不挡脸)", "ai": ";2.35:1 要 AI 扩图(看一眼)"}
