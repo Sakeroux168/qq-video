@@ -351,6 +351,79 @@ def test_api(tmp: Path):
         print("  (没有 ffmpeg,跳过转竖屏)")
 
 
+def test_api_tab(tmp: Path):
+    print("[接口发页:手选文件夹(旧软件的「选择」)/ 一条一条发、间隔 / 发完挪走、记录]")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    QApplication.instance() or QApplication([])
+    from qe import apiacc, apisrc, omapi
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    root = tmp / "api2"
+    (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15").mkdir(parents=True)
+    (root / "游戏视频" / "2电竞赛事（腾讯系相关游戏赛事）").mkdir(parents=True)
+    for f in ("CSGO--CSGO战神君/10.15/c1.mp4", "CSGO--CSGO战神君/10.15/c2.mp4",
+              "2电竞赛事（腾讯系相关游戏赛事）/e1.mp4", "2电竞赛事（腾讯系相关游戏赛事）/e1.jpg"):
+        (root / "游戏视频" / f).write_bytes(b"x")
+    esp = str(root / "游戏视频" / "2电竞赛事（腾讯系相关游戏赛事）")
+    roots = [str(root / "游戏视频")]
+    known = {"CSGO战神君", "电竞情报馆"}
+    vs = apisrc.videos(roots, "10.15", known, {"电竞情报馆": esp})
+    check(sorted((v.account, v.title) for v in vs) == [("CSGO战神君", "c1"), ("CSGO战神君", "c2"), ("电竞情报馆", "e1")],
+          "手选的文件夹:电竞情报馆发「2电竞赛事」里的")
+    vs = apisrc.videos(roots, "10.15", known, {"CSGO战神君": esp})
+    check([v.account for v in vs] == ["CSGO战神君"] and vs[0].title == "e1", "手选了就不再自动找这个号")
+
+    accs = [{"nick": "CSGO战神君", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+            {"nick": "电竞情报馆", "client_id": "b", "secret": apiacc.seal("s"), "category": 1605, "enabled": True}]
+    apiacc.save(accs)
+    st = Settings(tmp / "st_api.json")
+    st["api_roots"] = roots
+    st["api_archive"] = str(tmp / "发布" / "{date}已发布")
+    st["api_interval"] = 1
+    check(st.get("api_threads") == 1 and "api_parallel" not in st, "默认一条一条发(旧软件「线程 1」)")
+    rec = Records(tmp / "rec_api.sqlite")
+    logs = []
+    tab = T.ApiTab(st, rec, logs.append)
+    tab.c_date.setCurrentText("10.15")
+    tab._set_pick("10.15", "电竞情报馆", esp)
+    tab.load()
+    check(len(tab.videos) == 3, "页面上:自动找的 + 手选的")
+    sent = []
+
+    class FakeClient:
+        def __init__(self, cid, sec, **k):
+            self.cid = cid
+
+        def send(self, path, title, cat, **k):
+            sent.append((time.time(), title, cat))
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+
+    real_c, real_q = omapi.Client, QMessageBox.question
+    omapi.Client = FakeClient
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    try:
+        tab.run_check()
+        tab.job.wait()
+        QApplication.processEvents()
+        for v in tab.videos:                       # 假视频 ffmpeg 读不出来:当成竖屏的好视频
+            v.checks.update(bad_read=False, landscape=False, w=1080, h=1920)
+        tab.run_publish()
+        tab.job.wait()
+        QApplication.processEvents()
+    finally:
+        omapi.Client, QMessageBox.question = real_c, real_q
+    check(sorted((t, c) for _x, t, c in sent) == [("c1", 1604), ("c2", 1604), ("e1", 1605)], "三条都发了,分类按号")
+    gaps = [b[0] - a[0] for a, b in zip(sent, sent[1:])]
+    check(all(g >= 0.95 for g in gaps), f"每条之间歇够间隔 -> {[round(g, 2) for g in gaps]}")
+    out = tmp / "发布" / "10.15已发布"
+    check(sorted(os.listdir(out)) == ["c1.mp4", "c2.mp4", "e1.mp4"] and os.path.isfile(os.path.join(esp, "e1.jpg")),
+          "发完挪到「10.15已发布」(只挪视频,和旧软件一样)")
+    check(len([r for r in rec.rows("10.15") if r["employee"] == "接口" and r["status"] == "已发"]) == 3, "记进记录(员工 = 接口)")
+    tab.unpick("电竞情报馆")
+    check("10.15" not in (st.get("api_picked") or {}), "取消手选")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -540,6 +613,7 @@ if __name__ == "__main__":
     test_title_zone(tmp)
     test_group(tmp)
     test_api(tmp)
+    test_api_tab(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

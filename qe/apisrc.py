@@ -80,22 +80,32 @@ def dates(roots, known=None) -> list[str]:
     return sorted(ds, key=lambda d: tuple(int(x) for x in d.split(".")))
 
 
-def videos(roots, date: str, known=None) -> list[ApiVideo]:
-    """这一天每个号要发的视频(号的文件夹下,日期开头是这一天的那些文件夹里的视频;不往更深里找)。"""
+def videos(roots, date: str, known=None, picked=None) -> list[ApiVideo]:
+    """这一天每个号要发的视频(号的文件夹下,日期开头是这一天的那些文件夹里的视频;不往更深里找)。
+    picked = {号: 文件夹}:手动给号选了文件夹的(像旧软件的「选择」),这个号就只发那个文件夹里的,不自动找。"""
+    picked = {k: v for k, v in (picked or {}).items() if v}
     out = []
     for nick, folder in account_folders(roots, known).items():
+        if nick in picked:
+            continue
         for x in sorted(_subdirs(folder)):
-            if date_key(x) != date:
-                continue
-            d = os.path.join(folder, x)
-            try:
-                names = sorted(os.listdir(d))
-            except OSError:
-                continue
-            for n in names:
-                stem, ext = os.path.splitext(n)
-                if ext.lower() in VIDEO_EXTS and not n.startswith("_处理中_"):
-                    out.append(ApiVideo(path=os.path.join(d, n), title=stem, account=nick, date=date, folder=d))
+            if date_key(x) == date:
+                out += _videos_in(os.path.join(folder, x), nick, date)
+    for nick, d in picked.items():
+        out += _videos_in(d, nick, date)
+    return out
+
+
+def _videos_in(d: str, nick: str, date: str) -> list[ApiVideo]:
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        stem, ext = os.path.splitext(n)
+        if ext.lower() in VIDEO_EXTS and not n.startswith("_处理中_") and os.path.isfile(os.path.join(d, n)):
+            out.append(ApiVideo(path=os.path.join(d, n), title=stem, account=nick, date=date, folder=d))
     return out
 
 

@@ -9,11 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-                               QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+                               QMenu, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from qe import apiacc, apisrc, checks, topic, vertical
-from qe.config import bj_str, data_dir
+from qe.config import bj_now, bj_str, data_dir
 
 COLS = ["号", "标题(= 文件名)", "画面", "要处理的", "状态"]
 YELLOW, RED, GREEN = QColor("#fff3c4"), QColor("#ffd6d6"), QColor("#d9f2d9")
@@ -68,6 +68,11 @@ class ApiTab(QWidget):
         self.lab = QLabel("")
         self.lab.setStyleSheet("color:#777")
         top.addWidget(self.lab, 1)
+        b = QPushButton("给号选文件夹…")
+        b.setToolTip("像旧软件的「选择」:手动给一个号挑这天要发的文件夹(比如电竞情报馆的「2电竞赛事」)。\n"
+                     "选了以后这个号这天只发那个文件夹里的视频,不再自动找。右键列表里的一条也能选 / 取消。")
+        b.clicked.connect(lambda: self.pick_folder())
+        top.addWidget(b)
         b = QPushButton("从旧软件搬账号…")
         b.setToolTip("从旧软件「企鹅号批量发布」的数据库(qepm.db)把 16 个号搬过来。密钥加密存在这台电脑上,不显示。")
         b.clicked.connect(self.migrate)
@@ -81,6 +86,8 @@ class ApiTab(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setToolTip("双击一条:在资源管理器里打开它所在的文件夹(标题里有别的平台的名字,去那改文件名)")
         self.table.cellDoubleClicked.connect(lambda r, _c: self.reveal(r))
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._menu)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for i, wd in ((0, 120), (2, 90), (3, 220), (4, 150)):
@@ -135,7 +142,13 @@ class ApiTab(QWidget):
         self.c_date.blockSignals(True)
         self.c_date.clear()
         self.c_date.addItem("")                    # 不自动选:让人自己挑哪天
-        self.c_date.addItems(list(reversed(apisrc.dates(self.roots(), self.known()))))
+        ds = apisrc.dates(self.roots(), self.known())
+        today = f"{bj_now().month}.{bj_now().day}"
+        for x in list((self.st.get("api_picked") or {}).keys()) + [today]:   # 手选过文件夹的日子、今天:没有日期文件夹也能选
+            if x and x not in ds:
+                ds.append(x)
+        ds.sort(key=lambda d: tuple(int(x) for x in d.split(".")))
+        self.c_date.addItems(list(reversed(ds)))
         if cur:
             self.c_date.setCurrentText(cur)
         self.c_date.blockSignals(False)
@@ -145,7 +158,7 @@ class ApiTab(QWidget):
 
     def load(self):
         d = self.c_date.currentText()
-        self.videos = apisrc.videos(self.roots(), d, self.known()) if d else []
+        self.videos = apisrc.videos(self.roots(), d, self.known(), self.picked(d)) if d else []
         self.state = {}
         for i, v in enumerate(self.videos):
             s = self.rec.status_of(v.path)
@@ -156,7 +169,69 @@ class ApiTab(QWidget):
             self._fill(i)
         if d:
             accs = sorted({v.account for v in self.videos})
-            self.say(f"接口发 {d}:{len(self.videos)} 条,{len(accs)} 个号。先点「检查」。")
+            pk = self.picked(d)
+            self.say(f"接口发 {d}:{len(self.videos)} 条,{len(accs)} 个号。先点「检查」。" +
+                     ("(手选的文件夹:" + ";".join(f"{n} → {os.path.basename(f)}" for n, f in pk.items()) + ")" if pk else ""))
+
+    # ---------------- 手动给号选文件夹(旧软件的「选择」) ----------------
+    def picked(self, date: str) -> dict:
+        return dict((self.st.get("api_picked") or {}).get(date) or {})
+
+    def _set_pick(self, date: str, nick: str, folder: str):
+        allp = dict(self.st.get("api_picked") or {})
+        day = dict(allp.get(date) or {})
+        if folder:
+            day[nick] = folder
+        else:
+            day.pop(nick, None)
+        if day:
+            allp[date] = day
+        else:
+            allp.pop(date, None)
+        self.st["api_picked"] = allp
+        self.st.save()
+
+    def pick_folder(self, nick: str = ""):
+        d = self.c_date.currentText()
+        if not d:
+            QMessageBox.information(self, "给号选文件夹", "先在上面选是哪天的。")
+            return
+        if not nick:
+            names = apiacc.nicks()
+            if not names:
+                QMessageBox.information(self, "给号选文件夹", "还没搬账号。")
+                return
+            nick, ok = QInputDialog.getItem(self, "给号选文件夹", f"{d} 给哪个号选文件夹?", names, 0, False)
+            if not ok:
+                return
+        start = self.picked(d).get(nick) or apisrc.account_folders(self.roots(), {nick}).get(nick) or (self.roots() or [""])[0]
+        f = QFileDialog.getExistingDirectory(self, f"{nick}:{d} 要发的视频在哪个文件夹", start)
+        if not f:
+            return
+        f = os.path.normpath(f)
+        self._set_pick(d, nick, f)
+        n = len(apisrc._videos_in(f, nick, d))
+        self.say(f"{d}「{nick}」只发这个文件夹里的 {n} 条:{f}")
+        self.load()
+
+    def unpick(self, nick: str):
+        d = self.c_date.currentText()
+        self._set_pick(d, nick, "")
+        self.say(f"{d}「{nick}」不用手选的文件夹了,回到自动找")
+        self.load()
+
+    def _menu(self, pos):
+        r = self.table.rowAt(pos.y())
+        m = QMenu(self)
+        if 0 <= r < len(self.videos):
+            nick = self.videos[r].account
+            m.addAction("打开所在文件夹", lambda: self.reveal(r))
+            m.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick))
+            if nick in self.picked(self.c_date.currentText()):
+                m.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick))
+            m.addSeparator()
+        m.addAction("给别的号选文件夹…", lambda: self.pick_folder())
+        m.exec(self.table.viewport().mapToGlobal(pos))
 
     def _fill(self, i: int):
         v = self.videos[i]
@@ -351,12 +426,29 @@ class ApiTab(QWidget):
         by_acc: dict[str, list[int]] = {}
         for i in rows:
             by_acc.setdefault(self.videos[i].account, []).append(i)
+        par0 = max(1, int(self.st.get("api_threads") or 1))
+        how = "一条一条发" if par0 == 1 else f"{par0} 个号一起发"
         msg = (f"用接口发 {len(rows)} 条({len(by_acc)} 个号)" + (f",有问题的 {held} 条不发" if held else "") +
-               f"。\n\n标题、简介 = 文件名;分类按号;声明「非 AI 生成」;封面平台自己截。\n发成了挪到:\n{dest}\n\n发吗?")
+               f"。\n\n标题、简介 = 文件名;分类按号;声明「非 AI 生成」;封面平台自己截。\n"
+               f"{how},每条之间歇 {self.st.get('api_interval', 5)} 秒。\n发成了挪到:\n{dest}\n\n发吗?")
         if QMessageBox.question(self, "发布", msg) != QMessageBox.StandardButton.Yes:
             return
         vs = self.videos
-        par = max(1, int(self.st.get("api_parallel") or 3))
+        par = max(1, int(self.st.get("api_threads") or 1))
+        gap = max(0.0, float(self.st.get("api_interval", 5) or 0))
+        gate = {"last": 0.0}
+        glock = threading.Lock()
+
+        def wait_turn(stopped) -> bool:
+            """每条之间歇 gap 秒(几个号一起发也算总的);停了返回 False。"""
+            import time
+            with glock:
+                while time.time() < gate["last"] + gap:
+                    if stopped():
+                        return False
+                    time.sleep(0.2)
+                gate["last"] = time.time()
+            return not stopped()
 
         def acc_job(nick, idx, emit, stopped):
             from qe.omapi import ApiError, Client
@@ -376,6 +468,8 @@ class ApiTab(QWidget):
                 if self.rec.status_of(v.path) == "已发":    # 防重发
                     emit(i, "已发")
                     continue
+                if not wait_turn(stopped):
+                    return sent
                 try:
                     r = cl.send(v.path, v.title, a["category"], stop=stopped,
                                 on_progress=lambda o, s, i=i: emit(i, f"上传 {o * 100 // max(1, s)}%"),
@@ -402,7 +496,8 @@ class ApiTab(QWidget):
                 futs = [ex.submit(acc_job, n, idx, emit, stopped) for n, idx in by_acc.items()]
                 n = sum(f.result() for f in futs)
             return f"接口发完:发出去 {n} 条" + ("(停下了)" if stopped() else "")
-        self._start(fn, f"接口发布:{len(rows)} 条,{min(par, len(by_acc))} 个号一起发")
+        self._start(fn, f"接口发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
+                    f",间隔 {gap:g} 秒")
 
     def migrate(self):
         db = apiacc.OLD_DB if os.path.isfile(apiacc.OLD_DB) else ""

@@ -691,6 +691,16 @@ class MainWindow(QMainWindow):
         f.addRow("一批几条", sp)
         f.addRow("阿里百炼 Key", e_key)
         f.addRow("", QLabel("大头照的 2.35:1 封面要 AI 扩图时用(一张几毛钱)"))
+        sp_thr = QSpinBox()
+        sp_thr.setRange(1, 5)
+        sp_thr.setValue(int(self.st.get("api_threads", 1) or 1))
+        sp_gap = QSpinBox()
+        sp_gap.setRange(0, 600)
+        sp_gap.setSuffix(" 秒")
+        sp_gap.setValue(int(self.st.get("api_interval", 5) or 0))
+        f.addRow("接口发:几个号一起发", sp_thr)
+        f.addRow("接口发:每条间隔", sp_gap)
+        f.addRow("", QLabel("旧软件是「线程 1、间隔 5 秒」:一条一条发,每条之间歇 5 秒"))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(d.accept)
         bb.rejected.connect(d.reject)
@@ -706,7 +716,8 @@ class MainWindow(QMainWindow):
             elif line.strip():
                 accs.append({"name": line.strip(), "aliases": []})
         self.st.update(material_root=e_root.text().strip(), archive_root=e_arc.text().strip(), accounts=accs or self.st["accounts"],
-                       batch_size=sp.value(), ai_key=e_key.text().strip())
+                       batch_size=sp.value(), ai_key=e_key.text().strip(),
+                       api_threads=sp_thr.value(), api_interval=sp_gap.value())
         C.AI_KEY = self.st.ai_key()
         self.st.save()
         self._load_dates()
