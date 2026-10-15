@@ -152,12 +152,27 @@ class ApiTab(QWidget):
         if cur:
             self.c_date.setCurrentText(cur)
         self.c_date.blockSignals(False)
-        self.lab.setText(f"{n} 个号" + ("" if n else "(还没搬账号,先点右边「从旧软件搬账号…」)") +
-                         f" · 素材:{'、'.join(self.roots())}")
         self.load()
+
+    def _show_source(self, d: str):
+        """上面那行:素材到底从哪来(这天手选了文件夹的号按手选的说)。"""
+        n = len(apiacc.load())
+        head = f"{n} 个号" + ("" if n else "(还没搬账号,先点右边「从旧软件搬账号…」)")
+        auto = "自动找:" + "、".join(self.roots())
+        pk = self.picked(d) if d else {}
+        if not pk:
+            self.lab.setText(f"{head} · 素材{auto}")
+            self.lab.setToolTip("")
+            return
+        parents = sorted({os.path.dirname(f) for f in pk.values()})
+        rest = n - len(pk)
+        self.lab.setText(f"{head} · {d} 有 {len(pk)} 个号用手选的文件夹({'、'.join(parents)})" +
+                         (f",其余 {rest} 个号{auto}" if rest > 0 else ""))
+        self.lab.setToolTip("\n".join(f"{k} → {v}" for k, v in sorted(pk.items())))
 
     def load(self):
         d = self.c_date.currentText()
+        self._show_source(d)
         self.videos = apisrc.videos(self.roots(), d, self.known(), self.picked(d)) if d else []
         self.state = {}
         for i, v in enumerate(self.videos):
