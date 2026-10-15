@@ -101,7 +101,7 @@ def move_tree(src: str, dst: str, on_file=None) -> tuple[int, list[str]]:
             return sum(len(f) for _r, _d, f in os.walk(dst)), []
         except OSError:
             pass                                   # 跨盘 / 被占着:下面逐个文件挪
-    for root, _dirs, files in os.walk(src):
+    for root, _dirs, files in os.walk(src, onerror=lambda e: errs.append(f"读不了文件夹:{e.filename}")):
         rel = os.path.relpath(root, src)
         tdir = os.path.join(dst, rel) if rel != "." else dst
         os.makedirs(tdir, exist_ok=True)
@@ -119,4 +119,8 @@ def move_tree(src: str, dst: str, on_file=None) -> tuple[int, list[str]]:
             os.rmdir(root)
         except OSError:
             pass
+    if os.path.isdir(src):                            # 还剩文件(挪的时候被改了名 / 新放进来的):列出来,不能算挪完
+        left = [os.path.join(r, f) for r, _d, fs in os.walk(src) for f in fs]
+        if left and not errs:
+            errs += [f"「{os.path.relpath(p, src)}」没挪走(挪的时候文件夹被改了名 / 又放进来了?)" for p in left[:20]]
     return moved, errs

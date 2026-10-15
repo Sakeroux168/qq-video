@@ -121,7 +121,7 @@ class Settings(dict):
             self.path.parent.mkdir(parents=True, exist_ok=True)
             disk = {}
             try:
-                d = json.loads(self.path.read_text("utf-8"))
+                d = json.loads(self.path.read_text("utf-8-sig"))
                 disk = d if isinstance(d, dict) else {}
             except (OSError, ValueError):
                 disk = {}

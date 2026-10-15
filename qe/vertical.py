@@ -140,7 +140,16 @@ def _convert(src: Path, tmp: Path, ff: str, stop) -> tuple[str, str]:
         k += 1
     os.replace(src, orig)
     try:
-        os.replace(tmp, out)
+        for _k in range(20):
+            try:
+                os.rename(tmp, out)                     # 不用 replace:另一条同时转完放了同名的也不会被盖掉
+                break
+            except FileExistsError:
+                from .topic import _numbered
+                k += 1
+                out = src.with_name(f"{_numbered(src.stem, k)}.mp4")
+        else:
+            raise OSError("同名的太多,放不回去")
     except OSError:
         os.replace(orig, src)                       # 新的放不回去:把原片挪回来,当没转过
         raise

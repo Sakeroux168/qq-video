@@ -36,7 +36,7 @@ TOPIC_SYSTEM = """
 # 结尾多出来的孤零零的 #(「标题 #原神#」)不算话题,但算写法不对,tidy 会去掉。
 _SPACED = r"(?:(?<![A-Za-z0-9+])|(?<=(?<![A-Za-z])n))[#＃]+\s+"
 _TAG = rf"(?:{_SPACED}|[#＃]+)([^#＃\s]+)"
-_RUN = re.compile(rf"((?:\s*(?:(?<![A-Za-z])n)?\s*{_TAG.replace('([^#＃', '(?:[^#＃')})+)[\s#＃]*$")
+_RUN = re.compile(rf"((?:\s*(?:(?<![A-Za-z])n\s*)?{_TAG.replace('([^#＃', '(?:[^#＃')})+)[\s#＃]*$")
 
 
 def split_topics(name: str) -> dict:
@@ -201,8 +201,11 @@ def rename_with_sidecars(path: str, new_stem: str) -> list[tuple[str, str]]:
         if s2 == stem and e2.lower() in (".jpg", ".jpeg", ".png", ".webp", ".txt"):
             src, dst = os.path.join(d, n), os.path.join(d, final_stem + e2)
             if not os.path.exists(dst):
-                os.rename(src, dst)
-                moves.append((src, dst))
+                try:
+                    os.rename(src, dst)
+                    moves.append((src, dst))
+                except OSError:
+                    pass                              # 封面被占着:视频已经改了,封面先不跟(撤销照样能撤视频)
     return moves
 
 

@@ -43,8 +43,11 @@ def redact(s: str) -> str:
     return _SECRET.sub(r"\1=***", str(s or ""))
 
 
-def _ok(j: dict) -> bool:
-    return str(j.get("code", "")) == "0"
+def _ok(j) -> bool:
+    return isinstance(j, dict) and str(j.get("code", "")) == "0"
+
+
+_TOKEN_BAD = ("40001", "40014", "42001", "41001")
 
 
 def file_hashes(path: str) -> tuple[int, str, str]:
@@ -93,19 +96,29 @@ class Client:
     @staticmethod
     def _json(r) -> dict:
         try:
-            return r.json()
+            j = r.json()
         except ValueError:
             raise ApiError(f"企鹅号没按格式回话:HTTP {r.status_code}")
+        if not isinstance(j, dict):                   # 回了 null / 列表:当成没回对话(发布这步会算「结果不明」)
+            raise ApiError(f"企鹅号回话格式不对:HTTP {r.status_code}")
+        return j
 
     def _call(self, method: str, path: str, what: str, **kw) -> dict:
         params = dict(kw.pop("params", {}) or {})
-        params["access_token"] = self.token()
         timeout = kw.pop("timeout", 60)
-        r = _net(lambda: self.s.request(method, API + path, params=params, timeout=timeout, **kw), what)
-        j = self._json(r)
-        if not _ok(j):
-            raise ApiError(f"{what}失败:{j.get('msg') or ''}(code {j.get('code')})", j.get("code"))
-        return j.get("data") or {}
+        for k in range(2):
+            params["access_token"] = self.token()
+            r = _net(lambda: self.s.request(method, API + path, params=params, timeout=timeout, **kw), what)
+            j = self._json(r)
+            if _ok(j):
+                d = j.get("data")
+                return d if isinstance(d, dict) else {}
+            code, msg = str(j.get("code") or ""), str(j.get("msg") or "")
+            if k == 0 and (code in _TOKEN_BAD or "token" in msg.lower()):
+                self._tok, self._exp = "", 0.0        # token 中途作废(别处用同一个号换了):重换一次再试;平台回错误码 = 没发,重试安全
+                continue
+            raise ApiError(f"{what}失败:{msg}(code {code})", code)
+        return {}
 
     # ---------------- 发一条 ----------------
     def upload(self, path: str, on_progress=None, stop=None) -> str:
@@ -202,7 +215,12 @@ class Client:
             if e.code:                                   # 平台回了错误码 = 明确没发
                 raise
             raise Unknown(f"发布请求发出去了,但没收到平台回话({e}),可能已经发了,去后台看一眼")
-        ptid = d.get("transaction_id") or ""
+        # 平台已经收下了:后面不管出什么错(回话缺字段、查进度出错)都算已发(处理中),绝不能记成没发成再发一遍
+        try:
+            ptid = str(d.get("transaction_id") or "")
+            aid = str(d.get("article_id") or "")
+        except Exception:
+            ptid = aid = ""
         st = "处理中"
         if ptid:
             try:
@@ -210,8 +228,10 @@ class Client:
             except ApiError as e:
                 if "平台说发布失败" in str(e):
                     raise
-                st = "处理中"                             # 查进度出错不等于没发:平台已经收下了
-        return {"vid": vid, "article_id": str(d.get("article_id") or ""), "transaction_id": ptid, "status": st}
+                st = "处理中"
+            except Exception:
+                st = "处理中"
+        return {"vid": vid, "article_id": aid, "transaction_id": ptid, "status": st}
 
 
 def _why(d: dict) -> str:

@@ -50,9 +50,12 @@ def store_path():
 def load() -> list[dict]:
     """[{nick, source_name, source_id, client_id, secret(加密的), category, enabled}]"""
     try:
-        return json.loads(store_path().read_text("utf-8"))
+        data = json.loads(store_path().read_text("utf-8-sig"))
     except (OSError, ValueError):
         return []
+    if not isinstance(data, list):
+        return []
+    return [a for a in data if isinstance(a, dict) and str(a.get("nick") or "").strip()]
 
 
 def save(accs: list[dict]):

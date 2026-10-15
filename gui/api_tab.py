@@ -70,6 +70,30 @@ class Job(QThread):
             self.done.emit(f"出错:{type(e).__name__}: {e}")
 
 
+class _Taken(Exception):
+    """要发的时候发现这个文件别的号已经发过 / 正在发(两个号手选了同一个文件夹)。"""
+
+
+def _num(x, default: int) -> int:
+    """设置里手写坏了的数字(「5秒」)也不让发布按钮没反应。"""
+    try:
+        return int(float(str(x).strip().rstrip("秒")))
+    except (TypeError, ValueError):
+        return default
+
+
+def _retry(fn, n: int = 3):
+    """记录库偶尔被别的程序锁住:等一下再试几次。"""
+    import sqlite3
+    for k in range(n):
+        try:
+            return fn()
+        except sqlite3.OperationalError:
+            if k == n - 1:
+                raise
+            time.sleep(2)
+
+
 def ask(parent, title: str, text: str, yes: str = "好", no: str = "先不", detail: str = "", default_no: bool = False) -> bool:
     """中文按钮的确认框(审查:Yes / No 是英文)。detail = 点「显示详细信息」才看得到的细节(确认框别太长)。"""
     box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.NoButton, parent)
@@ -328,6 +352,9 @@ class ApiTab(QWidget):
 
     # ---------------- 读素材 ----------------
     def reload_dates(self):
+        if self.busy() and getattr(self, "_quiet", False):
+            self.job.stop()
+            self.job.wait()
         if self.busy():
             return
         # 记住上次选的日期(用户 2026-10-15「可以记住」;教育页那边仍然不自动选)
@@ -685,10 +712,31 @@ class ApiTab(QWidget):
         if not f:
             return
         f = os.path.normpath(f)
+        why = self._bad_pick(d, nick, f)
+        if why:
+            QMessageBox.warning(self, "给号选文件夹", why)
+            return
         self._set_pick(d, nick, f)
         n = len(apisrc._videos_in(f, nick, d))
         self.say(f"{d}「{nick}」只发这个文件夹里的 {n} 条:{os.path.basename(f)}")
         self.load()
+
+    def _bad_pick(self, d: str, nick: str, f: str) -> str:
+        """这个文件夹不能给这个号:返回原因;能用返回 ""。"""
+        k = pkey(f)
+        base = os.path.basename(f)
+        if any(w in base for w in ("已发", "不能用", "脏话", "不行")):
+            return f"「{base}」看名字是不发的(已发 / 不能用 / 脏话),不能选它。"
+        arch = str(self.st.get("api_archive") or apisrc.DEFAULT_ARCHIVE).split("{")[0].rstrip("\\/")
+        if arch and (k == pkey(arch) or k.startswith(pkey(arch) + os.sep)):
+            return "这是发完挪过去的「已发布」文件夹,里面的都发过了,不能再选。"
+        for other, path in self.picked(d).items():
+            if other != nick and pkey(path) == k:
+                return f"这个文件夹已经给「{other}」用了。一个文件夹只能给一个号,不然同一条视频会发到两个号。"
+        for other, paths in apisrc.account_folder_list(self.roots(), self.known()).items():
+            if other != nick and any(k == pkey(p) or k.startswith(pkey(p) + os.sep) for p in paths):
+                return f"这个文件夹是「{other}」的素材文件夹,不能给「{nick}」。"
+        return ""
 
     def unpick(self, nick: str):
         if self.busy() and getattr(self, "_quiet", False):
@@ -1123,13 +1171,25 @@ class ApiTab(QWidget):
         if miss:
             QMessageBox.warning(self, "发布", "这些号还没搬账号:" + "、".join(miss))
             return
+        seen: dict[str, str] = {}
+        dup = []
+        for i in rows:
+            k, acc = pkey(self.videos[i].path), self.videos[i].account
+            if k in seen and seen[k] != acc:
+                dup.append((self.videos[i].title, seen[k], acc))
+            seen.setdefault(k, acc)
+        if dup:
+            t, a1, a2 = dup[0]
+            QMessageBox.warning(self, "发布", f"有 {len(dup)} 条视频同时挂在两个号下面(比如「{t[:24]}」在「{a1}」和「{a2}」),"
+                                             "一条视频只能发一个号。\n\n多半是两个号手选了同一个文件夹:右键号 →「换个文件夹」改对了再发。")
+            return
         held = sum(1 for i in scope if not self._sent(i)) - len(rows)
         retry = sum(1 for i in rows if self.state.get(i, "").startswith(FAILED[:2]))
         by_acc: dict[str, list[int]] = {}
         for i in rows:
             by_acc.setdefault(self.videos[i].account, []).append(i)
-        par = max(1, int(self.st.get("api_threads") or 1))
-        gap = max(0.0, float(self.st.get("api_interval", 5) or 0))
+        par = max(1, _num(self.st.get("api_threads"), 1))
+        gap = max(0.0, float(_num(self.st.get("api_interval"), 5)))
         by_game = bool(self.st.get("api_archive_by_game", True))
         dest = apisrc.archive_dir(self.st, d)
         per = "\n".join(f"  · {n}:{len(idx)} 条 · {apiacc.CATEGORIES.get(accs[n].get('category'), accs[n].get('category'))}" +
@@ -1143,13 +1203,15 @@ class ApiTab(QWidget):
             c = str(apiacc.CATEGORIES.get(accs[n].get("category"), accs[n].get("category")))
             catn[c] = catn.get(c, 0) + 1
         cat_line = "分类:" + "、".join(f"{c} {k} 个号" for c, k in catn.items())
-        msg = (f"发 {len(rows)} 条 · {len(by_acc)} 个号 · 大概 {mins} 分钟\n\n{brief}\n{cat_line}\n\n" +
+        today = f"{bj_now().month}.{bj_now().day}"
+        warn_day = f"⚠ 注意:这是 {d} 的,不是今天({today})!\n\n" if d != today else ""
+        msg = (warn_day + f"发 {d} 的 {len(rows)} 条 · {len(by_acc)} 个号 · 大概 {mins} 分钟\n\n{brief}\n{cat_line}\n\n" +
                (f"其中 {retry} 条是上次没发成的,再试一次。\n" if retry else "") +
                (f"有问题的 {held} 条这次不发。\n" if held else "") + "\n发吗?")
         detail = (f"每个号:\n{per}\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;封面平台自己截。\n"
                   f"{'一条一条发' if par == 1 else f'{par} 个号一起发'},上一条发完歇 {gap:g} 秒再发下一条。\n"
                   f"发成了挪到:{dest}" + ("\\游戏名" if by_game else ""))
-        if not ask(self, "发布", msg, "发", "先不发", detail=detail):
+        if not ask(self, "发布", msg, "发", "先不发", detail=detail, default_no=bool(warn_day)):
             return
         vs = self.videos
         gate = {"last": 0.0}
@@ -1190,6 +1252,14 @@ class ApiTab(QWidget):
                 emit(-1, f"「{nick}」账号密钥读不出来(换了电脑 / Windows 用户?点「搬账号…」重新搬):{type(e).__name__}")
                 bump("fail", len(idx))
                 return
+            try:
+                cat = int(a.get("category"))
+            except (TypeError, ValueError):
+                for i in idx:
+                    emit(i, "没发成:号的分类不对")
+                emit(-1, f"「{nick}」的分类不对({a.get('category')!r}),先不发 —— 去「设置」里重新「从旧软件搬账号…」")
+                bump("fail", len(idx))
+                return
             for k, i in enumerate(idx):
                 if stopped():
                     return
@@ -1202,14 +1272,22 @@ class ApiTab(QWidget):
                 rid = {}
 
                 def begin(vid, v=v, rid=rid):
-                    rid["id"] = self.rec.api_begin(v, f"vid={vid}")
+                    got = _retry(lambda: self.rec.try_begin(v, f"vid={vid}"))
+                    if got is None:
+                        raise _Taken()
+                    rid["id"] = got
                 try:
-                    r = cl.send(v.path, v.title, a["category"], stop=stopped, before_publish=begin,
+                    r = cl.send(v.path, v.title, cat, stop=stopped, before_publish=begin,
                                 on_progress=lambda o, s, i=i: emit(i, f"上传 {o * 100 // max(1, s)}%"),
                                 log=lambda m, i=i: emit(i, m + "…"))
                 except Stopped:
                     emit(i, "停下了,没发")
                     return
+                except _Taken:                            # 别的号刚发过 / 正在发同一个文件:这条不发
+                    emit(i, self.rec.status_of(v.path) or "已发")
+                    emit(-1, f"「{nick}」{v.title}:这个文件别的号已经发了 / 正在发,这次不发")
+                    done_one(emit)
+                    continue
                 except Unknown as e:                      # 发布请求发出去了没收到回话:可能发了,不能自动再发
                     if "id" in rid:
                         self.rec.api_finish(rid["id"], "结果不明", str(e))
@@ -1248,22 +1326,36 @@ class ApiTab(QWidget):
                         return
                     continue
                 note = f"article_id={r['article_id']} vid={r['vid']}" + ("" if r["status"] == "成功" else "(平台还在处理)")
-                if "id" in rid:
-                    self.rec.api_finish(rid["id"], "已发", note)
-                else:
-                    self.rec.api_result(v, "已发", note)
                 bump("ok")
                 try:
+                    if "id" in rid:
+                        _retry(lambda: self.rec.api_finish(rid["id"], "已发", note))
+                    else:
+                        _retry(lambda: self.rec.api_result(v, "已发", note))
+                except Exception as e:                    # 记录库写不进去(被别的程序锁住):「发布中」那笔还在,不会重发
+                    emit(i, "已发(但没记上,去后台核对)")
+                    emit(-1, f"「{v.title}」发出去了,但发布记录写不进去({type(e).__name__}),先不挪文件。软件不会再发它;去后台核对一下")
+                    done_one(emit)
+                    continue
+                try:
+                    old = v.path
                     v.path = apisrc.move_published(v.path, apisrc.archive_dir(self.st, d, a))
+                    if "id" in rid:                       # 记下新位置:之后在归档里再看到它也认得出发过
+                        _retry(lambda: self.rec.mark_moved(rid["id"], v.path))
                 except OSError as e:
                     emit(-1, f"「{v.title}」发了,但挪不走:{e}(发过的记着呢,不会重发)")
+                except Exception:
+                    pass
                 emit(i, "已发" if r["status"] == "成功" else "已发(平台处理中)")
                 done_one(emit)
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(par) as ex:
-                for f in [ex.submit(acc_job, n, idx, emit, stopped) for n, idx in by_acc.items()]:
-                    f.result()
+                for n, f in [(n, ex.submit(acc_job, n, idx, emit, stopped)) for n, idx in by_acc.items()]:
+                    try:
+                        f.result()
+                    except Exception as e:
+                        emit(-1, f"「{n}」发的时候出了没想到的错({type(e).__name__}),这个号后面的先没发;已经发的记着呢")
             not_run = len(rows) - stats["ok"] - stats["fail"] - stats["unsure"] - stats["skip"]
             summary = (f"发完了:成功 {stats['ok']} · 没发成 {stats['fail']} · 结果不明 {stats['unsure']}" +
                        (f" · 号的密钥坏了没发 {stats['skip']}({'、'.join(stats['bad_acc'])})" if stats["skip"] else "") +

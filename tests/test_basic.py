@@ -980,6 +980,194 @@ def test_audit_r3(tmp: Path):
     check(not over and b.read_bytes() == b"B", "挪文件:目标已经有了就报错,不会盖掉")
 
 
+def test_bughunt(tmp: Path):
+    print("[挖 bug 修的:不重复发 / 不发错号 / 不发错日期 / 不卡死 / 不丢设置]")
+    import json
+    import time as _t
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from qe import apiacc, apisrc, fsops, omapi, topic
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+
+    # 4. 「10.15已发」「10.15不能用」「10.150」不算 10.15
+    check([apisrc.date_key(x) for x in ("10.15", "10.15(20)", "10.14（星期三）", "10.15已发", "10.15不能用", "10.15 脏话", "10.150")]
+          == ["10.15", "10.15", "10.14", "", "", "", ""], "日期文件夹:后面跟了别的字的不算(已发 / 不能用 / 脏话)")
+
+    # 15. 同一个号两个文件夹:都扫
+    r2 = tmp / "bh_dup"
+    for f in ("CSGO--号X/10.15/甲.mp4", "CS2--号X/10.15/乙.mp4"):
+        (r2 / f).parent.mkdir(parents=True, exist_ok=True)
+        (r2 / f).write_bytes(b"x")
+    check(sorted(v.title for v in apisrc.videos([str(r2)], "10.15", {"号X"})) == ["乙", "甲"], "同一个号两个文件夹:都列出来")
+
+    # 6. 话题正则不卡死
+    t0 = _t.time()
+    topic.split_topics("标题 " + " ".join(f"#t{i}" for i in range(40)) + " 来学")
+    check(_t.time() - t0 < 0.2, f"40 个话题后面跟字:不卡({(_t.time() - t0) * 1000:.0f} 毫秒)")
+
+    # 7. 设置文件带 BOM:保存不丢别的键
+    sp = tmp / "bh_bom.json"
+    sp.write_bytes(b"\xef\xbb\xbf" + json.dumps({"material_root": "Q:\\x", "api_interval": 9}).encode("utf-8"))
+    st = Settings(sp)
+    st["last_date"] = "10.16"
+    st.save()
+    d = json.loads(sp.read_text("utf-8-sig"))
+    check(d.get("material_root") == "Q:\\x" and d.get("api_interval") == 9, "设置带 BOM:保存后别的设置还在")
+
+    # 2. 平台回话格式怪:发布已收下就算已发,绝不记成没发成
+    class R:
+        def __init__(self, j):
+            self.j, self.status_code = j, 200
+
+        def json(self):
+            return self.j
+
+    class S:
+        def __init__(self, pub, poll):
+            self.pub, self.poll, self.pubs, self.toks = pub, poll, 0, 0
+
+        def post(self, url, **kw):
+            self.toks += 1
+            return R({"code": "0", "data": {"access_token": f"T{self.toks}", "expires_in": 7200}})
+
+        def request(self, method, url, **kw):
+            path = url.split("api.om.qq.com")[1]
+            if path == "/video/clientuploadready":
+                return R({"code": "0", "data": {"transaction_id": "U"}})
+            if path == "/video/clientuploadtrunk":
+                return R({"code": "0", "data": {"end_offset": len(kw["files"]["mediatrunk"][1]) - 1}})
+            if path == "/transaction/infoclient":
+                if kw["params"]["transaction_id"] == "U":
+                    return R({"code": "0", "data": {"vid": "V"}})
+                return R(self.poll)
+            if path == "/articlev2/clientpubvideo":
+                self.pubs += 1
+                return R(self.pub)
+    f = tmp / "bh.mp4"
+    f.write_bytes(b"abc")
+
+    class FakeTime:                                  # 假时钟:查进度的「等一会儿」瞬间过去
+        now = 1000.0
+
+        @classmethod
+        def time(cls):
+            return cls.now
+
+        @classmethod
+        def sleep(cls, x):
+            cls.now += x
+    real_time = omapi.time
+    omapi.time = FakeTime
+    for pub, poll in (({"code": "0", "data": "weird"}, {"code": "0", "data": {}}),
+                      ({"code": "0", "data": {"transaction_id": "P"}}, {"code": "0", "data": ["x"]}),
+                      ({"code": "0", "data": {"transaction_id": "P"}}, None)):
+        r = omapi.Client("c", "s", session=S(pub, poll)).send(str(f), "t", 1)
+        check(r["status"] in ("处理中", "成功"), f"平台收下了但回话怪({str(pub)[:30]} / {str(poll)[:20]}):算已发,不记没发成")
+    try:
+        omapi.Client("c", "s", session=S(None, None)).send(str(f), "t", 1)
+        kind = "none"
+    except omapi.Unknown:
+        kind = "unknown"
+    except omapi.ApiError:
+        kind = "apierror"
+    check(kind == "unknown", f"发布回了 null:结果不明(不能自动再发)-> {kind}")
+
+    # 12. token 中途作废:重换一次再试
+    class S2(S):
+        def request(self, method, url, **kw):
+            if "articlev2" in url and kw["params"]["access_token"] == "T1":
+                return R({"code": "40001", "msg": "access_token expired"})
+            return super().request(method, url, **kw)
+    s2 = S2({"code": "0", "data": {"transaction_id": "P"}}, {"code": "0", "data": {"transaction_status": "成功"}})
+    r = omapi.Client("c", "s", session=s2).send(str(f), "t", 1)
+    check(r["status"] == "成功" and s2.toks == 2, "token 中途作废:重换一次就发出去了")
+    omapi.time = real_time
+
+    # 1 / 3. 两个号同一个文件:记「发布中」原子地拦;发完挪走的新位置也认得出发过
+    rec = Records(tmp / "bh.sqlite")
+
+    class V:
+        date, account, title = "10.15", "号A", "v1"
+        path = str(tmp / "same" / "v1.mp4")
+    rid = rec.try_begin(V)
+    check(rid is not None and rec.try_begin(V) is None, "同一个文件:第二个号要发时拦住(不发两遍)")
+    rec.api_finish(rid, "已发")
+    rec.mark_moved(rid, str(tmp / "归档" / "CSGO" / "v1.mp4"))
+    check(rec.blocked(str(tmp / "归档" / "CSGO" / "v1.mp4")), "发完挪走了:在归档里再看到它也认得出发过")
+
+    # 1. 界面:两个号手选同一个文件夹 → 发布前拦住;手选文件夹不许选别的号在用的 / 归档 / 已发
+    same = tmp / "bh_same"
+    same.mkdir()
+    for n in ("s1.mp4", "s2.mp4"):
+        (same / n).write_bytes(b"x")
+    apiacc.save([{"nick": n, "source_name": n, "client_id": n, "secret": apiacc.seal("s"), "category": 1604, "enabled": True}
+                 for n in ("号A", "号B")])
+    st = Settings(tmp / "bh_st.json")
+    st["api_roots"] = [str(tmp / "none")]
+    st["api_archive"] = str(tmp / "归档")
+    st["api_picked"] = {"1.1": {"号A": str(same), "号B": str(same)}}
+    tab = T.ApiTab(st, Records(tmp / "bh2.sqlite"), lambda m: None)
+    tab.c_date.addItem("1.1")
+    tab.c_date.setCurrentText("1.1")
+    tab.load()
+    _settle(tab)
+    for v in tab.videos:
+        v.checks = {"w": 1080, "h": 1920, "tags": [], "platform": []}
+    sent = []
+
+    class C:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, **k):
+            before_publish("V")
+            sent.append(title)
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+    real = omapi.Client
+    omapi.Client = C
+    try:
+        tab.run_publish()
+        _settle(tab)
+    finally:
+        omapi.Client = real
+    check(sent == [], "两个号手选同一个文件夹:发布前就拦住,一条都不发")
+    check("已经给「号A」用了" in tab._bad_pick("1.1", "号B", str(same)) and "已发布" in tab._bad_pick("1.1", "号A", str(tmp / "归档" / "CSGO"))
+          and "不发的" in tab._bad_pick("1.1", "号A", str(tmp / "x" / "10.15已发")), "手选文件夹:别的号在用的 / 归档 / 已发的都不让选")
+
+    # 10. 挪一天时有文件没挪走:要报出来
+    src = tmp / "bh_mv" / "a"
+    src.mkdir(parents=True)
+    (src / "x.mp4").write_bytes(b"x")
+    (tmp / "bh_mv_dst" / "存在").mkdir(parents=True)        # 目标已经有(合并):一个文件一个文件挪
+    real_safe = fsops.safe_move_file
+    fsops.safe_move_file = lambda a, b: b                    # 模拟:挪的时候文件被改名,实际没挪走、也没报错
+    try:
+        n, errs = fsops.move_tree(str(tmp / "bh_mv"), str(tmp / "bh_mv_dst" / "存在"))
+    finally:
+        fsops.safe_move_file = real_safe
+    check(errs, "挪一天:有文件没挪走就报出来,不说「挪到了」")
+
+    # 11. 改名时封面被占着:视频照样改、照样进台账
+    d = tmp / "bh_side"
+    d.mkdir()
+    (d / "标题 #a #b.mp4").write_bytes(b"x")
+    (d / "标题 #a #b.jpg").write_bytes(b"x")
+    led = topic.Ledger(tmp / "bh_led.json")
+    fh = open(d / "标题 #a #b.jpg", "rb")
+    try:
+        mv = topic.rename_logged(str(d / "标题 #a #b.mp4"), "标题 #a", led, "t¦x¦1")
+    finally:
+        fh.close()
+    check(os.path.basename(mv[0][1]) == "标题 #a.mp4" and led.last(), "改名时封面被占着:视频照样改、能撤销")
+
+    # 17. 账号文件手改坏了:坏的那条跳过,不让软件打不开
+    apiacc.store_path().write_text(json.dumps([{"client_id": "x"}, {"nick": "好的", "category": 1604}]), "utf-8")
+    check([a["nick"] for a in apiacc.load()] == ["好的"], "账号文件里少 nick 的那条跳过")
+    check(T._num("5秒", 1) == 5 and T._num(None, 3) == 3, "设置里数字写坏了:有兜底")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1188,6 +1376,7 @@ if __name__ == "__main__":
     test_ui_r1(tmp)
     test_squarish(tmp)
     test_audit_r3(tmp)
+    test_bughunt(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

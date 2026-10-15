@@ -38,6 +38,9 @@ class Records:
             cols = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)")]
             if "pkey" not in cols:
                 self.conn.execute("ALTER TABLE posts ADD COLUMN pkey TEXT")
+            if "moved_pkey" not in cols:                  # 发完挪走以后的新位置(手选文件夹选到归档里也认得出发过)
+                self.conn.execute("ALTER TABLE posts ADD COLUMN moved_pkey TEXT")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS i_posts_moved ON posts(moved_pkey)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS i_posts_pkey ON posts(pkey)")
             self.conn.commit()
             self._fill()
@@ -114,6 +117,19 @@ class Records:
             self.conn.commit()
             return int(cur.lastrowid)
 
+    def try_begin(self, v, note: str = "") -> int | None:
+        """原子地「查一下 + 记发布中」:这个文件已经发过 / 正在发 / 结果不明(比如两个号手选了同一个文件夹)就返回 None,不发。"""
+        with _LOCK:
+            if self.status_of(v.path) in ("已发", "结果不明"):
+                return None
+            return self.api_begin(v, note)
+
+    def mark_moved(self, rid: int, new_path: str) -> None:
+        """发完挪走了:记下新位置(之后在归档里再看到它也认得出发过)。"""
+        with _LOCK:
+            self.conn.execute("UPDATE posts SET moved_pkey=? WHERE id=?", (pkey(new_path), rid))
+            self.conn.commit()
+
     def api_finish(self, rid: int, status: str, note: str = "") -> None:
         """「发布中」那笔改成结果:已发 / 没发成 / 结果不明。"""
         with _LOCK:
@@ -170,7 +186,8 @@ class Records:
         (没摆过 / 没摆成 / 没发成 / 作废都算没发)。"""
         with _LOCK:
             self._fill()
-            rows = [r["status"] for r in self.conn.execute("SELECT status FROM posts WHERE pkey=?", (pkey(path),))]
+            k = pkey(path)
+            rows = [r["status"] for r in self.conn.execute("SELECT status FROM posts WHERE pkey=? OR moved_pkey=?", (k, k))]
         if "已发" in rows:
             return "已发"
         if "发布中" in rows or "结果不明" in rows:

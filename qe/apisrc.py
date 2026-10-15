@@ -12,7 +12,9 @@ import os
 import re
 from dataclasses import dataclass, field
 
-DATE_RE = re.compile(r"^\s*(\d{1,2})\s*[.．]\s*(\d{1,2})")
+# 只认「10.15」「10.15(20)」「10.15（20）」「10.14（星期三）」:日期后面只能跟空白或一对括号(2026-10-16 挖 bug:
+# 原来只看开头,「10.15已发」「10.15不能用」「10.15 脏话」会被当成 10.15 的素材一起发)
+DATE_RE = re.compile(r"^\s*(\d{1,2})\s*[.．]\s*(\d{1,2})(?![\d.．])\s*(?:[（(][^）)]*[）)])?\s*$")
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".flv", ".wmv")
 
 DEFAULT_ROOTS = [r"X:\知乎视频\游戏视频", r"X:\知乎视频\动漫视频"]
@@ -46,9 +48,15 @@ def nick_of_folder(name: str) -> str:
 
 
 def account_folders(roots, known=None) -> dict[str, str]:
-    """{号的昵称: 号的文件夹}。根目录下名字带「--」的、或者下面有日期文件夹的,算一个号。
-    known = 搬过来的号的昵称:给了就只认这些(「1疑似脏话」这种不是号的文件夹就不会混进来)。"""
-    out = {}
+    """{号的昵称: 号的(第一个)文件夹}。要全部的用 account_folder_list。"""
+    return {k: v[0] for k, v in account_folder_list(roots, known).items()}
+
+
+def account_folder_list(roots, known=None) -> dict[str, list[str]]:
+    """{号的昵称: [号的文件夹, …]}。根目录下名字带「--」的、或者下面有日期文件夹的,算一个号。
+    known = 搬过来的号的昵称:给了就只认这些(「1疑似脏话」这种不是号的文件夹就不会混进来)。
+    同一个号有两个文件夹(「CSGO--X」「CS2--X」/ 两个根目录各一个)都算,不悄悄丢一个。"""
+    out: dict[str, list[str]] = {}
     for root in roots or []:
         try:
             names = sorted(os.listdir(root))
@@ -61,9 +69,9 @@ def account_folders(roots, known=None) -> dict[str, str]:
             nick = nick_of_folder(n)
             if known is not None:
                 if nick in known:
-                    out[nick] = p
+                    out.setdefault(nick, []).append(p)
             elif "--" in n or any(date_key(x) for x in _subdirs(p)):
-                out[nick] = p
+                out.setdefault(nick, []).append(p)
     return out
 
 
@@ -77,7 +85,7 @@ def _subdirs(p: str) -> list[str]:
 def dates(roots, known=None) -> list[str]:
     """所有号的日期文件夹合起来有哪些日子(按日子排)。"""
     ds = set()
-    for folder in account_folders(roots, known).values():
+    for folder in (f for fs in account_folder_list(roots, known).values() for f in fs):
         for x in _subdirs(folder):
             k = date_key(x)
             if k:
@@ -90,12 +98,13 @@ def videos(roots, date: str, known=None, picked=None) -> list[ApiVideo]:
     picked = {号: 文件夹}:手动给号选了文件夹的(像旧软件的「选择」),这个号就只发那个文件夹里的,不自动找。"""
     picked = {k: v for k, v in (picked or {}).items() if v}
     out = []
-    for nick, folder in account_folders(roots, known).items():
+    for nick, folders in account_folder_list(roots, known).items():
         if nick in picked:
             continue
-        for x in sorted(_subdirs(folder)):
-            if date_key(x) == date:
-                out += _videos_in(os.path.join(folder, x), nick, date)
+        for folder in folders:
+            for x in sorted(_subdirs(folder)):
+                if date_key(x) == date:
+                    out += _videos_in(os.path.join(folder, x), nick, date)
     for nick, d in picked.items():
         out += _videos_in(d, nick, date)
     return out

@@ -516,6 +516,8 @@ class MainWindow(QMainWindow):
         self.b_sent.setEnabled(not running and bool(self.batch_id))
         self.b_drop.setEnabled(not running and bool(self.batch_id))
         self.b_move.setEnabled(not running and bool(self.c_date.currentData()))
+        self.c_date.setEnabled(not running)
+        self.tree.setEnabled(not running)
 
     def next_batch(self) -> tuple[str, list]:
         """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
@@ -566,6 +568,13 @@ class MainWindow(QMainWindow):
                 "\n\n软件只摆好,不点发布。") + "摆的时候别在罐头里切到别的号。开始吗?"
         if not chained and not self._ask("摆下一批", msg, "开始摆", "先不"):
             return
+        if chained:
+            if (self.c_date.currentData(), sorted(self.checked_dirs())) != getattr(self, "_chain_key", None):
+                QMessageBox.information(self, "自动发布停下了", "摆的时候换了日期 / 改了勾选的员工,自动连发先停下。\n\n"
+                                                              "要接着发,确认一下日期和员工,再点「摆下一批」。")
+                return
+        else:
+            self._chain_key = (self.c_date.currentData(), sorted(self.checked_dirs()))
         self.batch_id = f"{acc}-{bj_str().replace(' ', '_').replace(':', '')}"
         self.batch_videos = vids
         shots = str(data_dir() / "截图" / bj_str()[:10])
@@ -902,11 +911,12 @@ class MainWindow(QMainWindow):
         f2 = QFormLayout(g2)
         sp_thr = QSpinBox()
         sp_thr.setRange(1, 5)
-        sp_thr.setValue(int(self.st.get("api_threads", 1) or 1))
+        from gui.api_tab import _num
+        sp_thr.setValue(_num(self.st.get("api_threads"), 1))
         sp_gap = QSpinBox()
         sp_gap.setRange(0, 600)
         sp_gap.setSuffix(" 秒")
-        sp_gap.setValue(int(self.st.get("api_interval", 5) or 0))
+        sp_gap.setValue(_num(self.st.get("api_interval"), 5))
         w_api, e_api_arc = path_row(self.st.get("api_archive", ""))
         k_game = QCheckBox("按游戏放进子文件夹(CSGO、DNF、光与夜之恋 …)")
         k_game.setChecked(bool(self.st.get("api_archive_by_game", True)))
@@ -974,7 +984,16 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
             self.worker.stop()
-            self.worker.wait(20000)
+            from PySide6.QtWidgets import QApplication, QProgressDialog
+            dlg = QProgressDialog("正在停:手上这条摆完就关…", None, 0, 0, self)
+            dlg.setWindowTitle("请稍等")
+            dlg.setMinimumDuration(0)
+            dlg.setValue(0)
+            dlg.show()
+            while not self.worker.wait(200):
+                QApplication.processEvents()
+            QApplication.processEvents()              # 让摆好的那几条记进记录
+            dlg.close()
         j = getattr(getattr(self, "api_tab", None), "job", None)
         if j and j.isRunning():
             if QMessageBox.question(self, "企鹅号发布助手", "接口那边还在做(发布 / 转竖屏 / 改话题),要停下来关掉吗?") \
