@@ -295,7 +295,7 @@ def test_api(tmp: Path):
     led.add("t1", moves)
     d = os.path.dirname(v.path)
     check(sorted(os.listdir(d)) == ["a #CSGO.jpg", "a #CSGO.mp4"], "改名:同名封面跟着改")
-    check(led.undo_last() == (2, 0) and sorted(os.listdir(d)) == ["a #CSGO #反恐精英.jpg", "a #CSGO #反恐精英.mp4"], "能撤销")
+    check(led.undo_last() == (2, 0, 0) and sorted(os.listdir(d)) == ["a #CSGO #反恐精英.jpg", "a #CSGO #反恐精英.mp4"], "能撤销")
 
     check(apiacc.unseal(apiacc.seal("秘密abc")) == "秘密abc" and "秘密" not in apiacc.seal("秘密abc"), "密钥加密存")
     import sqlite3
@@ -428,7 +428,9 @@ def test_api_tab(tmp: Path):
         def __init__(self, cid, sec, **k):
             self.cid = cid
 
-        def send(self, path, title, cat, **k):
+        def send(self, path, title, cat, before_publish=None, **k):
+            if before_publish:
+                before_publish("V")
             sent.append((time.time(), title, cat))
             return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
 
@@ -538,6 +540,174 @@ def test_api_tab(tmp: Path):
     check("全部" in tab.b_check.text(), "取消选择:回到全部")
     tab.unpick("电竞情报馆")
     check("10.15" not in (st.get("api_picked") or {}), "取消手选")
+
+
+def test_audit_r1(tmp: Path):
+    print("[审查第 1 轮修的:密钥不进日志 / 结果不明不重发 / 撤销不改已发的 / 转竖屏不覆盖 / 重名序号位置 / 间隔]")
+    import requests
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, topic, vertical
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+
+    # 1. 网络错:报错里没有密钥 / token
+    class Boom:
+        def post(self, *a, **k):
+            raise requests.ConnectionError("Max retries exceeded with url: /x?client_secret=SEC123&access_token=TOK9")
+        request = post
+    try:
+        omapi.Client("cid", "SEC123", session=Boom()).token()
+        msg = ""
+    except omapi.ApiError as e:
+        msg = str(e)
+    check(msg and "SEC123" not in msg and "TOK9" not in msg and "网络" in msg, f"断网报错不带密钥、说人话 -> {msg}")
+    check(omapi.redact("a?client_secret=xx&access_token=yy") == "a?client_secret=***&access_token=***", "redact 去掉密钥")
+
+    # 2. 发布请求发出去没回话 → 结果不明,不再发;发成功后查进度出错 → 算已发
+    class S:
+        def __init__(self, pub_err=None, poll_err=None):
+            self.pub_err, self.poll_err, self.pubs = pub_err, poll_err, 0
+
+        def post(self, url, **kw):
+            class R:
+                status_code = 200
+
+                def json(self_):
+                    return {"code": "0", "data": {"access_token": "T", "expires_in": 7200}}
+            return R()
+
+        def request(self, method, url, **kw):
+            path = url.split("api.om.qq.com")[1]
+            d = {}
+            if path == "/video/clientuploadready":
+                d = {"transaction_id": "U"}
+            elif path == "/video/clientuploadtrunk":
+                d = {"end_offset": len(kw["files"]["mediatrunk"][1]) - 1 + int(kw["data"]["start_offset"])}
+            elif path == "/transaction/infoclient":
+                if kw["params"]["transaction_id"] == "U":
+                    d = {"vid": "V"}
+                elif self.poll_err:
+                    raise self.poll_err
+                else:
+                    d = {"transaction_status": "成功"}
+            elif path == "/articlev2/clientpubvideo":
+                self.pubs += 1
+                if self.pub_err:
+                    raise self.pub_err
+                d = {"transaction_id": "P", "article_id": "A"}
+
+            class R:
+                status_code = 200
+
+                def json(self_):
+                    return {"code": "0", "data": d}
+            return R()
+    f = tmp / "aud.mp4"
+    f.write_bytes(b"0123456789")
+    try:
+        omapi.Client("c", "s", session=S(pub_err=requests.ReadTimeout("t"))).send(str(f), "t", 1)
+        kind = "none"
+    except omapi.Unknown:
+        kind = "unknown"
+    check(kind == "unknown", "发布请求超时 = 结果不明(不是没发成)")
+    r = omapi.Client("c", "s", session=S(poll_err=requests.ReadTimeout("t"))).send(str(f), "t", 1)
+    check(r["status"] == "处理中" and r["article_id"] == "A", "发成功后查进度出错 = 已发(平台处理中)")
+
+    rec = Records(tmp / "aud.sqlite")
+
+    class V:
+        date, account, title = "1.1", "号", "t"
+        path = str(f)
+    rid = rec.api_begin(V)
+    check(rec.blocked(V.path) and rec.status_of(V.path) == "结果不明", "发布中(程序被关)= 不能自动再发")
+    rec.api_finish(rid, "结果不明", "x")
+    check(rec.blocked(V.path) and len(rec.unsure_paths()) == 1, "结果不明:不能自动再发,列出来让人看")
+    rec.resolve_unsure(V.path, False)
+    check(not rec.blocked(V.path), "人看过了标「没发」:能再发")
+
+    # 3. 撤销不改已发的
+    d = tmp / "aud_undo"
+    d.mkdir()
+    (d / "c1 #a #b.mp4").write_bytes(b"x")
+    led = topic.Ledger(tmp / "aud_led.json")
+    moves = topic.rename_logged(str(d / "c1 #a #b.mp4"), "c1 #a", led, "t")
+    rec.api_result(type("X", (), {"date": "1.1", "account": "号", "title": "c1 #a", "path": moves[0][1]}), "已发")
+    ok, bad, skipped = led.undo_last(skip=rec.blocked)
+    check(skipped == 1 and (d / "c1 #a.mp4").exists(), "撤销:已经发了的不改回去(防重发)")
+
+    # 7. 重名:序号插在话题前面,话题还在结尾
+    (d / "a #x.mp4").write_bytes(b"x")
+    (d / "a #x #y.mp4").write_bytes(b"x")
+    mv = topic.rename_with_sidecars(str(d / "a #x #y.mp4"), "a #x")
+    check(os.path.basename(mv[0][1]) == "a (2) #x.mp4" and topic.split_topics("a (2) #x")["tags"] == ["x"],
+          "重名:「a (2) #x」话题还在结尾")
+
+    # 5. 转竖屏:a.mov 转出来不覆盖已有的 a.mp4
+    ff = vertical.ffmpeg_path()
+    if ff:
+        import subprocess
+        vd = tmp / "aud_vert"
+        vd.mkdir()
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25", "-t", "1",
+                        "-c:v", "libx264", str(vd / "a.mov")], check=True)
+        (vd / "a.mp4").write_bytes(b"keep")
+        out, orig = vertical.to_vertical(str(vd / "a.mov"), ff)
+        check((vd / "a.mp4").read_bytes() == b"keep" and os.path.basename(out) == "a (2).mp4", "转竖屏:不覆盖同名的另一条")
+        check(not [n for n in os.listdir(vd) if n.startswith("_处理中_")], "转竖屏:不留临时文件")
+        (vd / "b.mov").write_bytes(b"x")
+        (vd / "横屏原片").rename(vd / "横屏原片_d")
+        (vd / "横屏原片").write_bytes(b"block")
+        try:
+            vertical.to_vertical(str(vd / "b.mov"), ff)
+            err = ""
+        except RuntimeError as e:
+            err = str(e)
+        check(err and (vd / "b.mov").exists() and not [n for n in os.listdir(vd) if n.startswith("_处理中_")],
+              f"转竖屏失败:原片还在、不留临时文件 -> {err[:40]}")
+
+    # 8. 间隔:上一条发完以后才开始算
+    root = tmp / "aud_gap"
+    (root / "号A").mkdir(parents=True)
+    for n in ("g1.mp4", "g2.mp4"):
+        (root / "号A" / n).write_bytes(b"x")
+    apiacc.save([{"nick": "号A", "source_name": "A", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "aud_st.json")
+    st["api_roots"] = [str(tmp / "nothing")]
+    st["api_archive"] = str(tmp / "aud_out")
+    st["api_interval"] = 1
+    st["api_picked"] = {"1.1": {"号A": str(root / "号A")}}
+    tab = T.ApiTab(st, Records(tmp / "aud2.sqlite"), lambda m: None)
+    tab.c_date.addItem("1.1")
+    tab.c_date.setCurrentText("1.1")
+    tab.load()
+    for v in tab.videos:
+        v.checks = {"w": 1080, "h": 1920, "tags": [], "platform": []}
+    marks = []
+
+    class Slow:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, **k):
+            marks.append(("start", time.time()))
+            before_publish("V")
+            time.sleep(0.6)
+            marks.append(("end", time.time()))
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+    real_c, real_q = omapi.Client, QMessageBox.question
+    omapi.Client = Slow
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    try:
+        tab.run_publish()
+        check(tab.busy() and not tab.b_pick.isEnabled(), "后台发布时「给号选文件夹」点不了")
+        tab.job.wait()
+        QApplication.processEvents()
+    finally:
+        omapi.Client, QMessageBox.question = real_c, real_q
+    gap = marks[2][1] - marks[1][1] if len(marks) >= 3 else 0
+    check(gap >= 0.95, f"间隔:上一条发完以后歇够了再发 -> {gap:.2f} 秒")
 
 
 def test_bj_time():
@@ -730,6 +900,7 @@ if __name__ == "__main__":
     test_group(tmp)
     test_api(tmp)
     test_api_tab(tmp)
+    test_audit_r1(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

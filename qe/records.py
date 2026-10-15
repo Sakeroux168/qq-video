@@ -70,6 +70,38 @@ class Records:
                  bj_str() if status == "已发" else "", note))
             self.conn.commit()
 
+    def api_begin(self, v, note: str = "") -> int:
+        """真正调发布接口之前先记一笔「发布中」:程序这时候被关 / 崩了,下次也不会自动再发(要人去后台看)。返回记录 id。"""
+        with _LOCK:
+            cur = self.conn.execute(
+                "INSERT INTO posts(date,account,employee,title,path,cover_kind,batch,status,prepared_at,published_at,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (v.date, v.account, "接口", v.title, v.path, "", "接口", "发布中", bj_str(), "", note))
+            self.conn.commit()
+            return int(cur.lastrowid)
+
+    def api_finish(self, rid: int, status: str, note: str = "") -> None:
+        """「发布中」那笔改成结果:已发 / 没发成 / 结果不明。"""
+        with _LOCK:
+            self.conn.execute("UPDATE posts SET status=?, published_at=?, note=? WHERE id=?",
+                              (status, bj_str() if status == "已发" else "", note, rid))
+            self.conn.commit()
+
+    def unsure_paths(self) -> list[dict]:
+        """「发布中」(程序中途被关)/「结果不明」的接口记录,要人去后台确认。"""
+        with _LOCK:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT * FROM posts WHERE employee='接口' AND status IN ('发布中','结果不明') ORDER BY id")]
+
+    def resolve_unsure(self, path: str, sent: bool) -> int:
+        """人去后台看过了:发了 → 已发;没发 → 没发成(能再发)。"""
+        with _LOCK:
+            cur = self.conn.execute(
+                "UPDATE posts SET status=?, published_at=CASE WHEN ?='已发' THEN ? ELSE published_at END, "
+                "note=note || '(人去后台确认过)' WHERE path=? AND status IN ('发布中','结果不明')",
+                ("已发" if sent else "没发成", "已发" if sent else "", bj_str(), path))
+            self.conn.commit()
+            return cur.rowcount
+
     def failed_in_batch(self, batch: str) -> list[dict]:
         """这批里没摆成、后来也没记已发的(人可能在罐头里手动补好一起发了)。"""
         with _LOCK:
@@ -91,17 +123,24 @@ class Records:
             return cur.rowcount
 
     def status_of(self, path: str) -> str:
-        """这条视频现在的状态:已发 > 摆好 > ''(没摆过 / 没摆成 / 作废都算没摆)。"""
+        """这条视频现在的状态:已发 > 结果不明(接口发了一半 / 没收到回话,不能自动再发) > 摆好 > ''
+        (没摆过 / 没摆成 / 没发成 / 作废都算没发)。"""
         with _LOCK:
             rows = [r["status"] for r in self.conn.execute("SELECT status FROM posts WHERE path=?", (path,))]
         if "已发" in rows:
             return "已发"
+        if "发布中" in rows or "结果不明" in rows:
+            return "结果不明"
         if "摆好" in rows:
             return "摆好"
         return ""
 
+    def blocked(self, path: str) -> bool:
+        """接口发布不能再发这条:已发,或者结果不明。"""
+        return self.status_of(path) in ("已发", "结果不明")
+
     def rows(self, date: str = "", account: str = "", employee: str = "") -> list[dict]:
-        q, a = "SELECT * FROM posts WHERE status IN ('已发','摆好')", []
+        q, a = "SELECT * FROM posts WHERE status IN ('已发','摆好','结果不明','发布中')", []
         for k, val in (("date", date), ("account", account), ("employee", employee)):
             if val:
                 q += f" AND {k}=?"

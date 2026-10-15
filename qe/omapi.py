@@ -5,11 +5,12 @@ https://static.om.qq.com/om/om_3.0/normal/html/FdqHaHRh8sY8XlAqsUPKAsHX3FLsNiUc.
 
 旧软件实际怎么发的(它的数据库里 359 条都是这样):标题 = 简介 = 文件名;tags 空;分类 = 号的默认分类;
 aigc_userstatement = "2"(非 AI);不传封面(平台自己截一帧)。
-密钥只在这台电脑上解开用,不写日志、不显示。
+密钥只在这台电脑上解开用,不写日志、不显示 —— 所有报错都过一遍 redact(),网络错只给一句人话(2026-10-15 审查:
+requests 的报错原文带完整 URL,client_secret / access_token 会跟着进日志)。
 """
 import hashlib
 import json
-import os
+import re
 import time
 
 import requests
@@ -20,7 +21,26 @@ TRUNK = 100 * 1024 * 1024        # 一片 100MB(上限 500MB,小一点出错重�
 
 
 class ApiError(Exception):
-    pass
+    """接口出错。code = 平台回的错误码(网络错为 "");fatal = 这个号后面的都别发了(比如换不到 token)。"""
+
+    def __init__(self, msg: str, code: str = "", fatal: bool = False):
+        super().__init__(redact(msg))
+        self.code, self.fatal = str(code or ""), fatal
+
+
+class Stopped(ApiError):
+    """人按了「停」:不是失败。"""
+
+
+class Unknown(ApiError):
+    """发布请求发出去了,但没收到平台的回话(超时 / 断网):平台可能已经发了,不能自动再发,要人去后台看。"""
+
+
+_SECRET = re.compile(r"(client_secret|access_token|client_id|refresh_to(?:e)?ken)=[^&\s'\"]*", re.I)
+
+
+def redact(s: str) -> str:
+    return _SECRET.sub(r"\1=***", str(s or ""))
 
 
 def _ok(j: dict) -> bool:
@@ -38,6 +58,16 @@ def file_hashes(path: str) -> tuple[int, str, str]:
     return size, md5.hexdigest(), sha.hexdigest()
 
 
+def _net(fn, what: str):
+    """调 requests;网络层的错误换成人话(不带 URL,URL 里有密钥)。"""
+    try:
+        return fn()
+    except requests.Timeout:
+        raise ApiError(f"{what}:等企鹅号回话太久(超时),可能是网不好")
+    except requests.RequestException:
+        raise ApiError(f"{what}:网络连不上企鹅号,看看网线 / 网络")
+
+
 class Client:
     def __init__(self, client_id: str, client_secret: str, session=None, log=None):
         self._cid, self._sec = client_id, client_secret
@@ -49,12 +79,13 @@ class Client:
     def token(self) -> str:
         if self._tok and time.time() < self._exp - 300:
             return self._tok
-        r = self.s.post(AUTH, params={"grant_type": "clientcredentials", "client_id": self._cid,
-                                      "client_secret": self._sec}, timeout=30)
+        r = _net(lambda: self.s.post(AUTH, params={"grant_type": "clientcredentials", "client_id": self._cid,
+                                                   "client_secret": self._sec}, timeout=30), "换 token")
         j = self._json(r)
         d = j.get("data") or {}
         if not _ok(j) or not d.get("access_token"):
-            raise ApiError(f"换 token 失败:{j.get('msg') or j.get('code') or r.status_code}")
+            raise ApiError(f"换 token 失败(账号凭据可能失效,去旧软件 / 后台看看):{j.get('msg') or j.get('code') or r.status_code}",
+                           j.get("code"), fatal=True)
         self._tok = d["access_token"]
         self._exp = time.time() + int(d.get("expires_in") or d.get("expire_in") or 3600)
         return self._tok
@@ -64,15 +95,16 @@ class Client:
         try:
             return r.json()
         except ValueError:
-            raise ApiError(f"接口没回 JSON:HTTP {r.status_code} {r.text[:100]}")
+            raise ApiError(f"企鹅号没按格式回话:HTTP {r.status_code}")
 
     def _call(self, method: str, path: str, what: str, **kw) -> dict:
         params = dict(kw.pop("params", {}) or {})
         params["access_token"] = self.token()
-        r = self.s.request(method, API + path, params=params, timeout=kw.pop("timeout", 60), **kw)
+        timeout = kw.pop("timeout", 60)
+        r = _net(lambda: self.s.request(method, API + path, params=params, timeout=timeout, **kw), what)
         j = self._json(r)
         if not _ok(j):
-            raise ApiError(f"{what}失败:{j.get('msg') or ''}(code {j.get('code')})")
+            raise ApiError(f"{what}失败:{j.get('msg') or ''}(code {j.get('code')})", j.get("code"))
         return j.get("data") or {}
 
     # ---------------- 发一条 ----------------
@@ -87,7 +119,7 @@ class Client:
         with open(path, "rb") as f:
             while off < size:
                 if stop and stop():
-                    raise ApiError("停下了")
+                    raise Stopped("停下了")
                 f.seek(off)
                 chunk = f.read(TRUNK)
                 d = self._call("POST", "/video/clientuploadtrunk", "上传视频", timeout=600,
@@ -116,47 +148,73 @@ class Client:
             if vid:
                 return vid
             if "失败" in str(d.get("transaction_status") or ""):
-                raise ApiError("上传后平台处理失败")
+                raise ApiError("上传后平台处理失败" + _why(d))
             if stop and stop():
-                raise ApiError("停下了")
+                raise Stopped("停下了")
             time.sleep(3)
-        raise ApiError("上传完 5 分钟还没拿到 vid")
+        raise ApiError(f"上传完等了 {int(timeout)} 秒还没拿到视频编号(vid)")
 
     def publish(self, vid: str, title: str, cat: int, desc: str = "", aigc: str = "2", tags: str = "",
                 self_declare: int | None = 0) -> dict:
-        """aigc "2" = AI 声明「非 AI 生成」;self_declare 0 = 自主声明「无需标注」(网页上选无需标注提交的就是 id 0;
-        文档:ext_info 里写 self_declare=值)。旧软件值是 0 时干脆不带,后台显示「添加内容自主声明」(空的),用户要的是无需标注。"""
+        """aigc "2" = AI 声明「非 AI 生成」;self_declare 0 = 自主声明「无需标注」(网页上选无需标注提交的就是 id 0)。
+        旧软件值是 0 时干脆不带,后台显示「添加内容自主声明」(空的),用户要的是无需标注(2026-10-15 真发验证过)。"""
         body = {"title": title, "tags": tags, "vid": vid, "cat": int(cat), "desc": (desc or title)[:200],
                 "aigc_userstatement": aigc}
         if self_declare is not None:
-            # ext_info 必须是 JSON(写成文档里的 "self_declare=0" 平台报 40002 must be a valid JSON encoding;
-            # 2026-10-15 用假 vid 试过 {"self_declare": 0} 能过格式检查)
+            # ext_info 必须是 JSON(写成文档里的 "self_declare=0" 平台报 40002 must be a valid JSON encoding)
             body["ext_info"] = json.dumps({"self_declare": int(self_declare)})
         return self._call("POST", "/articlev2/clientpubvideo", "发布", json=body)
 
     def wait_done(self, tid: str, timeout: float = 600, stop=None) -> str:
-        """轮询发布事务:返回 "成功";失败抛 ApiError;等太久返回 "处理中"(平台多半还在审,记成待查)。"""
+        """轮询发布事务:返回 "成功";平台明确说失败抛 ApiError(带原因);等太久 / 停了返回 "处理中"。"""
         end = time.time() + timeout
         while time.time() < end:
-            st = str(self.transaction(tid).get("transaction_status") or "")
+            d = self.transaction(tid)
+            st = str(d.get("transaction_status") or "")
             if "成功" in st:
                 return "成功"
             if "失败" in st:
-                raise ApiError("平台说发布失败")
+                raise ApiError("平台说发布失败" + _why(d))
             if stop and stop():
                 return "处理中"
             time.sleep(5)
         return "处理中"
 
     def send(self, path: str, title: str, cat: int, on_progress=None, stop=None, log=None,
-             self_declare: int | None = 0, aigc: str = "2") -> dict:
-        """整条:传 → vid → 发 → 等结果。返回 {"vid","article_id","transaction_id","status"}。"""
+             self_declare: int | None = 0, aigc: str = "2", before_publish=None) -> dict:
+        """整条:传 → vid → 发 → 等结果。返回 {"vid","article_id","transaction_id","status"}。
+        status:「成功」/「处理中」(平台已收下,还在处理)。
+        before_publish(vid):真正调发布接口前调一下(界面先记一笔「发布中」,程序中途关掉也不会再发)。
+        发布请求发出去后没收到回话 → 抛 Unknown;平台已收下、之后查进度出错 → 不算失败,返回「处理中」。"""
         say = log or self.log
         say("上传中")
         tid = self.upload(path, on_progress=on_progress, stop=stop)
         vid = self.wait_vid(tid, stop=stop)
+        if stop and stop():
+            raise Stopped("停下了")
+        if before_publish:
+            before_publish(vid)
         say("发布中")
-        d = self.publish(vid, title, cat, aigc=aigc, self_declare=self_declare)
+        try:
+            d = self.publish(vid, title, cat, aigc=aigc, self_declare=self_declare)
+        except ApiError as e:
+            if e.code:                                   # 平台回了错误码 = 明确没发
+                raise
+            raise Unknown(f"发布请求发出去了,但没收到平台回话({e}),可能已经发了,去后台看一眼")
         ptid = d.get("transaction_id") or ""
-        st = self.wait_done(ptid, stop=stop) if ptid else "处理中"
+        st = "处理中"
+        if ptid:
+            try:
+                st = self.wait_done(ptid, stop=stop)
+            except ApiError as e:
+                if "平台说发布失败" in str(e):
+                    raise
+                st = "处理中"                             # 查进度出错不等于没发:平台已经收下了
         return {"vid": vid, "article_id": str(d.get("article_id") or ""), "transaction_id": ptid, "status": st}
+
+
+def _why(d: dict) -> str:
+    for k in ("msg", "reason", "fail_reason", "transaction_msg", "err_msg"):
+        if d.get(k):
+            return f":{d[k]}"
+    return ""

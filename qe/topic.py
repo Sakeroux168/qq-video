@@ -32,7 +32,11 @@ TOPIC_SYSTEM = """
 # 比 ainame 多认两种写法(2026-10-15 电竞情报馆的素材):「# 2026kpl年度总决赛」(# 后面带空格)、全角「＃」。
 # 留下的那个统一写成「#话题」(不带空格),平台才认成话题。
 # 还有「##话题」(多打了一个 #),和「取胜n#话题」(换行 \n 被弄丢了反斜杠剩个 n;前面是英文字母的 n 不算,免得把单词吃掉)。
-_RUN = re.compile(r"((?:\s*(?:(?<![A-Za-z])n)?\s*[#＃]+\s*[^#＃\s]+)+)\s*$")
+# 「# 话题」(# 后面带空格)只在 # 前面不是英文字母 / 数字时才算:「学习C# 教程」「3# 打野」不是话题(2026-10-15 审查)。
+# 结尾多出来的孤零零的 #(「标题 #原神#」)不算话题,但算写法不对,tidy 会去掉。
+_SPACED = r"(?:(?<![A-Za-z0-9+])|(?<=(?<![A-Za-z])n))[#＃]+\s+"
+_TAG = rf"(?:{_SPACED}|[#＃]+)([^#＃\s]+)"
+_RUN = re.compile(rf"((?:\s*(?:(?<![A-Za-z])n)?\s*{_TAG.replace('([^#＃', '(?:[^#＃')})+)[\s#＃]*$")
 
 
 def split_topics(name: str) -> dict:
@@ -43,7 +47,7 @@ def split_topics(name: str) -> dict:
         return {"body": s, "sep": "", "tags": []}
     run = m.group(1)
     seen, tags = set(), []
-    for t in re.findall(r"[#＃]+\s*([^#＃\s]+)", run):
+    for t in re.findall(_TAG, run):
         if t.lower() in seen:
             continue
         seen.add(t.lower())
@@ -62,8 +66,10 @@ def tidy(stem: str) -> str | None:
     p = split_topics(stem)
     if len(p["tags"]) > 1:
         return None
-    out = join_topic(p, p["tags"][0]) if p["tags"] else stem
+    out = join_topic(p, p["tags"][0]) if p["tags"] else re.sub(r"[\s#＃]+$", "", stem)
     out = sanitize(out)
+    if not out:                                   # 整个标题都是空格 / #:改不了,交给人
+        return None
     return None if out == stem else out
 
 
@@ -83,7 +89,8 @@ def with_topic(stem: str, tag: str) -> str | None:
     if not tag:
         return None
     p = split_topics(stem)
-    out = sanitize(join_topic(p, tag) if p["tags"] else f"{p['body'].rstrip()}#{tag}")
+    out = sanitize(join_topic(p, tag) if p["tags"] else f"{re.sub(r'[\s#＃]+$', '', p['body'])}#{tag}")
+    out = tidy(out) or out                        # 产出的再整理一遍写法(审查:「标题 #原神#」会产出「##」)
     return None if out == stem else out
 
 
@@ -168,6 +175,14 @@ def sanitize(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "", name).strip()
 
 
+def _numbered(new_stem: str, k: int) -> str:
+    """重名时的新名字:序号插在正文后面、话题前面(「a (2) #x」),话题还在结尾,检查照样认得出(审查:原来是「a #x (2)」)。"""
+    p = split_topics(new_stem)
+    if not p["tags"]:
+        return f"{new_stem} ({k})"
+    return f"{p['body'].rstrip()} ({k}){new_stem[len(p['body']):]}"
+
+
 def rename_with_sidecars(path: str, new_stem: str) -> list[tuple[str, str]]:
     """改视频的主名;同文件夹里同名的封面图 / 文字跟着改。重名加 (2)。返回 [(旧, 新), ...](第一个是视频)。"""
     d, base = os.path.split(path)
@@ -175,7 +190,7 @@ def rename_with_sidecars(path: str, new_stem: str) -> list[tuple[str, str]]:
     target = os.path.join(d, new_stem + ext)
     k = 2
     while os.path.exists(target) and os.path.normcase(target) != os.path.normcase(path):
-        target = os.path.join(d, f"{new_stem} ({k}){ext}")
+        target = os.path.join(d, _numbered(new_stem, k) + ext)
         k += 1
     final_stem = os.path.splitext(os.path.basename(target))[0]
     os.rename(path, target)
@@ -190,8 +205,24 @@ def rename_with_sidecars(path: str, new_stem: str) -> list[tuple[str, str]]:
     return moves
 
 
+def rename_logged(path: str, new_stem: str, ledger, at: str) -> list[tuple[str, str]]:
+    """改名 + 记台账;台账写不进去就把名字改回去(不留撤销不了的改名)。"""
+    moves = rename_with_sidecars(path, new_stem)
+    try:
+        ledger.add(at, moves)
+    except Exception:
+        for old, new in reversed(moves):
+            try:
+                os.rename(new, old)
+            except OSError:
+                pass
+        raise
+    return moves
+
+
 class Ledger:
-    """改名台账(先记再改,能整批撤销)。每一批:{"at", "moves": [[旧, 新], ...]}。"""
+    """改名台账(能整批撤销)。每一批:{"at", "groups": [[[旧, 新], ...](一条视频和它跟着改的封面), ...]}。
+    老格式 {"at", "moves": [...]} 也认(每个改名自成一组)。"""
 
     def __init__(self, path):
         self.path = str(path)
@@ -209,30 +240,41 @@ class Ledger:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
 
+    @staticmethod
+    def groups_of(b: dict) -> list:
+        return b.get("groups") or [[m] for m in (b.get("moves") or [])]
+
     def add(self, at: str, moves: list) -> None:
         data = self._load()
+        g = [list(m) for m in moves]
         if data and data[-1].get("at") == at:
-            data[-1]["moves"] += [list(m) for m in moves]
+            data[-1].setdefault("groups", self.groups_of(data[-1])).append(g)
+            data[-1].pop("moves", None)
         else:
-            data.append({"at": at, "moves": [list(m) for m in moves]})
+            data.append({"at": at, "groups": [g]})
         self._save(data[-50:])
 
     def last(self) -> dict | None:
         data = self._load()
         return data[-1] if data else None
 
-    def undo_last(self) -> tuple[int, int]:
-        """把最后一批改回去。返回 (改回几个, 改不回几个:文件不在了 / 原名被占了)。"""
+    def undo_last(self, skip=None) -> tuple[int, int, int]:
+        """把最后一批改回去。skip(视频现在的路径) 为真的整组不改(已经发了的:改回去防重发就认不出了)。
+        返回 (改回几个文件, 改不回几个:文件不在了 / 原名被占了, 跳过几条视频)。"""
         data = self._load()
         if not data:
-            return 0, 0
+            return 0, 0, 0
         b = data.pop()
-        ok = bad = 0
-        for old, new in reversed(b.get("moves") or []):
-            if os.path.exists(new) and not os.path.exists(old):
-                os.rename(new, old)
-                ok += 1
-            else:
-                bad += 1
+        ok = bad = skipped = 0
+        for g in reversed(self.groups_of(b)):
+            if skip and g and skip(g[0][1]):
+                skipped += 1
+                continue
+            for old, new in reversed(g):
+                if os.path.exists(new) and not os.path.exists(old):
+                    os.rename(new, old)
+                    ok += 1
+                else:
+                    bad += 1
         self._save(data)
-        return ok, bad
+        return ok, bad, skipped

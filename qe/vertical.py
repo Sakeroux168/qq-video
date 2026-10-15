@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 ORIG_DIR = "横屏原片"
@@ -68,12 +69,25 @@ def _cmd(ff: str, src: str, dst: str, nvenc: bool) -> list[str]:
 
 
 def to_vertical(path: str, ffmpeg: str = "", stop=None) -> tuple[str, str]:
-    """转成竖屏,原片挪进「横屏原片」。返回 (竖屏的位置, 原片的新位置)。出错抛 RuntimeError(原片原样不动)。"""
+    """转成竖屏,原片挪进「横屏原片」。返回 (竖屏的位置, 原片的新位置)。
+    出错一律抛 RuntimeError,原片放回原处、临时文件删掉(2026-10-15 审查:OSError 时会留下 _处理中_ 文件)。"""
     ff = ffmpeg or ffmpeg_path()
     if not ff:
         raise RuntimeError("找不到 ffmpeg.exe")
     src = Path(path)
-    tmp = src.with_name("_处理中_" + src.stem + ".mp4")
+    # 临时文件名带进程号和随机数:同名的 a.mov / a.mp4 一起转不会抢同一个临时文件
+    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:6]}_{src.stem}.mp4")
+    try:
+        return _convert(src, tmp, ff, stop)
+    except RuntimeError:
+        raise
+    except OSError as e:
+        raise RuntimeError(f"转竖屏失败(文件挪不动:{e.strerror or e})")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _convert(src: Path, tmp: Path, ff: str, stop) -> tuple[str, str]:
     err = ""
     for nvenc in (True, False):
         try:
@@ -98,13 +112,24 @@ def to_vertical(path: str, ffmpeg: str = "", stop=None) -> tuple[str, str]:
     else:
         raise RuntimeError(f"转竖屏失败:{err[-200:] or '不知道为什么'}")
     odir = src.parent / ORIG_DIR
+    if odir.exists() and not odir.is_dir():
+        raise RuntimeError(f"转竖屏失败:文件夹里有个叫「{ORIG_DIR}」的文件挡着,原片没地方放")
     odir.mkdir(exist_ok=True)
     orig = odir / src.name
     k = 2
     while orig.exists():
         orig = odir / f"{src.stem} ({k}){src.suffix}"
         k += 1
-    os.replace(src, orig)
+    # 转好的放回原名(.mp4);a.mov 转出来的 a.mp4 撞上同文件夹里另一条 a.mp4 → 加 (2),不覆盖
     out = src.with_suffix(".mp4")
-    os.replace(tmp, out)
+    k = 2
+    while out.exists() and os.path.normcase(str(out)) != os.path.normcase(str(src)):
+        out = src.with_name(f"{src.stem} ({k}).mp4")
+        k += 1
+    os.replace(src, orig)
+    try:
+        os.replace(tmp, out)
+    except OSError:
+        os.replace(orig, src)                       # 新的放不回去:把原片挪回来,当没转过
+        raise
     return str(out), str(orig)
