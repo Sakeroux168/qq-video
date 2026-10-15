@@ -16,7 +16,8 @@ TOPIC_SYSTEM = """
 从高到低排好顺序。排第一的那个会被留下，其余的会被删掉。
 
 判断标准，按优先级：
-1. 游戏名、电视剧名、电影名、动漫名、综艺名 —— 这一类永远排最前面。
+1. 游戏名、电视剧名、电影名、动漫名 / 动画名、综艺名 —— 这一类永远排最前面，
+   只要有一个话题是作品名，留下的就必须是作品名。
    同一个作品有好几种叫法时，排最完整、最准确指向这个作品的那个正式名称。
    例：#火影忍者手游 排在 #火影忍者、#火影 前面（视频是手游的话，手游才是用户搜的）；
        #三角洲行动 排在 #三角洲 前面；#和平精英 排在 #和平 前面。
@@ -28,7 +29,10 @@ TOPIC_SYSTEM = """
 只能给这些话题排序。不许编新话题，不许改话题里的任何一个字。
 """.strip()
 
-_RUN = re.compile(r"((?:\s*#[^#\s]+)+)\s*$")
+# 比 ainame 多认两种写法(2026-10-15 电竞情报馆的素材):「# 2026kpl年度总决赛」(# 后面带空格)、全角「＃」。
+# 留下的那个统一写成「#话题」(不带空格),平台才认成话题。
+# 还有「##话题」(多打了一个 #),和「取胜n#话题」(换行 \n 被弄丢了反斜杠剩个 n;前面是英文字母的 n 不算,免得把单词吃掉)。
+_RUN = re.compile(r"((?:\s*(?:(?<![A-Za-z])n)?\s*[#＃]+\s*[^#＃\s]+)+)\s*$")
 
 
 def split_topics(name: str) -> dict:
@@ -39,7 +43,7 @@ def split_topics(name: str) -> dict:
         return {"body": s, "sep": "", "tags": []}
     run = m.group(1)
     seen, tags = set(), []
-    for t in re.findall(r"#([^#\s]+)", run):
+    for t in re.findall(r"[#＃]+\s*([^#＃\s]+)", run):
         if t.lower() in seen:
             continue
         seen.add(t.lower())
@@ -49,6 +53,21 @@ def split_topics(name: str) -> dict:
 
 def join_topic(parts: dict, tag: str) -> str:
     return f"{parts['body']}{parts['sep']}#{tag}"
+
+
+def clean_tag(tag: str) -> str:
+    """用户填的话题:去掉 #、空格、文件名里不能用的字。"""
+    return sanitize(re.sub(r"[#＃\s]+", "", str(tag or "")))
+
+
+def with_topic(stem: str, tag: str) -> str | None:
+    """批量改话题:结尾的话题全换成这一个(原来没有话题就接在后面)。不用改返回 None。"""
+    tag = clean_tag(tag)
+    if not tag:
+        return None
+    p = split_topics(stem)
+    out = sanitize(join_topic(p, tag) if p["tags"] else f"{p['body'].rstrip()}#{tag}")
+    return None if out == stem else out
 
 
 def topic_messages(body: str, tags: list[str]) -> list[dict]:

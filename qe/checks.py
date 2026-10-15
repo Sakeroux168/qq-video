@@ -53,4 +53,6 @@ def problems(v) -> list[str]:
         out.append("标题有「" + "、".join(c["platform"]) + "」")
     if len(c.get("tags") or []) > 1:
         out.append(f"{len(c['tags'])} 个话题")
+    elif topic.new_name(v.title) is not None:        # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
+        out.append("话题写法不对")
     return out

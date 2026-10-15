@@ -263,6 +263,16 @@ def test_api(tmp: Path):
     p = topic.split_topics("标题 #a #B #b")
     check(p["body"] == "标题" and p["sep"] == " " and p["tags"] == ["a", "B"], "话题拆开、不分大小写去重")
     check(topic.split_topics("标题#a 中间 #b")["tags"] == ["b"], "只认结尾那一串")
+    k = "狼队危险了# 2026kpl年度总决赛 # kpl十周年 # 2026kpl年度总决赛 # kpl十周年 "
+    check(topic.split_topics(k)["tags"] == ["2026kpl年度总决赛", "kpl十周年"], "认「# 话题」(# 后面带空格)和重复的")
+    check(topic.new_name(k, lambda b, t: t[0]) == "狼队危险了#2026kpl年度总决赛", "留下的写成「#话题」")
+    check(topic.new_name("标题 # 牧神记") == "标题 #牧神记" and topic.split_topics("标题＃甲＃乙")["tags"] == ["甲", "乙"],
+          "只有一个「# 话题」也改写法;全角 ＃ 也认")
+    check(topic.split_topics("取胜n# 2026kpl # kpl十周年")["body"] == "取胜" and topic.split_topics("神作 ##怪化猫")["tags"] == ["怪化猫"]
+          and topic.split_topics("Join#话题")["body"] == "Join", "认「##话题」「取胜n#话题」(n 是丢了的换行),英文单词的 n 不动")
+    check(topic.with_topic("团战#英雄联盟手游 #lol", "#英雄 联盟") == "团战#英雄联盟" and topic.with_topic("没话题 ", "英雄联盟") == "没话题#英雄联盟"
+          and topic.with_topic("a#英雄联盟", "英雄联盟") is None, "批量改话题:全换成填的那个;没话题就接上;一样的不改")
+    check("动画名" in topic.TOPIC_SYSTEM and "留下的就必须是作品名" in topic.TOPIC_SYSTEM, "作品名(游戏 / 剧 / 电影 / 动画)优先")
     check(topic.new_name("x #a #a") == "x #a" and topic.new_name("x #a") is None and topic.new_name("x") is None, "0/1 个不问 AI")
     check(topic.new_name("x #活动 #三角洲行动", lambda b, t: t[1]) == "x #三角洲行动", "2 个以上留 AI 挑的")
     check(topic.parse_order('```json\n{"理由":"x","顺序":[2,1]}\n```', 2) == [2, 1] and topic.parse_order("2", 3) == [2, 1, 3]
@@ -420,6 +430,74 @@ def test_api_tab(tmp: Path):
     check(sorted(os.listdir(out)) == ["c1.mp4", "c2.mp4", "e1.mp4"] and os.path.isfile(os.path.join(esp, "e1.jpg")),
           "发完挪到「10.15已发布」(只挪视频,和旧软件一样)")
     check(len([r for r in rec.rows("10.15") if r["employee"] == "接口" and r["status"] == "已发"]) == 3, "记进记录(员工 = 接口)")
+    for f in ("c3.mp4", "c4.mp4"):
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15" / f).write_bytes(b"x")
+    tab.load()
+    tab.run_check()
+    tab.job.wait()
+    QApplication.processEvents()
+    for v in tab.videos:
+        v.checks.update(bad_read=False, landscape=False, w=1080, h=1920)
+    sent.clear()
+    omapi.Client = FakeClient
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    try:
+        row = [i for i, v in enumerate(tab.videos) if v.title == "c4"][0]
+        tab.tree.clearSelection()
+        tab.items[row].setSelected(True)
+        check(tab.selected_rows() == [row], "选中一条")
+        tab.run_publish(tab.selected_rows())
+        tab.job.wait()
+        QApplication.processEvents()
+    finally:
+        omapi.Client, QMessageBox.question = real_c, real_q
+    check([t for _x, t, _c in sent] == ["c4"], "只发选中的:c3 没发")
+    for f in ("d1.mp4", "d2.mp4"):                    # 前面发掉的都挪走了,补两条
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15" / f).write_bytes(b"x")
+    tab.load()
+    check(set(tab.groups) == {"CSGO战神君"} and all(not g.isExpanded() for g in tab.groups.values()),
+          "按号分组,默认收起")
+    tab.expand_all(True)
+    check(all(g.isExpanded() for g in tab.groups.values()), "全部展开")
+    tab.expand_all(False)
+    check(all(not g.isExpanded() for g in tab.groups.values()), "全部收起")
+    tab.groups["CSGO战神君"].setExpanded(True)
+    tab.load()
+    check(tab.groups["CSGO战神君"].isExpanded(), "刷新后展开的还展开着")
+    tab.tree.clearSelection()
+    tab.groups["CSGO战神君"].setSelected(True)
+    check([tab.videos[i].title for i in tab.selected_rows()] == ["c3", "d1", "d2"], "选中号 = 这个号全部")
+    check("3 条" in tab.groups["CSGO战神君"].text(0) and "没检查" in tab.groups["CSGO战神君"].text(2), "号那一行有统计")
+    from PySide6.QtWidgets import QInputDialog
+    real_t, real_i = QInputDialog.getText, QMessageBox.information
+    QInputDialog.getText = staticmethod(lambda *a, **k: ("英雄联盟", True))
+    QMessageBox.information = staticmethod(lambda *a, **k: None)
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    try:
+        rows = [i for i, v in enumerate(tab.videos) if v.title in ("c3",)]
+        tab.set_topic(rows)
+        check([v.title for v in tab.videos if v.title.startswith("c3")] == ["c3#英雄联盟"] and
+              os.path.isfile(os.path.join(os.path.dirname(tab.videos[rows[0]].path), "c3#英雄联盟.mp4")), "批量改话题改了文件名")
+        sent_row = [i for i, v in enumerate(tab.videos) if v.title == "d1"]
+        tab.state[sent_row[0]] = "已发"
+        tab.set_topic(sent_row)
+        check(tab.videos[sent_row[0]].title == "d1", "发过的不改")
+        QInputDialog.getText = staticmethod(lambda *a, **k: ("c3 改过的标题", True))
+        tab.edit_title(rows[0])
+        check(tab.videos[rows[0]].title == "c3 改过的标题", "右键改标题")
+        tab.ledger.undo_last()
+        tab.ledger.undo_last()
+        tab.load()
+        check(any(v.title == "c3" for v in tab.videos), "撤销改名")
+    finally:
+        QInputDialog.getText, QMessageBox.question, QMessageBox.information = real_t, real_q, real_i
+    tab.e_find.setText("c1")
+    vis = [tab.videos[i].title for i, it in tab.items.items() if not it.isHidden()]
+    check(vis == [], "搜标题(c1 发掉了,搜不到)")
+    tab.e_find.setText("d2")
+    vis = [tab.videos[i].title for i, it in tab.items.items() if not it.isHidden()]
+    check(vis == ["d2"], "搜标题")
+    tab.e_find.setText("")
     tab.unpick("电竞情报馆")
     check("10.15" not in (st.get("api_picked") or {}), "取消手选")
 

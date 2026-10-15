@@ -1,22 +1,26 @@
 """「接口发(16个号)」页:游戏 / 动漫 16 个号,用企鹅号官方接口直接发(不用罐头)。
 
-先检查(横屏 / 标题里有别的平台 / 话题不止一个)→ 横屏一键转竖、话题 AI 留一个(能撤销)、平台名你自己改 →
-发「能发的」:传视频 → 发布 → 发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布」,记进「记录」。
+先检查(横屏 / 标题里有别的平台 / 话题不止一个)→ 横屏一键转竖、话题 AI 留一个 / 批量改成指定的(能撤销)、平台名你自己改 →
+发「能发的」/「选中的」:传视频 → 发布 → 发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布」,记进「记录」。
+列表按号分组,每个号能收起 / 展开(用户 2026-10-15:看每条时展开,不看收起)。
 """
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QMenu, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+                               QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from qe import apiacc, apisrc, checks, topic, vertical
 from qe.config import bj_now, bj_str, data_dir
 
-COLS = ["号", "标题(= 文件名)", "画面", "要处理的", "状态"]
+COLS = ["号 / 标题(= 文件名)", "画面", "要处理的", "状态"]
 YELLOW, RED, GREEN = QColor("#fff3c4"), QColor("#ffd6d6"), QColor("#d9f2d9")
+ROW = Qt.ItemDataRole.UserRole            # 视频那一行:存它在 self.videos 里的下标;号那一行:存 -1
+NICK = Qt.ItemDataRole.UserRole + 1       # 号那一行:存号的昵称
 
 
 class Job(QThread):
@@ -46,6 +50,9 @@ class ApiTab(QWidget):
         self.st, self.rec, self.say = st, rec, say
         self.videos: list[apisrc.ApiVideo] = []
         self.state: dict[int, str] = {}           # 行号 → 状态文字(发布中 / 已发 / 没发成 …)
+        self.items: dict[int, QTreeWidgetItem] = {}
+        self.groups: dict[str, QTreeWidgetItem] = {}
+        self.open_accounts: set[str] = set()      # 展开着的号(换日期 / 刷新后还展开着)
         self.job: Job | None = None
         self.ledger = topic.Ledger(data_dir() / "话题改名台账.json")
         self._build()
@@ -70,7 +77,7 @@ class ApiTab(QWidget):
         top.addWidget(self.lab, 1)
         b = QPushButton("给号选文件夹…")
         b.setToolTip("像旧软件的「选择」:手动给一个号挑这天要发的文件夹(比如电竞情报馆的「2电竞赛事」)。\n"
-                     "选了以后这个号这天只发那个文件夹里的视频,不再自动找。右键列表里的一条也能选 / 取消。")
+                     "选了以后这个号这天只发那个文件夹里的视频,不再自动找。右键列表里的号 / 视频也能选 / 取消。")
         b.clicked.connect(lambda: self.pick_folder())
         top.addWidget(b)
         b = QPushButton("从旧软件搬账号…")
@@ -79,20 +86,46 @@ class ApiTab(QWidget):
         top.addWidget(b)
         v.addLayout(top)
 
-        self.table = QTableWidget(0, len(COLS))
-        self.table.setHorizontalHeaderLabels(COLS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setToolTip("双击一条:在资源管理器里打开它所在的文件夹(标题里有别的平台的名字,去那改文件名)")
-        self.table.cellDoubleClicked.connect(lambda r, _c: self.reveal(r))
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._menu)
-        hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for i, wd in ((0, 120), (2, 90), (3, 220), (4, 150)):
-            self.table.setColumnWidth(i, wd)
-        v.addWidget(self.table, 1)
+        view = QHBoxLayout()
+        b = QPushButton("全部展开")
+        b.clicked.connect(lambda: self.expand_all(True))
+        view.addWidget(b)
+        b = QPushButton("全部收起")
+        b.clicked.connect(lambda: self.expand_all(False))
+        view.addWidget(b)
+        self.k_bad = QCheckBox("只看有问题的")
+        self.k_bad.setToolTip("只显示要处理的(横屏 / 标题有别的平台 / 话题不止一个 / 没发成)")
+        self.k_bad.toggled.connect(lambda _on: self._apply_filter())
+        view.addWidget(self.k_bad)
+        self.e_find = QLineEdit()
+        self.e_find.setPlaceholderText("搜标题…")
+        self.e_find.setClearButtonEnabled(True)
+        self.e_find.setMaximumWidth(220)
+        self.e_find.textChanged.connect(lambda _t: self._apply_filter())
+        view.addWidget(self.e_find)
+        view.addStretch(1)
+        self.lab_sum = QLabel("")
+        view.addWidget(self.lab_sum)
+        v.addLayout(view)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(COLS))
+        self.tree.setHeaderLabels(COLS)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setToolTip("点号前面的小三角(或双击号)展开 / 收起;按住 Ctrl / Shift 多选;选中号 = 选中这个号的全部视频。\n"
+                             "双击一条视频:打开它所在的文件夹。右键:只发 / 改话题 / 改标题 / 换文件夹。")
+        self.tree.itemDoubleClicked.connect(self._double)
+        self.tree.itemExpanded.connect(lambda it: self._remember(it, True))
+        self.tree.itemCollapsed.connect(lambda it: self._remember(it, False))
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._menu)
+        self.tree.setUniformRowHeights(True)
+        hh = self.tree.header()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setStretchLastSection(False)
+        for i, wd in ((1, 90), (2, 230), (3, 150)):
+            self.tree.setColumnWidth(i, wd)
+        v.addWidget(self.tree, 1)
 
         bar = QHBoxLayout()
         self.b_check = QPushButton("检查")
@@ -102,27 +135,39 @@ class ApiTab(QWidget):
         self.b_vert.setToolTip("上下糊底、中间原画面,转成 1080×1920。原片挪进同文件夹的「横屏原片」,不删。")
         self.b_vert.clicked.connect(self.run_vertical)
         self.b_topic = QPushButton("话题只留一个(AI)")
-        self.b_topic.setToolTip("和 AI 改名软件「只筛话题」一样:多个话题让 AI 挑最好搜的留一个,改文件名(同名封面跟着改)。能撤销。")
+        self.b_topic.setToolTip("和 AI 改名软件「只筛话题」一样:多个话题让 AI 挑最好搜的留一个(游戏 / 剧 / 电影 / 动漫名优先),\n"
+                                "改文件名(同名封面跟着改)。选中了几条就只改选中的,没选就改全部。能撤销。")
         self.b_topic.clicked.connect(self.run_topic)
-        self.b_undo = QPushButton("撤销上次改话题")
+        self.b_settopic = QPushButton("批量改话题…")
+        self.b_settopic.setToolTip("选中的(选号 = 这个号全部)话题全换成你填的那一个,比如填「英雄联盟」→ 结尾变成 #英雄联盟。\n"
+                                   "原来没话题的就接在后面。能撤销。")
+        self.b_settopic.clicked.connect(lambda: self.set_topic())
+        self.b_undo = QPushButton("撤销上次改名")
+        self.b_undo.setToolTip("把上一次改话题 / 批量改话题 / 改标题改回去")
         self.b_undo.clicked.connect(self.undo_topic)
-        self.b_pub = QPushButton("发能发的")
+        self.b_pub = QPushButton("发能发的(全部)")
         self.b_pub.setMinimumHeight(34)
-        self.b_pub.setToolTip("没有问题的(竖屏、标题里没别的平台、话题最多一个、没发过的)用接口发出去;\n"
+        self.b_pub.setToolTip("这天所有号里没有问题的(竖屏、标题里没别的平台、话题最多一个、没发过的)都用接口发出去;\n"
                               "发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布」(设置里能改)。")
-        self.b_pub.clicked.connect(self.run_publish)
+        self.b_pub.clicked.connect(lambda: self.run_publish())
+        self.b_sel = QPushButton("只发选中的")
+        self.b_sel.setMinimumHeight(34)
+        self.b_sel.setToolTip("在列表里选几条(按住 Ctrl 点 / Shift 点;选号 = 这个号全部),只发这些(有问题的照样不发)。")
+        self.b_sel.clicked.connect(lambda: self.run_publish(self.selected_rows()))
         self.b_stop = QPushButton("停")
         self.b_stop.clicked.connect(self.stop)
-        for b in (self.b_check, self.b_vert, self.b_topic, self.b_undo):
+        for b in (self.b_check, self.b_vert, self.b_topic, self.b_settopic, self.b_undo):
             bar.addWidget(b)
         bar.addStretch(1)
+        bar.addWidget(self.b_sel)
         bar.addWidget(self.b_pub)
         bar.addWidget(self.b_stop)
         v.addLayout(bar)
         self._busy(False)
 
     def _busy(self, on: bool):
-        for b in (self.b_check, self.b_vert, self.b_topic, self.b_undo, self.b_pub, self.c_date):
+        for b in (self.b_check, self.b_vert, self.b_topic, self.b_settopic, self.b_undo, self.b_pub, self.b_sel,
+                  self.c_date):
             b.setEnabled(not on)
         self.b_stop.setEnabled(on)
 
@@ -137,7 +182,6 @@ class ApiTab(QWidget):
     def reload_dates(self):
         if self.job and self.job.isRunning():
             return
-        n = len(apiacc.load())
         cur = self.c_date.currentText()
         self.c_date.blockSignals(True)
         self.c_date.clear()
@@ -179,14 +223,144 @@ class ApiTab(QWidget):
             s = self.rec.status_of(v.path)
             if s:
                 self.state[i] = s
-        self.table.setRowCount(len(self.videos))
-        for i in range(len(self.videos)):
-            self._fill(i)
+        self._build_tree()
         if d:
             accs = sorted({v.account for v in self.videos})
             pk = self.picked(d)
             self.say(f"接口发 {d}:{len(self.videos)} 条,{len(accs)} 个号。先点「检查」。" +
                      ("(手选的文件夹:" + ";".join(f"{n} → {os.path.basename(f)}" for n, f in pk.items()) + ")" if pk else ""))
+
+    def _build_tree(self):
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        self.items, self.groups = {}, {}
+        bold = QFont()
+        bold.setBold(True)
+        for i, v in enumerate(self.videos):
+            g = self.groups.get(v.account)
+            if g is None:
+                g = QTreeWidgetItem([v.account])
+                g.setData(0, ROW, -1)
+                g.setData(0, NICK, v.account)
+                for c in range(len(COLS)):
+                    g.setFont(c, bold)
+                self.tree.addTopLevelItem(g)
+                self.groups[v.account] = g
+            it = QTreeWidgetItem([v.title])
+            it.setData(0, ROW, i)
+            g.addChild(it)
+            self.items[i] = it
+            self._fill(i, group=False)
+        for nick, g in self.groups.items():
+            g.setExpanded(nick in self.open_accounts)
+            self._fill_group(nick)
+        self.tree.blockSignals(False)
+        self._apply_filter()
+
+    def _remember(self, it: QTreeWidgetItem, on: bool):
+        if it.data(0, ROW) == -1:
+            (self.open_accounts.add if on else self.open_accounts.discard)(it.data(0, NICK))
+
+    def expand_all(self, on: bool):
+        for nick, g in self.groups.items():
+            g.setExpanded(on)
+        self.open_accounts = set(self.groups) if on else set()
+
+    def _double(self, it: QTreeWidgetItem, _col: int):
+        i = it.data(0, ROW)
+        if isinstance(i, int) and i >= 0:
+            self.reveal(i)
+
+    def _status_text(self, i: int) -> tuple[str, list]:
+        v = self.videos[i]
+        c = v.checks or {}
+        probs = checks.problems(v) if c else []
+        return self.state.get(i, "") or ("能发" if c and not probs else ""), probs
+
+    def _fill(self, i: int, group: bool = True):
+        v = self.videos[i]
+        it = self.items.get(i)
+        if it is None:
+            return
+        c = v.checks or {}
+        st, probs = self._status_text(i)
+        res = (f"{c['w']}×{c['h']}" if c.get("w") else "") if c else "没检查"
+        for col, t in enumerate([v.title, res, "、".join(probs) if c else "", st]):
+            it.setText(col, t)
+            it.setToolTip(col, v.path if col == 0 else t)
+        bg = GREEN if st.startswith("已发") else RED if st.startswith(("没发成", "转竖屏失败")) or (c and "横屏" in probs) \
+            else YELLOW if probs else None
+        for col in range(len(COLS)):
+            it.setBackground(col, bg if bg else QColor(0, 0, 0, 0))
+        if group:
+            self._fill_group(v.account)
+            self._apply_filter(only=it)
+
+    def _fill_group(self, nick: str):
+        g = self.groups.get(nick)
+        if g is None:
+            return
+        rows = [g.child(k).data(0, ROW) for k in range(g.childCount())]
+        n = len(rows)
+        sent = sum(1 for i in rows if self.state.get(i, "").startswith("已发"))
+        checked = [i for i in rows if self.videos[i].checks]
+        bad = sum(1 for i in checked if checks.problems(self.videos[i]) and not self.state.get(i, "").startswith("已发"))
+        fail = sum(1 for i in rows if self.state.get(i, "").startswith("没发成"))
+        ok = sum(1 for i in checked if not checks.problems(self.videos[i]) and not self.state.get(i, "").startswith("已发"))
+        pk = "(手选文件夹)" if nick in self.picked(self.c_date.currentText()) else ""
+        g.setText(0, f"{nick}  {n} 条{pk}")
+        g.setText(1, "")
+        g.setText(2, (f"有问题 {bad}" if bad else ("" if checked else "没检查")) + (f" · 没发成 {fail}" if fail else ""))
+        g.setText(3, f"能发 {ok} · 已发 {sent}" if checked or sent else (f"已发 {sent}" if sent else ""))
+        g.setToolTip(0, self.picked(self.c_date.currentText()).get(nick, "") or nick)
+        col = GREEN if n and sent == n else YELLOW if bad or fail else None
+        for c in range(len(COLS)):
+            g.setBackground(c, col if col else QColor(0, 0, 0, 0))
+        self._update_sum()
+
+    def _update_sum(self):
+        n = len(self.videos)
+        sent = sum(1 for i in range(n) if self.state.get(i, "").startswith("已发"))
+        checked = [i for i in range(n) if self.videos[i].checks]
+        ok = sum(1 for i in checked if not checks.problems(self.videos[i]) and not self.state.get(i, "").startswith("已发"))
+        bad = sum(1 for i in checked if checks.problems(self.videos[i]) and not self.state.get(i, "").startswith("已发"))
+        self.lab_sum.setText(f"共 {n} 条 · 能发 {ok} · 有问题 {bad} · 已发 {sent}" + ("" if checked or not n else " · 还没检查"))
+
+    def _hidden(self, i: int) -> bool:
+        key = self.e_find.text().strip().lower()
+        if key and key not in self.videos[i].title.lower():
+            return True
+        if self.k_bad.isChecked():
+            st, probs = self._status_text(i)
+            return not (probs or st.startswith(("没发成", "转竖屏失败"))) or st.startswith("已发")
+        return False
+
+    def _apply_filter(self, only: QTreeWidgetItem | None = None):
+        if only is not None:
+            only.setHidden(self._hidden(only.data(0, ROW)))
+            return
+        for i, it in self.items.items():
+            it.setHidden(self._hidden(i))
+        filtering = self.k_bad.isChecked() or bool(self.e_find.text().strip())
+        for nick, g in self.groups.items():
+            vis = any(not g.child(k).isHidden() for k in range(g.childCount()))
+            g.setHidden(not vis)
+            if filtering and vis:
+                g.setExpanded(True)
+
+    def selected_rows(self) -> list[int]:
+        """选中的视频;选中号 = 这个号的全部(过滤掉了看不见的不算)。"""
+        out = set()
+        for it in self.tree.selectedItems():
+            i = it.data(0, ROW)
+            if i == -1:
+                out |= {it.child(k).data(0, ROW) for k in range(it.childCount()) if not it.child(k).isHidden()}
+            elif isinstance(i, int):
+                out.add(i)
+        return sorted(out)
+
+    def rows_of(self, nick: str) -> list[int]:
+        return [i for i, x in enumerate(self.videos) if x.account == nick]
 
     # ---------------- 手动给号选文件夹(旧软件的「选择」) ----------------
     def picked(self, date: str) -> dict:
@@ -236,35 +410,38 @@ class ApiTab(QWidget):
         self.load()
 
     def _menu(self, pos):
-        r = self.table.rowAt(pos.y())
+        it = self.tree.itemAt(pos)
         m = QMenu(self)
-        if 0 <= r < len(self.videos):
-            nick = self.videos[r].account
-            m.addAction("打开所在文件夹", lambda: self.reveal(r))
+        if it is not None:
+            if not it.isSelected():
+                self.tree.clearSelection()
+                it.setSelected(True)
+            i = it.data(0, ROW)
+            nick = it.data(0, NICK) if i == -1 else self.videos[i].account
+            sel = self.selected_rows()
+            busy = bool(self.job and self.job.isRunning())
+            for text, fn in ((f"只发选中的 {len(sel)} 条", lambda: self.run_publish(sel)),
+                             (f"只发「{nick}」的", lambda: self.run_publish(self.rows_of(nick))),
+                             (None, None),
+                             (f"批量改话题(选中的 {len(sel)} 条)…", lambda: self.set_topic(sel)),
+                             (f"话题只留一个(AI,选中的 {len(sel)} 条)", lambda: self.run_topic(sel))):
+                if text is None:
+                    m.addSeparator()
+                else:
+                    m.addAction(text, fn).setEnabled(not busy)
+            if i != -1:
+                m.addAction("改标题…", lambda: self.edit_title(i)).setEnabled(not busy)
+                m.addSeparator()
+                m.addAction("打开所在文件夹", lambda: self.reveal(i))
+            m.addSeparator()
             m.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick))
             if nick in self.picked(self.c_date.currentText()):
                 m.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick))
             m.addSeparator()
         m.addAction("给别的号选文件夹…", lambda: self.pick_folder())
-        m.exec(self.table.viewport().mapToGlobal(pos))
-
-    def _fill(self, i: int):
-        v = self.videos[i]
-        c = v.checks or {}
-        probs = checks.problems(v) if c else []
-        res = (f"{c['w']}×{c['h']}" if c.get("w") else "") if c else "没检查"
-        st = self.state.get(i, "")
-        cells = [v.account, v.title, res, "、".join(probs) if c else "", st or ("能发" if c and not probs else "")]
-        for col, t in enumerate(cells):
-            it = self.table.item(i, col)
-            if it is None:
-                it = QTableWidgetItem()
-                self.table.setItem(i, col, it)
-            it.setText(t)
-            it.setToolTip(v.path if col == 1 else t)
-            bg = GREEN if st == "已发" else RED if st.startswith("没发成") or (c and "横屏" in probs) else \
-                YELLOW if probs else None
-            it.setBackground(bg if bg else QColor(0, 0, 0, 0))
+        m.addAction("全部展开", lambda: self.expand_all(True))
+        m.addAction("全部收起", lambda: self.expand_all(False))
+        m.exec(self.tree.viewport().mapToGlobal(pos))
 
     def reveal(self, row: int):
         if 0 <= row < len(self.videos):
@@ -288,7 +465,7 @@ class ApiTab(QWidget):
             return
         if t:
             self.state[i] = t
-        if i < self.table.rowCount():
+        if i in self.items:
             self._fill(i)
 
     def _on_done(self, msg: str):
@@ -320,7 +497,7 @@ class ApiTab(QWidget):
         self._start(fn, "检查中…")
 
     def run_vertical(self):
-        rows = [i for i, v in enumerate(self.videos) if (v.checks or {}).get("landscape") and self.state.get(i) != "已发"]
+        rows = [i for i, v in enumerate(self.videos) if (v.checks or {}).get("landscape") and not self._sent(i)]
         if not rows:
             QMessageBox.information(self, "横屏转竖屏", "没有横屏的(先点「检查」)。")
             return
@@ -337,7 +514,7 @@ class ApiTab(QWidget):
             try:
                 new, _orig = vertical.to_vertical(v.path, ff, stop=stopped)
             except RuntimeError as e:
-                emit(i, f"转竖屏失败")
+                emit(i, "转竖屏失败")
                 emit(-1, f"「{v.title}」转竖屏失败:{e}")
                 return
             v.path = new
@@ -350,19 +527,100 @@ class ApiTab(QWidget):
             return "转竖屏做完了"
         self._start(fn, f"转竖屏:{len(rows)} 条(3 条一起转)")
 
-    def run_topic(self):
-        rows = [i for i, v in enumerate(self.videos)
-                if len(topic.split_topics(v.title)["tags"]) > 1 and self.state.get(i) != "已发"]
+    def _sent(self, i: int) -> bool:
+        return self.state.get(i, "").startswith("已发")
+
+    # ---------------- 改名(话题 / 标题),都记台账能撤销 ----------------
+    def _after_rename(self, v, moves):
+        v.path = moves[0][1]
+        v.title = os.path.splitext(os.path.basename(v.path))[0]
+        if v.checks:
+            v.checks["tags"] = topic.split_topics(v.title)["tags"]
+            v.checks["platform"] = checks.platform_hits(v.title, self.st.get("api_platform_words") or None)
+
+    def _rename_rows(self, rows: list[int], make, what: str) -> int:
+        """在界面线程里直接改(只是改文件名,很快)。make(标题) → 新标题 / None。返回改了几条。"""
+        at = bj_str()
+        n = 0
+        for i in rows:
+            v = self.videos[i]
+            if self._sent(i):
+                continue
+            new = make(v.title)
+            if not new:
+                continue
+            try:
+                moves = topic.rename_with_sidecars(v.path, new)
+            except OSError as e:
+                self.say(f"「{v.title}」{what}失败:{e}")
+                continue
+            self.ledger.add(at, moves)
+            old = v.title
+            self._after_rename(v, moves)
+            self._fill(i)
+            self.say(f"{what}:{old} → {v.title}")
+            n += 1
+        return n
+
+    def set_topic(self, rows: list[int] | None = None):
+        rows = self.selected_rows() if rows is None else rows
+        rows = [i for i in rows if not self._sent(i)]
+        if not rows:
+            QMessageBox.information(self, "批量改话题", "先在列表里选要改的(选号 = 这个号全部;按住 Ctrl 可以多选)。")
+            return
+        last = str(self.st.get("api_last_topic") or "")
+        tag, ok = QInputDialog.getText(self, "批量改话题", f"选中的 {len(rows)} 条,结尾的话题全换成(不用打 #):", text=last)
+        tag = topic.clean_tag(tag) if ok else ""
+        if not tag:
+            return
+        ex = next((topic.with_topic(self.videos[i].title, tag) for i in rows if topic.with_topic(self.videos[i].title, tag)), None)
+        if not ex:
+            QMessageBox.information(self, "批量改话题", f"选中的已经都是 #{tag} 了。")
+            return
+        if QMessageBox.question(self, "批量改话题", f"{len(rows)} 条的话题全换成 #{tag}?\n\n比如:\n{ex}\n\n"
+                                                   "同名封面跟着改。改错了点「撤销上次改名」。") != QMessageBox.StandardButton.Yes:
+            return
+        self.st["api_last_topic"] = tag
+        self.st.save()
+        n = self._rename_rows(rows, lambda t: topic.with_topic(t, tag), f"改成 #{tag}")
+        self.say(f"批量改话题:{n} 条改成 #{tag}")
+
+    def edit_title(self, i: int):
+        if not (0 <= i < len(self.videos)) or self._sent(i):
+            return
+        v = self.videos[i]
+        hits = (v.checks or {}).get("platform") or []
+        t, ok = QInputDialog.getText(self, "改标题", "标题(= 文件名)" + (f",里面有「{'、'.join(hits)}」" if hits else "") + ":",
+                                     text=v.title)
+        t = topic.sanitize(t) if ok else ""
+        if not t or t == v.title:
+            return
+        self._rename_rows([i], lambda _old: t, "改标题")
+
+    def run_topic(self, only: list[int] | None = None):
+        if only is None:
+            only = self.selected_rows() or None              # 选了就只改选中的,没选改全部
+
+        def multi(v):
+            return len(topic.split_topics(v.title)["tags"]) > 1
+
+        def fix_only(v):                                  # 只有一个话题,但写成「# 话题」:改成「#话题」,不用问 AI
+            return len(topic.split_topics(v.title)["tags"]) == 1 and topic.new_name(v.title) is not None
+        scope = range(len(self.videos)) if only is None else only
+        rows = [i for i in scope if (multi(self.videos[i]) or fix_only(self.videos[i])) and not self._sent(i)]
         if not rows:
             QMessageBox.information(self, "话题只留一个", "没有挂了好几个话题的。")
             return
+        n_ai = sum(1 for i in rows if multi(self.videos[i]))
         key = self.st.ai_key() if hasattr(self.st, "ai_key") else ""
-        if not key:
+        if n_ai and not key:
             QMessageBox.warning(self, "话题只留一个", "要用 AI 挑话题,先在「设置」里填阿里百炼 Key。")
             return
         model = str(self.st.get("topic_model") or "qwen-plus")
-        if QMessageBox.question(self, "话题只留一个", f"{len(rows)} 条挂了好几个话题,让 AI 各留一个最好搜的,改文件名?\n\n"
-                                                     "同名的封面图跟着改。改错了可以点「撤销上次改话题」。") \
+        if QMessageBox.question(self, "话题只留一个", ("选中的里面:" if only is not None else "") +
+                                f"{n_ai} 条挂了好几个话题,让 AI 各留一个最好搜的(游戏 / 电视剧 / 电影 / 动漫名优先)" +
+                                (f";另外 {len(rows) - n_ai} 条「# 话题」写法改成「#话题」" if len(rows) > n_ai else "") +
+                                ",改文件名?\n\n同名的封面图跟着改。改错了可以点「撤销上次改名」。") \
                 != QMessageBox.StandardButton.Yes:
             return
         vs = self.videos
@@ -389,11 +647,7 @@ class ApiTab(QWidget):
                     moves = topic.rename_with_sidecars(v.path, name)
                     self.ledger.add(at, moves)
                 old = v.title
-                v.path = moves[0][1]
-                v.title = os.path.splitext(os.path.basename(v.path))[0]
-                if v.checks:
-                    v.checks["tags"] = topic.split_topics(v.title)["tags"]
-                    v.checks["platform"] = checks.platform_hits(v.title, self.st.get("api_platform_words") or None)
+                self._after_rename(v, moves)
                 emit(i, "")
                 emit(-1, f"改话题:{old} → {v.title}")
             except Exception as e:
@@ -415,21 +669,27 @@ class ApiTab(QWidget):
                 != QMessageBox.StandardButton.Yes:
             return
         ok, bad = self.ledger.undo_last()
-        self.say(f"撤销改话题:改回 {ok} 个文件" + (f",{bad} 个改不回(文件不在了或原名被占)" if bad else ""))
+        self.say(f"撤销改名:改回 {ok} 个文件" + (f",{bad} 个改不回(文件不在了或原名被占)" if bad else ""))
         self.load()
 
-    def run_publish(self):
+    # ---------------- 发布 ----------------
+    def run_publish(self, only: list[int] | None = None):
+        """only = 只发这几行(选中的 / 某个号的);None = 这天全部能发的。"""
         d = self.c_date.currentText()
         if not d:
             return
-        unchecked = [v for v in self.videos if not v.checks]
-        if unchecked:
+        if only is not None and not only:
+            QMessageBox.information(self, "发布", "先在列表里选要发的(选号 = 这个号全部;按住 Ctrl 点可以多选)。")
+            return
+        scope = list(range(len(self.videos))) if only is None else [i for i in only if 0 <= i < len(self.videos)]
+        if [i for i in scope if not self.videos[i].checks]:
             QMessageBox.information(self, "发布", "先点「检查」。")
             return
-        rows = [i for i, v in enumerate(self.videos) if not checks.problems(v) and self.state.get(i) != "已发"
-                and self.rec.status_of(v.path) != "已发"]
+        rows = [i for i in scope if not checks.problems(self.videos[i]) and not self._sent(i)
+                and self.rec.status_of(self.videos[i].path) != "已发"]
         if not rows:
-            QMessageBox.information(self, "发布", "没有能发的。")
+            QMessageBox.information(self, "发布", "选的这些里没有能发的(有问题的 / 发过的不发)。" if only is not None
+                                    else "没有能发的。")
             return
         accs = {a["nick"]: a for a in apiacc.load()}
         miss = sorted({self.videos[i].account for i in rows if self.videos[i].account not in accs})
@@ -437,20 +697,20 @@ class ApiTab(QWidget):
             QMessageBox.warning(self, "发布", "这些号还没搬账号:" + "、".join(miss))
             return
         dest = apisrc.archive_dir(self.st, d)
-        held = len(self.videos) - len(rows) - sum(1 for i in range(len(self.videos)) if self.state.get(i) == "已发")
+        held = len(scope) - len(rows) - sum(1 for i in scope if self._sent(i))
         by_acc: dict[str, list[int]] = {}
         for i in rows:
             by_acc.setdefault(self.videos[i].account, []).append(i)
-        par0 = max(1, int(self.st.get("api_threads") or 1))
-        how = "一条一条发" if par0 == 1 else f"{par0} 个号一起发"
-        msg = (f"用接口发 {len(rows)} 条({len(by_acc)} 个号)" + (f",有问题的 {held} 条不发" if held else "") +
+        par = max(1, int(self.st.get("api_threads") or 1))
+        gap = max(0.0, float(self.st.get("api_interval", 5) or 0))
+        how = "一条一条发" if par == 1 else f"{par} 个号一起发"
+        msg = (f"用接口发 {len(rows)} 条({len(by_acc)} 个号:{'、'.join(by_acc)})" +
+               (f",有问题的 {held} 条不发" if held else "") +
                f"。\n\n标题、简介 = 文件名;分类按号;声明「非 AI 生成」;封面平台自己截。\n"
-               f"{how},每条之间歇 {self.st.get('api_interval', 5)} 秒。\n发成了挪到:\n{dest}\n\n发吗?")
+               f"{how},每条之间歇 {gap:g} 秒。\n发成了挪到:\n{dest}\n\n发吗?")
         if QMessageBox.question(self, "发布", msg) != QMessageBox.StandardButton.Yes:
             return
         vs = self.videos
-        par = max(1, int(self.st.get("api_threads") or 1))
-        gap = max(0.0, float(self.st.get("api_interval", 5) or 0))
         gate = {"last": 0.0}
         glock = threading.Lock()
 
