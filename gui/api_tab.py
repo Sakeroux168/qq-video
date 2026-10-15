@@ -298,10 +298,11 @@ class ApiTab(QWidget):
     def reload_dates(self):
         if self.busy():
             return
-        cur = self.c_date.currentText()
+        # 记住上次选的日期(用户 2026-10-15「可以记住」;教育页那边仍然不自动选)
+        cur = self.c_date.currentText() or str(self.st.get("api_last_date") or "")
         self.c_date.blockSignals(True)
         self.c_date.clear()
-        self.c_date.addItem("")                    # 不自动选:让人自己挑哪天
+        self.c_date.addItem("")
         ds = apisrc.dates(self.roots(), self.known())
         today = f"{bj_now().month}.{bj_now().day}"
         for x in list((self.st.get("api_picked") or {}).keys()) + [today]:   # 手选过文件夹的日子、今天:没有日期文件夹也能选
@@ -352,6 +353,9 @@ class ApiTab(QWidget):
         if self.busy():                              # 后台按行号刷状态,这时重读列表会刷到别的视频上
             return
         d = self.c_date.currentText()
+        if d and self.st.get("api_last_date") != d:
+            self.st["api_last_date"] = d
+            self.st.save()
         self._show_source(d)
         self.videos = apisrc.videos(self.roots(), d, self.known(), self.picked(d)) if d else []
         self.state, self.why = {}, {}
