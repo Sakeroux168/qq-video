@@ -244,6 +244,14 @@ class Ledger:
     def groups_of(b: dict) -> list:
         return b.get("groups") or [[m] for m in (b.get("moves") or [])]
 
+    @staticmethod
+    def label(b: dict | None) -> str:
+        """给人看的这批是什么:「10-15 20:01:02 批量改成 #英雄联盟」。批次名是「时间¦做了什么¦编号」(老的只有时间)。"""
+        if not b:
+            return ""
+        parts = str(b.get("at") or "").split("¦")
+        return f"{parts[0][5:]} {parts[1]}" if len(parts) >= 2 else parts[0]
+
     def add(self, at: str, moves: list) -> None:
         data = self._load()
         g = [list(m) for m in moves]

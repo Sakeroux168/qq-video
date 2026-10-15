@@ -170,11 +170,11 @@ class MainWindow(QMainWindow):
             self.table.setColumnWidth(i, wd)
         rv.addWidget(self.table, 1)
         sp.addWidget(right)
-        sp.setSizes([280, 1000])
+        sp.setSizes([340, 940])
         v.addWidget(sp, 1)
 
         bar = QHBoxLayout()
-        self.b_go = QPushButton("摆下一批(最多 10 条)")
+        self.b_go = QPushButton("摆下一批")
         self.b_go.setMinimumHeight(34)
         self.b_go.setToolTip("在罐头里打开这个号的发布页,传视频、传封面并裁好、选自主声明、补 AI 声明,停在发布前。发布你自己点。")
         self.b_go.clicked.connect(self.start_batch)
@@ -184,7 +184,7 @@ class MainWindow(QMainWindow):
         self.b_sent.setToolTip("你在罐头里点完「发布 → 全部发布」以后点这个:记下发布时间。")
         self.b_sent.clicked.connect(self.batch_sent)
         from PySide6.QtWidgets import QCheckBox
-        self.k_auto = QCheckBox("摆好后软件自己点「全部发布」,接着摆下一批")
+        self.k_auto = QCheckBox("摆好后自动点发布")
         self.k_auto.setToolTip("勾上:整批都摆好、没有标黄的,软件自己在罐头里点「发布 → 全部发布」,记下发布时间,再摆下一批,直到勾上的都发完。\n"
                                "有一条没摆好、或者有标黄的,就停下来叫你。点完发布弹出没见过的框也停下来。")
         self.k_auto.setChecked(bool(self.st.get("auto_publish", False)))
@@ -192,16 +192,16 @@ class MainWindow(QMainWindow):
         self.b_drop = QPushButton("这批不要了")
         self.b_drop.setToolTip("这批没发(在罐头里删了):记录作废,下次还会再摆这些视频。")
         self.b_drop.clicked.connect(self.batch_dropped)
-        self.b_manual = QPushButton("选中的标成已发")
+        self.b_manual = QPushButton("标成已发")
         self.b_manual.setToolTip("你在罐头里自己手动发了的(软件没摆成 / 没摆):选中点这个,记成已发,下次就不会再摆它")
         self.b_manual.clicked.connect(self.mark_manual)
-        self.b_open = QPushButton("打开所在文件夹")
+        self.b_open = QPushButton("打开文件夹")
         self.b_open.setToolTip("在资源管理器里打开选中这条视频所在的文件夹,并选中它(右键列表 / 左边员工也有)")
         self.b_open.clicked.connect(lambda: self.open_selected("video"))
-        self.b_preview = QPushButton("预览 / 调封面…")
+        self.b_preview = QPushButton("预览封面…")
         self.b_preview.setToolTip("看每个比例的裁剪框在哪;不满意就拖框(双击列表里一条也行)")
         self.b_preview.clicked.connect(lambda: self.preview_cover())
-        self.b_move = QPushButton("这天发完了,挪走…")
+        self.b_move = QPushButton("这天发完,挪走…")
         self.b_move.clicked.connect(self.move_day)
         for b in (self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
@@ -239,15 +239,15 @@ class MainWindow(QMainWindow):
         rh.addWidget(b)
         rv2.addLayout(rh)
         rv2.addWidget(QLabel("每个员工发了多少:"))
-        self.t_sum = QTableWidget(0, 7)
-        self.t_sum.setHorizontalHeaderLabels(["日期", "号", "员工", "已发", "摆好没发", "第一条发布", "最后一条发布"])
+        self.t_sum = QTableWidget(0, 9)
+        self.t_sum.setHorizontalHeaderLabels(["日期", "号", "员工", "已发", "摆好没发", "没发成", "结果不明", "第一条发布", "最后一条发布"])
         self.t_sum.verticalHeader().setVisible(False)
         self.t_sum.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.t_sum.setMaximumHeight(220)
         rv2.addWidget(self.t_sum)
         rv2.addWidget(QLabel("每一条:"))
-        self.t_rec = QTableWidget(0, 7)
-        self.t_rec.setHorizontalHeaderLabels(["日期", "号", "员工", "标题", "状态", "摆好时间", "发布时间"])
+        self.t_rec = QTableWidget(0, 8)
+        self.t_rec.setHorizontalHeaderLabels(["日期", "号", "员工", "标题", "状态", "摆好 / 开始发", "发布时间", "备注(没发成的原因)"])
         self.t_rec.verticalHeader().setVisible(False)
         self.t_rec.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.t_rec.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
@@ -498,7 +498,7 @@ class MainWindow(QMainWindow):
             msg += (f"\n\n另有 {len(nocover)} 条没有无字封面(png)先跳过,比如「{nocover[0].title[:24]}」"
                     "(jpg 有字不能用,让员工补上 png)。")
         if warn:
-            msg += f"\n\n其中 {len(warn)} 条封面标黄,建议先点「预览 / 调封面」看一眼。"
+            msg += f"\n\n其中 {len(warn)} 条封面标黄,建议先点「预览封面」看一眼。"
         auto = self.k_auto.isChecked()
         msg += ("\n\n摆好后软件自己点「全部发布」,接着摆下一批(有标黄 / 没摆好的会停下来叫你)。" if auto else
                 "\n\n软件只摆好,不点发布。") + "摆的时候别在罐头里切到别的号。开始吗?"
@@ -696,14 +696,21 @@ class MainWindow(QMainWindow):
         date = self.c_rec_date.currentData() or ""
         s = self.rec.summary(date)
         self.t_sum.setRowCount(len(s))
+        def short(t):                              # 「2026-10-15 18:42:45」→「10-15 18:42:45」(审查:时分秒被截掉了)
+            return str(t or "")[5:] if str(t or "")[:2] == "20" else str(t or "")
         for i, x in enumerate(s):
-            for c, k in enumerate(["date", "account", "employee", "sent", "ready", "first_at", "last_at"]):
-                self.t_sum.setItem(i, c, QTableWidgetItem(str(x[k] if x[k] is not None else "")))
+            for c, k in enumerate(["date", "account", "employee", "sent", "ready", "failed", "unsure", "first_at", "last_at"]):
+                val = x[k] if x[k] is not None else ""
+                self.t_sum.setItem(i, c, QTableWidgetItem(short(val) if k.endswith("_at") else str(val)))
         rows = self.rec.rows(date)
         self.t_rec.setRowCount(len(rows))
         for i, x in enumerate(rows):
-            for c, k in enumerate(["date", "account", "employee", "title", "status", "prepared_at", "published_at"]):
-                self.t_rec.setItem(i, c, QTableWidgetItem(str(x[k] or "")))
+            for c, k in enumerate(["date", "account", "employee", "title", "status", "prepared_at", "published_at", "note"]):
+                it = QTableWidgetItem(short(x[k]) if k.endswith("_at") else str(x[k] or ""))
+                it.setToolTip(str(x[k] or ""))
+                self.t_rec.setItem(i, c, it)
+        self.t_rec.resizeColumnToContents(5)
+        self.t_rec.resizeColumnToContents(6)
 
     def export_records(self):
         date = self.c_rec_date.currentData() or ""
@@ -720,27 +727,50 @@ class MainWindow(QMainWindow):
 
     # ---------------- 设置 ----------------
     def edit_settings(self):
+        from PySide6.QtWidgets import QCheckBox, QGroupBox
         d = QDialog(self)
         d.setWindowTitle("设置")
-        d.resize(640, 320)
-        f = QFormLayout(d)
-        e_root = QLineEdit(self.st["material_root"])
-        e_arc = QLineEdit(self.st["archive_root"])
+        d.resize(760, 560)
+        outer = QVBoxLayout(d)
+
+        def path_row(text: str) -> tuple[QWidget, QLineEdit]:
+            """路径框 + 「选…」按钮(审查:路径框太短看不全,也没法点选文件夹)。{month} 这种模板就只取前面那截当起点。"""
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            e = QLineEdit(text)
+            e.setMinimumWidth(460)
+            b = QPushButton("选…")
+
+            def pick():
+                start = e.text().split("{")[0] or ""
+                p = QFileDialog.getExistingDirectory(d, "选文件夹", start)
+                if p:
+                    e.setText(os.path.normpath(p))
+            b.clicked.connect(pick)
+            h.addWidget(e, 1)
+            h.addWidget(b)
+            return w, e
+
+        g1 = QGroupBox("教育号(在创作罐头里摆,人点发布)")
+        f = QFormLayout(g1)
+        w_root, e_root = path_row(self.st["material_root"])
+        w_arc, e_arc = path_row(self.st["archive_root"])
         e_acc = QPlainTextEdit("\n".join(f"{a['name']}={'、'.join(a.get('aliases') or [])}" for a in self.st["accounts"]))
         e_acc.setToolTip("一行一个号:罐头里的号名=日期文件夹下面的缩写(几个用顿号隔开)")
+        e_acc.setMaximumHeight(70)
         sp = QSpinBox()
         sp.setRange(1, 10)
         sp.setValue(int(self.st.get("batch_size", 10)))
-        e_key = QLineEdit(self.st.get("ai_key", ""))
-        e_key.setEchoMode(QLineEdit.EchoMode.Password)
-        e_key.setPlaceholderText("空着就用百家号发布助手里填的" + ("(找到了)" if self.st.ai_key() else "(没找到)"))
-        f.addRow("素材文件夹", e_root)
-        f.addRow("发完挪到", e_arc)
+        f.addRow("素材文件夹", w_root)
+        f.addRow("一天发完挪到", w_arc)
         f.addRow("", QLabel("{month} 会换成日期的月份,比如 10.15 → 10"))
         f.addRow("号和缩写", e_acc)
         f.addRow("一批几条", sp)
-        f.addRow("阿里百炼 Key", e_key)
-        f.addRow("", QLabel("大头照的 2.35:1 封面要 AI 扩图时用(一张几毛钱)"))
+        outer.addWidget(g1)
+
+        g2 = QGroupBox("接口发(16 个游戏 / 动漫号)")
+        f2 = QFormLayout(g2)
         sp_thr = QSpinBox()
         sp_thr.setRange(1, 5)
         sp_thr.setValue(int(self.st.get("api_threads", 1) or 1))
@@ -748,20 +778,28 @@ class MainWindow(QMainWindow):
         sp_gap.setRange(0, 600)
         sp_gap.setSuffix(" 秒")
         sp_gap.setValue(int(self.st.get("api_interval", 5) or 0))
-        e_api_arc = QLineEdit(self.st.get("api_archive", ""))
-        f.addRow("接口发:发完挪到", e_api_arc)
-        from PySide6.QtWidgets import QCheckBox
+        w_api, e_api_arc = path_row(self.st.get("api_archive", ""))
         k_game = QCheckBox("下面按游戏分子文件夹(CSGO、DNF、光与夜之恋 …,名字 = 旧软件「账号」那一栏)")
         k_game.setChecked(bool(self.st.get("api_archive_by_game", True)))
-        f.addRow("", k_game)
-        f.addRow("", QLabel("{month} 会换成月份"))
-        f.addRow("接口发:几个号一起发", sp_thr)
-        f.addRow("接口发:每条间隔", sp_gap)
-        f.addRow("", QLabel("旧软件是「线程 1、间隔 5 秒」:一条一条发,每条之间歇 5 秒"))
+        f2.addRow("发成了挪到", w_api)
+        f2.addRow("", k_game)
+        f2.addRow("几个号一起发", sp_thr)
+        f2.addRow("每条间隔", sp_gap)
+        f2.addRow("", QLabel("旧软件是「线程 1、间隔 5 秒」:一条一条发,上一条发完歇 5 秒再发下一条"))
+        outer.addWidget(g2)
+
+        g3 = QGroupBox("AI(两边共用)")
+        f3 = QFormLayout(g3)
+        e_key = QLineEdit(self.st.get("ai_key", ""))
+        e_key.setEchoMode(QLineEdit.EchoMode.Password)
+        e_key.setPlaceholderText("空着就用百家号发布助手里填的" + ("(找到了)" if self.st.ai_key() else "(没找到)"))
+        f3.addRow("阿里百炼 Key", e_key)
+        f3.addRow("", QLabel("教育:大头照的 2.35:1 封面 AI 扩图;接口:「整理话题」里挂好几个话题的让 AI 挑一个"))
+        outer.addWidget(g3)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(d.accept)
         bb.rejected.connect(d.reject)
-        f.addRow(bb)
+        outer.addWidget(bb)
         if d.exec() != QDialog.DialogCode.Accepted:
             return
         accs = []

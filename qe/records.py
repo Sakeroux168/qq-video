@@ -191,10 +191,14 @@ class Records:
             return [dict(r) for r in self.conn.execute(q + " ORDER BY id", a)]
 
     def summary(self, date: str = "") -> list[dict]:
-        """按 日期 / 号 / 员工 数:已发几条、摆好还没发几条。"""
-        q = ("SELECT date, account, employee, COUNT(DISTINCT CASE WHEN status='已发' THEN path END) AS sent, COUNT(DISTINCT CASE WHEN status='摆好' THEN path END) AS ready, "
+        """按 日期 / 号 / 员工 数:已发几条、摆好还没发几条、没发成几条(后来发成了的不算)、结果不明几条。"""
+        self._fill()
+        q = ("SELECT date, account, employee, COUNT(DISTINCT CASE WHEN status='已发' THEN pkey END) AS sent, "
+             "COUNT(DISTINCT CASE WHEN status='摆好' THEN pkey END) AS ready, "
+             "COUNT(DISTINCT CASE WHEN status='没发成' AND pkey NOT IN (SELECT pkey FROM posts WHERE status='已发') THEN pkey END) AS failed, "
+             "COUNT(DISTINCT CASE WHEN status IN ('结果不明','发布中') THEN pkey END) AS unsure, "
              "MIN(CASE WHEN status='已发' THEN published_at END) AS first_at, MAX(CASE WHEN status='已发' THEN published_at END) AS last_at "
-             "FROM posts WHERE status IN ('已发','摆好')" + (" AND date=?" if date else "") +
+             "FROM posts WHERE status IN ('已发','摆好','没发成','结果不明','发布中')" + (" AND date=?" if date else "") +
              " GROUP BY date, account, employee ORDER BY date, account, employee")
         with _LOCK:
             return [dict(r) for r in self.conn.execute(q, (date,) if date else ())]
@@ -210,16 +214,17 @@ class Records:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "明细"
-        hdr = ["日期", "号", "员工", "标题", "封面", "状态", "摆好时间", "发布时间", "视频文件"]
+        hdr = ["日期", "号", "员工", "标题", "封面", "状态", "摆好 / 开始发", "发布时间", "备注", "视频文件"]
         ws.append(hdr)
         for r in self.rows(date):
             ws.append([r["date"], r["account"], r["employee"], r["title"], r["cover_kind"], r["status"],
-                       r["prepared_at"], r["published_at"], r["path"]])
+                       r["prepared_at"], r["published_at"], r["note"], r["path"]])
         ws2 = wb.create_sheet("按员工汇总")
-        ws2.append(["日期", "号", "员工", "已发", "摆好没发", "第一条发布", "最后一条发布"])
+        ws2.append(["日期", "号", "员工", "已发", "摆好没发", "没发成", "结果不明", "第一条发布", "最后一条发布"])
         for s in self.summary(date):
-            ws2.append([s["date"], s["account"], s["employee"], s["sent"], s["ready"], s["first_at"] or "", s["last_at"] or ""])
-        for w, widths in ((ws, [8, 14, 12, 50, 6, 8, 20, 20, 60]), (ws2, [8, 14, 12, 8, 10, 20, 20])):
+            ws2.append([s["date"], s["account"], s["employee"], s["sent"], s["ready"], s["failed"], s["unsure"],
+                        s["first_at"] or "", s["last_at"] or ""])
+        for w, widths in ((ws, [8, 14, 12, 50, 6, 8, 20, 20, 40, 60]), (ws2, [8, 14, 12, 8, 10, 8, 8, 20, 20])):
             for i, x in enumerate(widths):
                 w.column_dimensions[chr(65 + i)].width = x
         wb.save(path)

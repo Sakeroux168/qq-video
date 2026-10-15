@@ -54,5 +54,11 @@ def problems(v) -> list[str]:
     if len(c.get("tags") or []) > 1:
         out.append(f"{len(c['tags'])} 个话题")
     elif topic.bad_format(v.title):                  # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
-        out.append("话题写法不对")
+        out.append(format_kind(v.title))
     return out
+
+
+def format_kind(title: str) -> str:
+    """写法问题分两种说(审查:只是结尾多个空格也叫「话题写法不对」,看着吓人):「结尾多了空格」/「话题写法不对」。"""
+    t = topic.tidy(title)
+    return "结尾多了空格" if t is not None and t == title.rstrip() else "话题写法不对"

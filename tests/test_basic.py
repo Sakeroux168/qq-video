@@ -384,6 +384,14 @@ def test_api(tmp: Path):
         print("  (没有 ffmpeg,跳过转竖屏)")
 
 
+def _settle(tab):
+    """等后台(换日期 / 刷新后自动检查)做完。"""
+    from PySide6.QtWidgets import QApplication
+    if tab.job:
+        tab.job.wait()
+    QApplication.processEvents()
+
+
 def test_api_tab(tmp: Path):
     print("[接口发页:手选文件夹(旧软件的「选择」)/ 一条一条发、间隔 / 发完挪走、记录]")
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -482,19 +490,23 @@ def test_api_tab(tmp: Path):
     for f in ("d1.mp4", "d2.mp4"):                    # 前面发掉的都挪走了,补两条
         (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15" / f).write_bytes(b"x")
     tab.load()
-    check(set(tab.groups) == {"CSGO战神君"} and all(not g.isExpanded() for g in tab.groups.values()),
-          "按号分组,默认收起")
+    _settle(tab)
+    check({n for n, g in tab.groups.items() if g.childCount()} == {"CSGO战神君"} and
+          all(not g.isExpanded() for g in tab.groups.values()), "按号分组,默认收起")
+    check("今天没找到视频" in tab.groups["电竞情报馆"].text(0), "这天没视频的号也列出来(灰的)")
     tab.expand_all(True)
     check(all(g.isExpanded() for g in tab.groups.values()), "全部展开")
     tab.expand_all(False)
     check(all(not g.isExpanded() for g in tab.groups.values()), "全部收起")
     tab.groups["CSGO战神君"].setExpanded(True)
     tab.load()
+    _settle(tab)
     check(tab.groups["CSGO战神君"].isExpanded(), "刷新后展开的还展开着")
     tab.tree.clearSelection()
     tab.groups["CSGO战神君"].setSelected(True)
     check([tab.videos[i].title for i in tab.selected_rows()] == ["c3", "d1", "d2"], "选中号 = 这个号全部")
-    check("3 条" in tab.groups["CSGO战神君"].text(0) and "没检查" in tab.groups["CSGO战神君"].text(2), "号那一行有统计")
+    check("3 条" in tab.groups["CSGO战神君"].text(0) and "有问题 3" in tab.groups["CSGO战神君"].text(2)
+          and "没检查" not in tab.groups["CSGO战神君"].text(2), "号那一行有统计;刷新后自动检查了")
     from PySide6.QtWidgets import QInputDialog
     real_t, real_i = QInputDialog.getText, QMessageBox.information
     QInputDialog.getText = staticmethod(lambda *a, **k: ("英雄联盟", True))
@@ -512,10 +524,13 @@ def test_api_tab(tmp: Path):
         QInputDialog.getText = staticmethod(lambda *a, **k: ("c3 改过的标题", True))
         tab.edit_title(rows[0])
         check(tab.videos[rows[0]].title == "c3 改过的标题", "右键改标题")
-        tab.ledger.undo_last()
-        tab.ledger.undo_last()
-        tab.load()
-        check(any(v.title == "c3" for v in tab.videos), "撤销改名")
+        check("改标题" in tab.b_undo.toolTip(), "撤销按钮上写着上一次是什么")
+        tab.undo_topic()                           # 真点「撤销」(审查:原来一点就崩)
+        _settle(tab)
+        check(any(v.title == "c3#英雄联盟" for v in tab.videos), "撤销:只撤上一次(改标题),批量改话题还在")
+        tab.undo_topic()
+        _settle(tab)
+        check(any(v.title == "c3" for v in tab.videos), "再撤销一次:批量改话题也撤回去")
     finally:
         QInputDialog.getText, QMessageBox.question, QMessageBox.information = real_t, real_q, real_i
     tab.e_find.setText("c1")
@@ -528,16 +543,22 @@ def test_api_tab(tmp: Path):
     with open(os.path.join(esp, "e2.mp4"), "wb") as f:
         f.write(b"x")
     tab.load()
-    check("全部" in tab.b_check.text() and "全部" in tab.b_pub.text(), "没选:按钮写着「全部」")
+    _settle(tab)
+    check("管全部" in tab.lab_scope.text(), "没选:写着「管全部」")
+    tab.k_bad.setChecked(True)
+    check("过滤中" in tab.lab_scope.text(), "开着「只看有问题的」:写着「过滤中:只管看得见的」,不说全部")
+    tab.k_bad.setChecked(False)
+    for v in tab.videos:
+        v.checks = {}
     tab.tree.clearSelection()
     tab.groups["电竞情报馆"].setSelected(True)
-    check("选中 1 条" in tab.b_check.text() and "电竞情报馆" in tab.lab_scope.text(), "选了一个号:按钮写着「选中 N 条」")
+    check("选中" in tab.lab_scope.text() and "电竞情报馆 1 条" in tab.lab_scope.text(), "选了一个号:写着「只管选中的:号 N 条」")
     tab.run_check()
     tab.job.wait()
     QApplication.processEvents()
     check([bool(v.checks) for v in tab.videos] == [v.account == "电竞情报馆" for v in tab.videos], "只检查选中的号")
     tab.tree.clearSelection()
-    check("全部" in tab.b_check.text(), "取消选择:回到全部")
+    check("管全部" in tab.lab_scope.text(), "取消选择:回到全部")
     tab.unpick("电竞情报馆")
     check("10.15" not in (st.get("api_picked") or {}), "取消手选")
 
@@ -682,6 +703,7 @@ def test_audit_r1(tmp: Path):
     tab.c_date.addItem("1.1")
     tab.c_date.setCurrentText("1.1")
     tab.load()
+    _settle(tab)
     for v in tab.videos:
         v.checks = {"w": 1080, "h": 1920, "tags": [], "platform": []}
     marks = []
@@ -807,6 +829,78 @@ def test_audit_r2(tmp: Path):
         QMessageBox.warning = real_w
     check(w.batch_id == "B9" and w.b_sent.isEnabled(), "摆到一半停了:摆好的那几条还能点「这批发好了 / 不要了」")
     w.close()
+
+
+def test_ui_r1(tmp: Path):
+    print("[界面审查修的:没发成说人话 / 号密钥坏了剩下的标「没轮到」/ 发完总结 / 结尾空格单独说 / 窗口能缩窄]")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from qe import apiacc, checks, omapi, topic
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+
+    short, tip = T.friendly(omapi.ApiError("上传视频失败:invalid_file_upload(code 40023)", "40023"))
+    check("平台不收" in short and "重新导出" in tip, "40023:说人话 + 下一步")
+    short, tip = T.friendly(omapi.ApiError("换 token 失败", "40001", fatal=True))
+    check("密钥" in short and "搬账号" in tip, "换 token 失败:说密钥不对 + 去重新搬")
+
+    class V:
+        title = "A小到底该怎么控 "
+        checks = {"w": 1080, "h": 1920, "tags": []}
+    check(checks.problems(V) == ["结尾多了空格"], "只是结尾多空格:单独说「结尾多了空格」")
+    V.title = "标题 # 剑来"
+    V.checks = {"w": 1080, "h": 1920, "tags": ["剑来"]}
+    check(checks.problems(V) == ["话题写法不对"], "「# 话题」:说「话题写法不对」")
+
+    root = tmp / "ui_r1"
+    for nick in ("号A", "号B"):
+        (root / nick).mkdir(parents=True)
+        for n in ("1", "2", "3"):
+            (root / nick / f"{nick}{n}.mp4").write_bytes(b"x")
+    apiacc.save([{"nick": n, "source_name": n, "client_id": n, "secret": apiacc.seal("s"), "category": 1604, "enabled": True}
+                 for n in ("号A", "号B")])
+    st = Settings(tmp / "ui_st.json")
+    st["api_roots"] = [str(tmp / "none")]
+    st["api_archive"] = str(tmp / "ui_out")
+    st["api_interval"] = 0
+    st["api_picked"] = {"1.1": {n: str(root / n) for n in ("号A", "号B")}}
+    tab = T.ApiTab(st, Records(tmp / "ui.sqlite"), lambda m: None)
+    tab.c_date.addItem("1.1")
+    tab.c_date.setCurrentText("1.1")
+    tab.load()
+    _settle(tab)
+    for v in tab.videos:
+        v.checks = {"w": 1080, "h": 1920, "tags": [], "platform": []}
+
+    class C:
+        def __init__(self, cid, sec, **k):
+            self.cid = cid
+
+        def send(self, path, title, cat, before_publish=None, **k):
+            if self.cid == "号B":
+                raise omapi.ApiError("换 token 失败", "40001", fatal=True)
+            before_publish("V")
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+    real = omapi.Client
+    omapi.Client = C
+    try:
+        tab.run_publish()
+        _settle(tab)
+    finally:
+        omapi.Client = real
+    sts = {v.title: tab.state.get(i, "") for i, v in enumerate(tab.videos)}
+    check(sts["号A1"] == "已发" and sts["号B1"].startswith("没发成:号的密钥") and sts["号B2"].startswith("没轮到"),
+          f"号密钥坏了:第一条没发成,剩下的标「没轮到」-> {sts['号B1']} / {sts['号B2']}")
+    check("号B" in tab.groups and "能发 0" in tab.groups["号B"].text(3), "号那一行:没发成的不算「能发」")
+    check(tab.logbox.toPlainText().count("发完了:成功 3 · 没发成 1") == 1 and "没轮到 2" in tab.logbox.toPlainText(),
+          "发完总结:成功 / 没发成 / 没轮到都写")
+
+    # 窗口能缩窄:接口页最小宽度不超过 1000
+    tab.tree.clearSelection()
+    tab.groups["号A"].setSelected(True)
+    QApplication.processEvents()
+    check(tab.minimumSizeHint().width() <= 1000, f"接口页选中号以后最小宽度 {tab.minimumSizeHint().width()} ≤ 1000")
 
 
 def test_bj_time():
@@ -986,8 +1080,19 @@ def test_preview(tmp: Path):
     dlg.close()
 
 
+def _no_dialogs():
+    """测试里不弹框:中文确认框(gui.api_tab.ask)一律点「是」,提示框一律关掉(不然 offscreen 下会一直等人点)。"""
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    QApplication.instance() or QApplication([])
+    import gui.api_tab as T
+    T.ask = lambda *a, **k: True
+    QMessageBox.information = staticmethod(lambda *a, **k: None)
+    QMessageBox.warning = staticmethod(lambda *a, **k: None)
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
+    _no_dialogs()
     test_folders(tmp)
     test_cover_dir(tmp)
     test_cover(tmp)
@@ -1003,6 +1108,7 @@ if __name__ == "__main__":
     test_api_tab(tmp)
     test_audit_r1(tmp)
     test_audit_r2(tmp)
+    test_ui_r1(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

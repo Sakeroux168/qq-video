@@ -29,6 +29,11 @@ class ApiVideo:
     checks: dict = field(default_factory=dict)   # 发前检查的结果(checks.py 填)
 
 
+def natural_key(s: str):
+    """按数字大小排:「第2条」在「第10条」前面(审查:原来按字排,第10 跑到第1 后面、第2 前面)。"""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", str(s or "")) if t]
+
+
 def date_key(name: str) -> str:
     """「10.14（星期三）」→「10.14」;不是日期开头的返回 ""。"""
     m = DATE_RE.match(name or "")
@@ -98,7 +103,7 @@ def videos(roots, date: str, known=None, picked=None) -> list[ApiVideo]:
 
 def _videos_in(d: str, nick: str, date: str) -> list[ApiVideo]:
     try:
-        names = sorted(os.listdir(d))
+        names = sorted(os.listdir(d), key=natural_key)
     except OSError:
         return []
     out = []

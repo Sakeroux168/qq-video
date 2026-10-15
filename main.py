@@ -9,6 +9,10 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("企鹅号发布助手")
     app.setStyleSheet("QWidget{font-family:'Microsoft YaHei';font-size:13px} QPushButton{padding:5px 12px}")
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    tr = QTranslator(app)                     # 对话框按钮用中文(审查:原来是 Yes / No / OK / Cancel)
+    if tr.load("qtbase_zh_CN", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(tr)
     try:
         from gui.window import MainWindow
         from qe.config import Settings, data_dir
