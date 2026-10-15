@@ -201,7 +201,7 @@ class ApiTab(QWidget):
         self.b_undo.clicked.connect(self.undo_topic)
         self.b_pub = QPushButton("发布")
         self.b_pub.setMinimumHeight(34)
-        self.b_pub.setStyleSheet("QPushButton{font-weight:bold}")
+        self.b_pub.setObjectName("primary")          # 主题里给它主色(gui/theme.py)
         self.b_pub.setToolTip("没有问题的(竖屏、标题里没别的平台、话题对、没发过的)用接口发出去;有问题的不发。点了会先弹框确认。\n"
                               "发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布\\游戏名」(设置里能改)。")
         self.b_pub.clicked.connect(lambda: self.run_publish())

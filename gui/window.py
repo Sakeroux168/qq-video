@@ -175,6 +175,7 @@ class MainWindow(QMainWindow):
 
         bar = QHBoxLayout()
         self.b_go = QPushButton("摆下一批")
+        self.b_go.setObjectName("primary")
         self.b_go.setMinimumHeight(34)
         self.b_go.setToolTip("在罐头里打开这个号的发布页,传视频、传封面并裁好、选自主声明、补 AI 声明,停在发布前。发布你自己点。")
         self.b_go.clicked.connect(self.start_batch)
@@ -788,6 +789,17 @@ class MainWindow(QMainWindow):
         f2.addRow("", QLabel("旧软件是「线程 1、间隔 5 秒」:一条一条发,上一条发完歇 5 秒再发下一条"))
         outer.addWidget(g2)
 
+        from gui import theme as TH
+        g4 = QGroupBox("界面")
+        f4 = QFormLayout(g4)
+        c_theme = QComboBox()
+        c_theme.addItem("原来的样子", "")
+        for n, t in TH.THEMES.items():
+            c_theme.addItem(f"{n} —— {t['desc']}", n)
+        c_theme.setCurrentIndex(max(0, c_theme.findData(self.st.get("theme", ""))))
+        f4.addRow("界面风格", c_theme)
+        f4.addRow("", QLabel("换了以后关掉软件再打开生效"))
+        outer.addWidget(g4)
         g3 = QGroupBox("AI(两边共用)")
         f3 = QFormLayout(g3)
         e_key = QLineEdit(self.st.get("ai_key", ""))
@@ -815,7 +827,7 @@ class MainWindow(QMainWindow):
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
                        api_threads=sp_thr.value(), api_interval=sp_gap.value(),
                        api_archive=e_api_arc.text().strip() or self.st.get("api_archive", ""),
-                       api_archive_by_game=k_game.isChecked())
+                       api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or "")
         C.AI_KEY = self.st.ai_key()
         self.st.save()
         self._load_dates()

@@ -23,6 +23,9 @@ def main():
             QMessageBox.information(None, "企鹅号发布助手", "企鹅号发布助手已经开着了(看看任务栏)。\n\n只能开一个,免得两边互相冲掉设置、重复发视频。")
             return 0
         st = Settings()
+        if st.get("theme"):                       # 界面风格(设置里选)
+            from gui import theme
+            theme.apply(app, st["theme"])
         w = MainWindow(st)
         w.show()
         if st.broken:
