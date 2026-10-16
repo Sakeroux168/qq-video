@@ -363,7 +363,7 @@ def test_api(tmp: Path):
     finally:
         omapi.TRUNK = real_trunk
     check(b"".join(s2.trunks) == bytes(range(10)) and len(s2.trunks) == 4, "分片上传:一片接一片,传完不多传(end_offset 含最后一个字节)")
-    check(r == {"vid": "V7", "article_id": "A9", "transaction_id": "P1", "status": "成功"}, "发布流程:传 → vid → 发 → 等成功")
+    check(r == {"vid": "V7", "article_id": "A9", "transaction_id": "P1", "status": "成功", "cover": ""}, "发布流程:传 → vid → 发 → 等成功")
     check(pub == {"title": v.title, "tags": "", "vid": "V7", "cat": 1604, "desc": v.title, "aigc_userstatement": "2",
                   "ext_info": "{\"self_declare\": 0}"},
           "发的内容:标题 = 简介 = 文件名,分类按号,AI 声明非 AI,自主声明无需标注(self_declare=0)")
@@ -1227,6 +1227,29 @@ def test_login_key(tmp: Path):
     check("relogin" not in omlogin.OAUTH_LIST, "读钥匙不带 relogin=1(不让平台重发钥匙)")
 
 
+def test_api_cover(tmp: Path):
+    print("[接口封面:找同名封面 / 裁比例 / 原图不动]")
+    from PIL import Image
+    from qe import apicover
+    d = tmp / "cover"
+    d.mkdir()
+    (d / "a.mp4").write_bytes(b"x")
+    Image.new("RGB", (1280, 720), "red").save(d / "a.PNG")
+    Image.new("RGB", (1280, 720), "blue").save(d / "a.jpg")
+    check(apicover.find(str(d / "a.mp4")).endswith("a.jpg") and apicover.find(str(d / "b.mp4")) == "", "同名封面 jpg 优先;没有给空")
+    check(apicover.crop_box(1280, 720, (3, 4)) == (370, 0, 910, 720) and apicover.crop_box(720, 1280, (16, 9)) == (0, 437, 720, 842),
+          "从中间裁成 3:4 / 16:9")
+    src = str(d / "a.jpg")
+    check(apicover.prepare(src, "原样") == src and apicover.prepare(src, "不传") == "", "原样就传原图;不传给空")
+    out = apicover.prepare(src, "3:4")
+    with Image.open(out) as im:
+        check(im.size == (540, 720) and out != src, "裁好的放临时文件夹")
+    with Image.open(src) as im:
+        check(im.size == (1280, 720), "原图没动")
+    apicover.cleanup(out, src)
+    check(not os.path.exists(out) and os.path.exists(src), "传完删临时的,原图还在")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1438,6 +1461,7 @@ if __name__ == "__main__":
     test_bughunt(tmp)
     test_daily_plan(tmp)
     test_login_key(tmp)
+    test_api_cover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

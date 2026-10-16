@@ -5,11 +5,14 @@ https://static.om.qq.com/om/om_3.0/normal/html/FdqHaHRh8sY8XlAqsUPKAsHX3FLsNiUc.
 
 旧软件实际怎么发的(它的数据库里 359 条都是这样):标题 = 简介 = 文件名;tags 空;分类 = 号的默认分类;
 aigc_userstatement = "2"(非 AI);不传封面(平台自己截一帧)。
+我们(2026-10-16 用户要的):视频旁边有同名封面图就传上去(/video/clientvideopic,拿到 vid 之后、发布之前);
+封面传不上不耽误发视频,平台自己截一帧,记一笔原因。
 密钥只在这台电脑上解开用,不写日志、不显示 —— 所有报错都过一遍 redact(),网络错只给一句人话(2026-10-15 审查:
 requests 的报错原文带完整 URL,client_secret / access_token 会跟着进日志)。
 """
 import hashlib
 import json
+import os
 import re
 import time
 
@@ -167,6 +170,17 @@ class Client:
             time.sleep(3)
         raise ApiError(f"上传完等了 {int(timeout)} 秒还没拿到视频编号(vid)")
 
+    def cover(self, vid: str, img: str) -> dict:
+        """给这条视频传封面(每个 vid 一张;平台建议 3:4,不超过 20MB,jpg / png)。md5 是图片的 md5。"""
+        with open(img, "rb") as f:
+            data = f.read()
+        ext = os.path.splitext(img)[1].lower()
+        mime = "image/png" if ext == ".png" else "image/jpeg"
+        return self._call("POST", "/video/clientvideopic", "传封面", timeout=120,
+                          params={"vid": vid, "md5": hashlib.md5(data).hexdigest()},
+                          # 文件名只用英文(视频分片中文名会报 40023,封面也照这样)
+                          files={"media": ("cover" + (ext if ext in (".jpg", ".jpeg", ".png") else ".jpg"), data, mime)})
+
     def publish(self, vid: str, title: str, cat: int, desc: str = "", aigc: str = "2", tags: str = "",
                 self_declare: int | None = 0) -> dict:
         """aigc "2" = AI 声明「非 AI 生成」;self_declare 0 = 自主声明「无需标注」(网页上选无需标注提交的就是 id 0)。
@@ -194,15 +208,28 @@ class Client:
         return "处理中"
 
     def send(self, path: str, title: str, cat: int, on_progress=None, stop=None, log=None,
-             self_declare: int | None = 0, aigc: str = "2", before_publish=None) -> dict:
+             self_declare: int | None = 0, aigc: str = "2", before_publish=None, cover: str = "") -> dict:
         """整条:传 → vid → 发 → 等结果。返回 {"vid","article_id","transaction_id","status"}。
         status:「成功」/「处理中」(平台已收下,还在处理)。
+        cover:要传的封面图(空 = 不传,平台自己截);传不上不耽误发,原因放在返回的 "cover" 里。
         before_publish(vid):真正调发布接口前调一下(界面先记一笔「发布中」,程序中途关掉也不会再发)。
         发布请求发出去后没收到回话 → 抛 Unknown;平台已收下、之后查进度出错 → 不算失败,返回「处理中」。"""
         say = log or self.log
         say("上传中")
         tid = self.upload(path, on_progress=on_progress, stop=stop)
         vid = self.wait_vid(tid, stop=stop)
+        if stop and stop():
+            raise Stopped("停下了")
+        cov = ""
+        if cover:
+            say("传封面")
+            try:
+                self.cover(vid, cover)
+                cov = "传了"
+            except ApiError as e:                        # 封面传不上:照样发视频,平台自己截一帧
+                cov = f"没传上:{e}"
+            except OSError as e:
+                cov = f"没传上:图片读不出来({type(e).__name__})"
         if stop and stop():
             raise Stopped("停下了")
         self.token()                                     # 换 token 出错 = 明确没发,不算结果不明
@@ -231,7 +258,7 @@ class Client:
                 st = "处理中"
             except Exception:
                 st = "处理中"
-        return {"vid": vid, "article_id": aid, "transaction_id": ptid, "status": st}
+        return {"vid": vid, "article_id": aid, "transaction_id": ptid, "status": st, "cover": cov}
 
 
 def _why(d: dict) -> str:
