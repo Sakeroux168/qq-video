@@ -290,15 +290,25 @@ def ai_canvas(img, plan: dict, max_w: int = 1424):
     return canvas, (left, y0, W, y1 - y0, y0 - up)
 
 
+def cache_file(folder: str, path: str, suffix: str):
+    """数据目录里给这张封面存的东西(AI 扩的 2.35:1 图、放大的图)叫什么。
+    按**完整路径**区分(2026-10-16 修:原来只按文件名,封面工具出的图每条都叫「横屏16x9.png」,
+    所有视频共用了同一张 AI 扩图 —— A 视频的 2.35:1 封面是 B 视频的画面)。"""
+    import hashlib
+    from .config import data_dir
+    d = data_dir() / folder
+    d.mkdir(parents=True, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(path))[0][:40]
+    h = hashlib.md5(os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()[:10]
+    return d / f"{stem}_{h}{suffix}"
+
+
 def wide_cover(path: str, plan: dict, log=lambda m: None) -> str:
     """办法三:AI 扩图做 2.35:1 专用图。做过的直接用(存在数据目录)。没填阿里百炼 Key / 调不通抛 RuntimeError。"""
     import base64
     import cv2
     import requests
-    from .config import data_dir
-    d = data_dir() / "2.35专用封面"
-    d.mkdir(parents=True, exist_ok=True)
-    out = d / (os.path.splitext(os.path.basename(path))[0][:60] + "_2.35_AI.jpg")
+    out = cache_file("2.35专用封面", path, "_2.35_AI.jpg")
     if out.is_file() and out.stat().st_mtime >= os.path.getmtime(path):
         return str(out)
     if not AI_KEY:
@@ -417,9 +427,7 @@ def upload_file(path: str) -> str:
             return path
         k = UP_SHORT / min(w, h)
         big = im.convert("RGB").resize((round(w * k), round(h * k)), Image.LANCZOS)
-    d = data_dir() / "放大的封面"
-    d.mkdir(parents=True, exist_ok=True)
-    out = d / (os.path.splitext(os.path.basename(path))[0][:60] + f"_{round(w * k)}x{round(h * k)}.jpg")
+    out = cache_file("放大的封面", path, f"_{round(w * k)}x{round(h * k)}.jpg")
     big.save(out, quality=93)
     return str(out)
 

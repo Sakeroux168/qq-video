@@ -1747,6 +1747,16 @@ def test_ads(tmp: Path):
         asr.shared, asr.model_dir = real_shared, real_dir
 
 
+def test_cover_cache_unique(tmp: Path):
+    print("[封面缓存按完整路径分:每条都叫「横屏16x9.png」也不会串]")
+    from qe import cover as C
+    a = C.cache_file("2.35专用封面", str(tmp / "甲" / "横屏16x9.png"), "_2.35_AI.jpg")
+    b = C.cache_file("2.35专用封面", str(tmp / "乙" / "横屏16x9.png"), "_2.35_AI.jpg")
+    check(a != b and a.name.startswith("横屏16x9_") and a.name.endswith("_2.35_AI.jpg"), "两条视频的同名封面:AI 扩图各存各的")
+    check(C.cache_file("放大的封面", str(tmp / "甲" / "横屏16x9.png"), "_x.jpg") != C.cache_file("放大的封面", str(tmp / "乙" / "横屏16x9.png"), "_x.jpg"),
+          "放大的封面也各存各的")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -2041,6 +2051,7 @@ if __name__ == "__main__":
     test_edu_wm(tmp)
     test_blur(tmp)
     test_ads(tmp)
+    test_cover_cache_unique(tmp)
     test_api_cover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))

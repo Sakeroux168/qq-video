@@ -261,15 +261,10 @@ class CoverDialog(QDialog):
 
     def ai_again(self):
         """AI 扩的不满意:删掉这张,再扩一张。"""
-        import glob
-        import os
-        from qe.config import data_dir
-        stem = os.path.splitext(os.path.basename(self.v.cover))[0][:60]
-        for f in glob.glob(str(data_dir() / "2.35专用封面" / (glob.escape(stem) + "_2.35_AI.jpg"))):
-            try:
-                os.remove(f)
-            except OSError:
-                pass
+        try:
+            C.cache_file("2.35专用封面", self.v.cover, "_2.35_AI.jpg").unlink(missing_ok=True)
+        except OSError:
+            pass
         self._wide = None
         self.pick_ratio(2)
 
