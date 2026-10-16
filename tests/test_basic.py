@@ -846,7 +846,7 @@ def test_ui_r1(tmp: Path):
     short, tip = T.friendly(omapi.ApiError("上传视频失败:invalid_file_upload(code 40023)", "40023"))
     check("平台不收" in short and "重新导出" in tip, "40023:说人话 + 下一步")
     short, tip = T.friendly(omapi.ApiError("换 token 失败", "40001", fatal=True))
-    check("密钥" in short and "搬账号" in tip, "换 token 失败:说密钥不对 + 去重新搬")
+    check("密钥" in short and "登录取钥匙" in tip, "换 token 失败:说密钥不对 + 去登录取钥匙")
 
     class V:
         title = "A小到底该怎么控 "
@@ -1208,6 +1208,25 @@ def test_daily_plan(tmp: Path):
     check(QApplication.clipboard().text().startswith(plan.short_day(day)), "点「复制」:剪贴板里就是那四行")
 
 
+def test_login_key(tmp: Path):
+    print("[登录取钥匙:从回话里读钥匙 / 挑对号 / 换上]")
+    from qe import apiacc, omlogin
+    data = {"response": {"code": 0}, "data": {"list": [
+        {"mediaName": "CSGO战神君", "mediaId": "245", "clientID": "CID1", "clientSecret": "SEC1"},
+        {"mediaName": "PUBG突围君", "mediaId": "246", "clientID": "CID2", "clientSecret": "SEC2"}]}}
+    keys = omlogin.extract(data)
+    check([(k["name"], k["client_id"], k["secret"]) for k in keys] == [("CSGO战神君", "CID1", "SEC1"), ("PUBG突围君", "CID2", "SEC2")],
+          "回话里读出每个号的钥匙(字段名大小写不同也认)")
+    check(omlogin.match(keys, "PUBG突围君")["client_id"] == "CID2" and omlogin.match(keys, "x", source_id="245")["client_id"] == "CID1"
+          and omlogin.match(keys, "没有的号") is None, "按名字 / 号 ID 挑对号;挑不出来让人选")
+    check("SEC1" not in omlogin.shape(data) and "clientSecret" in omlogin.shape(data), "读不到时日志里只写字段名,不写钥匙")
+    apiacc.save([{"nick": "PUBG突围君", "client_id": "old", "secret": apiacc.seal("oldsec"), "category": 1604, "enabled": True}])
+    check(apiacc.set_key("PUBG突围君", "CID2", "SEC2") and apiacc.find("PUBG突围君")["client_id"] == "CID2"
+          and apiacc.unseal(apiacc.find("PUBG突围君")["secret"]) == "SEC2" and "SEC2" not in apiacc.store_path().read_text("utf-8"),
+          "换上新钥匙:加密存")
+    check("relogin" not in omlogin.OAUTH_LIST, "读钥匙不带 relogin=1(不让平台重发钥匙)")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1418,6 +1437,7 @@ if __name__ == "__main__":
     test_audit_r3(tmp)
     test_bughunt(tmp)
     test_daily_plan(tmp)
+    test_login_key(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

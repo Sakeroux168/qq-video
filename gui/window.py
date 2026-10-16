@@ -932,7 +932,17 @@ class MainWindow(QMainWindow):
         b_mig.setToolTip("从旧软件「企鹅号批量发布」的数据库(qepm.db)把 16 个号搬过来。密钥加密存在这台电脑上,不显示。")
         b_mig.clicked.connect(self.api_tab.migrate)
         b_mig.setEnabled(not self.api_tab.busy())
-        f2.addRow("16 个号的账号", b_mig)
+        b_login = QPushButton("登录取钥匙…")
+        b_login.setToolTip("某个号发布报「号的密钥不对」时用:开一个浏览器,扫码登录这个号的企鹅号,软件自己读出新钥匙换上。\n"
+                           "不用再开旧软件。")
+        b_login.clicked.connect(lambda: self.api_tab.relogin_key(d))
+        b_login.setEnabled(not self.api_tab.busy())
+        hk = QWidget()
+        hkl = QHBoxLayout(hk)
+        hkl.setContentsMargins(0, 0, 0, 0)
+        hkl.addWidget(b_mig)
+        hkl.addWidget(b_login)
+        f2.addRow("16 个号的账号", hk)
         outer.addWidget(g2)
 
         from gui import theme as TH

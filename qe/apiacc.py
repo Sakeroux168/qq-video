@@ -86,6 +86,17 @@ def migrate(db: str = OLD_DB) -> int:
     return len(rows)
 
 
+def set_key(nick: str, client_id: str, secret: str) -> bool:
+    """换上新钥匙(登录取钥匙读到的),加密存。返回这个号在不在。"""
+    accs = load()
+    for a in accs:
+        if a.get("nick") == nick:
+            a["client_id"], a["secret"] = client_id, seal(secret)
+            save(accs)
+            return True
+    return False
+
+
 def find(nick: str) -> dict | None:
     for a in load():
         if a.get("nick") == nick:

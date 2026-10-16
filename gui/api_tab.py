@@ -39,7 +39,7 @@ def friendly(e) -> tuple[str, str]:
     s = str(e)
     code = getattr(e, "code", "") if isinstance(e, ApiError) else ""
     if getattr(e, "fatal", False):
-        return "没发成:号的密钥不对", "这个号的密钥不对或过期了 —— 去旧软件确认这个号还能用,再去左下角「设置」里点「从旧软件搬账号…」重新搬一次"
+        return "没发成:号的密钥不对", "这个号的密钥不对或过期了 —— 去左下角「设置」里点「登录取钥匙…」,扫码登录这个号,软件会自己换上新钥匙"
     if code == "40023" or "invalid_file_upload" in s:
         return "没发成:平台不收这个文件", "平台不收这个视频文件(可能坏了 / 格式不对)—— 先双击打开看能不能播,重新导出再发"
     if "网络连不上" in s or "超时" in s:
@@ -1398,6 +1398,81 @@ class ApiTab(QWidget):
             return summary
         self._start(fn, f"开始发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
                     f",间隔 {gap:g} 秒")
+
+    def relogin_key(self, parent=None):
+        """登录取钥匙:开一个这个号专用的浏览器,人扫码登录企鹅号,软件读出这个号的接口钥匙换上(不用再开旧软件)。"""
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QApplication, QProgressDialog
+        from qe import omlogin
+        parent = parent or self
+        if self.busy():
+            QMessageBox.information(parent, "登录取钥匙", "后台还在发布 / 处理,做完再弄。")
+            return
+        names = apiacc.nicks()
+        if not names:
+            QMessageBox.information(parent, "登录取钥匙", "还没有号。先「从旧软件搬账号…」。")
+            return
+        nick, ok = QInputDialog.getItem(parent, "登录取钥匙", "哪个号的钥匙要重新取?(一般是发布报「号的密钥不对」的那个)", names, 0, False)
+        if not ok:
+            return
+        acc = apiacc.find(nick) or {}
+        try:
+            proc, port = omlogin.launch(nick)
+        except Exception as e:
+            QMessageBox.warning(parent, "登录取钥匙", f"浏览器打不开:{e}")
+            return
+        res = {}
+
+        class T(QThread):
+            def run(self_):
+                res["r"] = omlogin.wait_keys(port, stopped=lambda: res.get("stop", False))
+        t = T(self)
+        dlg = QProgressDialog(f"在刚打开的浏览器里登录「{nick}」的企鹅号(扫码)。\n登录好了软件会自己读钥匙,不用点别的。\n"
+                              "(这个浏览器只给这个号用,登录一次以后再取就不用扫码了)", "不弄了", 0, 0, parent)
+        dlg.setWindowTitle("登录取钥匙")
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        dlg.canceled.connect(lambda: res.__setitem__("stop", True))
+        dlg.show()
+        t.start()
+        while not t.wait(200):
+            QApplication.processEvents()
+        dlg.close()
+        try:
+            proc.terminate()                         # 关掉这个专用浏览器(登录还记着,下次不用再扫)
+        except Exception:
+            pass
+        status, keys, shp = res.get("r", ("停下了", [], ""))
+        if status in ("停下了", "超时"):
+            self.say(f"登录取钥匙「{nick}」:{status},钥匙没动")
+            return
+        if status != "读到了":
+            self.say(f"登录取钥匙「{nick}」:登录了,但没读到钥匙。回话样子:{shp[:300]}")
+            QMessageBox.warning(parent, "登录取钥匙", "登录好了,但没读到这个号的接口钥匙(可能企鹅号后台还没开「接口发布」权限)。\n"
+                                                   "现在的钥匙没动。把日志里那句发给做软件的人看看。")
+            return
+        k = omlogin.match(keys, nick, str(acc.get("source_id") or ""), str(acc.get("client_id") or ""))
+        if k is None:
+            labels = [f"{x.get('name') or '没名字'}({x.get('media_id') or '?'})" for x in keys]
+            pick, ok = QInputDialog.getItem(parent, "登录取钥匙", f"这个账号下有 {len(keys)} 个号,哪个是「{nick}」?", labels, 0, False)
+            if not ok:
+                return
+            k = keys[labels.index(pick)]
+        try:
+            same = k["client_id"] == acc.get("client_id") and k["secret"] == apiacc.unseal(acc.get("secret") or "")
+        except Exception:
+            same = False
+        if same:
+            QMessageBox.information(parent, "登录取钥匙", f"「{nick}」的钥匙读到了,和现在用的一样,不用换。\n\n"
+                                                       "(如果发布还报「密钥不对」,可能是企鹅号那边的问题,去后台看看这个号的状态)")
+            self.say(f"登录取钥匙「{nick}」:读到了,和现在的一样")
+            return
+        if not ask(parent, "登录取钥匙", f"读到「{k.get('name') or nick}」的新钥匙了,和现在用的不一样。\n\n换上吗?(换了以后这个号就用新钥匙发)",
+                   "换上", "先不换"):
+            return
+        apiacc.set_key(nick, k["client_id"], k["secret"])
+        self.say(f"登录取钥匙「{nick}」:换上新钥匙了")
+        QMessageBox.information(parent, "登录取钥匙", f"「{nick}」换上新钥匙了。之前「密钥不对」没发成的,再点「发布」就行。")
 
     def migrate(self):
         db = apiacc.OLD_DB if os.path.isfile(apiacc.OLD_DB) else ""
