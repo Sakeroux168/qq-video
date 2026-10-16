@@ -1516,6 +1516,139 @@ def test_window_dups(tmp: Path):
     w.close()
 
 
+def test_api_wm(tmp: Path):
+    print("[高级检查:查水印(记在硬盘上)/ 普通检查过的只查水印 / 右键「没水印」能发]")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from qe import apiacc, checks, watermark, wmstore
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    root = tmp / "apiwm" / "游戏视频" / "CSGO--CSGO战神君" / "10.15"
+    root.mkdir(parents=True)
+    for f in ("w1.mp4", "w2.mp4"):
+        (root / f).write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_wm.json")
+    st["api_roots"] = [str(tmp / "apiwm" / "游戏视频")]
+    tab = T.ApiTab(st, Records(tmp / "rec_wm.sqlite"), lambda m: None)
+    tab.c_date.setCurrentText("10.15")
+    tab.load()
+    _settle(tab)
+    for v in tab.videos:                               # 假视频:当成竖屏的好视频
+        v.checks.update(bad_read=False, landscape=False, squarish=False, w=1080, h=1920)
+        tab._remember_check(v)
+    calls = []
+
+    def fake_detect(path, ff, info, stop=None, **k):
+        calls.append(os.path.basename(path))
+        if path.endswith("w1.mp4"):
+            return {"hits": [{"label": "B站", "kind": "logo", "score": 0.9, "box": [600, 40, 60, 30],
+                              "ratio": [0.83, 0.03, 0.08, 0.02], "where": "右上角", "t": 1.0}], "shot": "", "frames": 10}
+        return {"hits": [], "shot": "", "frames": 10}
+    real_detect, real_check = watermark.detect, checks.check_one
+    normal = []
+    watermark.detect = fake_detect
+    checks.check_one = lambda v, *a, **k: normal.append(v.title) or real_check(v, *a, **k)
+    try:
+        tab.run_check(deep=True)
+        _settle(tab)
+        check(sorted(calls) == ["w1.mp4", "w2.mp4"] and not normal, "高级检查:普通检查过的只查水印,不再过一遍普通检查")
+        i1 = next(i for i, v in enumerate(tab.videos) if v.title == "w1")
+        i2 = next(i for i, v in enumerate(tab.videos) if v.title == "w2")
+        check("B站水印(右上角)" in checks.problems(tab.videos[i1]) and not tab._can_send(i1) and tab._can_send(i2),
+              "查到水印:标「B站水印(右上角)」,不发;没水印的能发")
+        calls.clear()
+        tab.load()
+        _settle(tab)
+        tab.run_check(deep=True)
+        _settle(tab)
+        i1 = next(i for i, v in enumerate(tab.videos) if v.title == "w1")
+        check(not calls and not tab._can_send(i1), "关了再开 / 刷新:水印结果记在硬盘上,不再查,照样拦着")
+        tab.set_wm_ok(i1, True)
+        check(tab._can_send(i1) and wmstore.get(tab.videos[i1].path)["ok"], "右键「没水印 / 不用管」:能发了,也记在硬盘上")
+        tab.set_wm_ok(i1, False)
+        check(not tab._can_send(i1), "「其实有水印」:又不发了")
+    finally:
+        watermark.detect, checks.check_one = real_detect, real_check
+    f = str(root / "w2.mp4")
+    wmstore.put(f, {"hits": [{"label": "x"}], "shot": ""})
+    wmstore.set_ok(f, True)
+    (root / "w2.mp4").write_bytes(b"xy")              # 文件变了(模糊过 / 换了一条):当没查过
+    check(wmstore.get(f) is None, "文件变了:水印结果作废,要重查")
+    from gui.widgets import MenuButton
+    b = MenuButton("检查")
+    b.add("普通检查", lambda: None)
+    b.add("高级检查(再查水印)", lambda: None)
+    check([a.text() for a in b.menu().actions()] == ["普通检查", "高级检查(再查水印)"], "检查按钮带下拉:普通 / 高级")
+
+
+def test_edu_wm(tmp: Path):
+    print("[教育号查水印:查到的标黄不摆、右键「没水印」能摆、查过的不再查]")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from gui.window import MainWindow
+    from qe import watermark, wmstore
+    from qe.config import Settings
+    from qe.records import Records
+    app = QApplication.instance() or QApplication([])
+    a = tmp / "素材wm" / "10.16" / "小天地"
+    for rel in ("有水印.mp4", "干净的.mp4"):
+        (a / rel).parent.mkdir(parents=True, exist_ok=True)
+        (a / rel).write_bytes(b"x")
+        _img(str(a / rel)[:-4] + ".png", 640, 360)
+    st = Settings(tmp / "swm.json")
+    st["material_root"] = str(tmp / "素材wm")
+    st["api_roots"] = [str(tmp / "api_none")]
+    st["ai_key"] = "test"
+    w = MainWindow(st, Records(tmp / "rwm.sqlite"))
+
+    def wait():
+        t0 = time.time()
+        while ((w.cover_worker and w.cover_worker.isRunning()) or (w.wm_worker and w.wm_worker.isRunning())) and time.time() - t0 < 30:
+            app.processEvents()
+            time.sleep(0.05)
+        app.processEvents()
+    w.c_date.setCurrentIndex(w.c_date.findData("10.16"))
+    top = w.tree.topLevelItem(next(i for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地"))
+    top.child(0).setCheckState(0, Qt.CheckState.Checked)
+    wait()
+    calls = []
+
+    def fake(path, ff, info, stop=None, **k):
+        calls.append(os.path.basename(path))
+        hit = [{"label": "抖音", "kind": "logo", "score": 0.9, "box": [10, 10, 40, 20], "ratio": [0.01, 0.01, 0.05, 0.02],
+                "where": "左上角", "t": 1.0}] if "有水印" in path else []
+        return {"hits": hit, "shot": "", "frames": 5}
+    real = watermark.detect
+    watermark.detect = fake
+    try:
+        w.run_wm()
+        wait()
+        check(sorted(calls) == ["干净的.mp4", "有水印.mp4"], "查水印:勾上的都查")
+        i = next(k for k, v in enumerate(w.videos) if v.title == "有水印")
+        check("有水印" in w.table.item(i, 4).text() and "抖音" in w.table.item(i, 4).text(), "查到的:状态写「有水印:抖音水印(左上角)」")
+        _acc, vids = w.next_batch()
+        check([v.title for v in vids] == ["干净的"], "摆下一批:有水印的不摆")
+        w.table.selectRow(i)
+        w.set_wm_ok(True)
+        _acc, vids = w.next_batch()
+        check(sorted(v.title for v in vids) == ["干净的", "有水印"], "右键「没水印,能摆」:能摆了")
+        calls.clear()
+        w._load_tree()
+        wait()
+        top = w.tree.topLevelItem(next(i for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地"))
+        if top.child(0).checkState(0) != Qt.CheckState.Checked:
+            top.child(0).setCheckState(0, Qt.CheckState.Checked)
+            wait()
+        w.run_wm()
+        wait()
+        check(not calls, "查过的(记在硬盘上)不再查")
+    finally:
+        watermark.detect = real
+    w.close()
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1806,6 +1939,8 @@ if __name__ == "__main__":
     test_bughunt(tmp)
     test_daily_plan(tmp)
     test_login_key(tmp)
+    test_api_wm(tmp)
+    test_edu_wm(tmp)
     test_api_cover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))

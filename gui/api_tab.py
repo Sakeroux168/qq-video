@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from qe import apiacc, apisrc, checks, plan, topic, vertical
+from qe import apiacc, apisrc, checks, plan, topic, vertical, wmstore
 from qe.config import bj_now, bj_str, data_dir
 from qe.records import pkey
 
@@ -219,9 +219,14 @@ class ApiTab(QWidget):
 
         # 第二行:处理 + 发布(按钮上不再每个都带条数,条数只在上面绿字写一次;窗口能缩到 1000 以内)
         bar = QHBoxLayout()
-        self.b_check = QPushButton("检查")
-        self.b_check.setToolTip("看每条:是不是竖屏、标题里有没有别的平台的名字、话题对不对。\n(换日期 / 刷新以后会自动检查新出现的)")
-        self.b_check.clicked.connect(lambda: self.run_check())
+        from gui.widgets import MenuButton
+        self.b_check = MenuButton("检查")              # 鼠标挪上去弹出:普通检查 / 高级检查(用户 2026-10-16)
+        self.b_check.setToolTip("普通检查:是不是竖屏、标题里有没有别的平台的名字、话题对不对(换日期 / 刷新会自动做)。\n"
+                                "高级检查:再查一遍有没有别的平台的水印 / 广告图标(B站、抖音、快手、得物、转转 …),慢一些。")
+        self.b_check.add("普通检查", lambda: self.run_check(),
+                         "竖屏、标题里的平台名、话题。换日期 / 刷新以后会自动做")
+        self.b_check.add("高级检查(再查水印)", lambda: self.run_check(deep=True),
+                         "普通检查 + 查水印 / 广告图标。普通检查过的只查水印;查过水印、文件没变的不再查")
         self.b_vert = QPushButton("转标准竖屏")
         self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n原片挪进同文件夹的「横屏原片」,不删。")
         self.b_vert.clicked.connect(lambda: self.run_vertical())
@@ -399,6 +404,16 @@ class ApiTab(QWidget):
         except OSError:
             return None
 
+    @staticmethod
+    def _attach_wm(v):
+        """查过水印的(记在硬盘上,关了再开也在)挂到 checks 上;文件变了 / 没查过就没有。"""
+        if v.checks is not None:
+            w = wmstore.get(v.path)
+            if w is not None:
+                v.checks["wm"] = w
+            else:
+                v.checks.pop("wm", None)
+
     def _remember_check(self, v):
         sig = self._sig(v.path)
         if sig and v.checks:
@@ -429,6 +444,7 @@ class ApiTab(QWidget):
                 v.checks = dict(hit[1])
                 v.checks["tags"] = topic.split_topics(v.title)["tags"]
                 v.checks["platform"] = checks.platform_hits(v.title, words)
+                self._attach_wm(v)
             elif not s.startswith("已发"):
                 todo.append(i)
         # 这天已经发出去、挪走了的(列表里没有了,但记录里有):号那一行和上面卡片要算上
@@ -567,6 +583,12 @@ class ApiTab(QWidget):
         for col, t in enumerate([v.title, res, "、".join(probs) if c else "", st]):
             it.setText(col, t)
             it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else t)
+        wm = c.get("wm") or {}
+        if wm.get("hits") and wm.get("shot") and os.path.isfile(wm["shot"]):   # 鼠标放上去看查到水印的那一帧(红框)
+            from PySide6.QtCore import QUrl
+            src = QUrl.fromLocalFile(wm["shot"]).toString()
+            it.setToolTip(2, f"<b>{checks.wm_text(wm)}</b>" + ("(你标过:不用管)" if wm.get("ok") else "") +
+                          f"<br><img src='{src}' width='300'><br>不是水印:右键「没水印 / 不用管,这条能发」")
         bg = GREEN if st.startswith("已发") else ORANGE if st == "结果不明" else RED if st.startswith(FAILED) \
             else YELLOW if probs else None
         for col in range(len(COLS)):
@@ -809,6 +831,17 @@ class ApiTab(QWidget):
                         m.addSeparator()
                     else:
                         m.addAction(text, fn).setEnabled(not busy)
+            if sel:
+                m.addAction(f"高级检查选中的 {len(sel)} 条(再查水印)", lambda: self.run_check(sel, deep=True)).setEnabled(not busy)
+            wm = (self.videos[i].checks or {}).get("wm") if i != -1 else None
+            if wm and wm.get("hits") and not self._sent(i):
+                m.addSeparator()
+                if wm.get("shot"):
+                    m.addAction("看水印截图", lambda: self._open_file(wm["shot"]))
+                if wm.get("ok"):
+                    m.addAction("其实有水印(先不发)", lambda: self.set_wm_ok(i, False)).setEnabled(not busy)
+                else:
+                    m.addAction("没水印 / 不用管,这条能发", lambda: self.set_wm_ok(i, True)).setEnabled(not busy)
             if i != -1:
                 m.addSeparator()
                 m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not busy and not self._sent(i))
@@ -823,6 +856,26 @@ class ApiTab(QWidget):
         m.addAction("全部展开", lambda: self.expand_all(True))
         m.addAction("全部收起", lambda: self.expand_all(False))
         m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    @staticmethod
+    def _open_file(path: str):
+        try:
+            os.startfile(path)
+        except OSError:
+            pass
+
+    def set_wm_ok(self, i: int, ok: bool):
+        """人看过截图:ok=True 是误报(没水印 / 不用管)→ 能发;False 确实有水印 → 不发。选了好几条一起标。"""
+        rows = [r for r in (self.selected_rows() or [i]) if (self.videos[r].checks or {}).get("wm", {}).get("hits")]
+        for r in rows or [i]:
+            v = self.videos[r]
+            wmstore.set_ok(v.path, ok)
+            if v.checks and v.checks.get("wm"):
+                v.checks["wm"]["ok"] = ok
+            self._remember_check(v)
+            self._fill(r)
+        self.say(f"{len(rows) or 1} 条标成" + ("「没水印,能发」" if ok else "「有水印,先不发」"))
+        self._update_scope()
 
     @staticmethod
     def _copy(t: str):
@@ -904,13 +957,19 @@ class ApiTab(QWidget):
             self.b_stop.setEnabled(False)
             self.say("正在停…(手上这条做完就停)")
 
-    def run_check(self, only: list[int] | None = None, quiet: bool = False):
+    def run_check(self, only: list[int] | None = None, quiet: bool = False, deep: bool = False):
+        """deep = 高级检查:普通检查 + 查水印。普通检查过的(文件没变)不再做一遍,只查水印;水印查过的也不再查。"""
         rows = self.target_rows(only)
         if not rows or self.busy():
             return
         vs = self.videos
         words = self.st.get("api_platform_words") or None
         ff = vertical.ffmpeg_path()
+        if deep:
+            rows = [i for i in rows if not self._sent(i)]          # 发过的不用查水印了
+            if not rows:
+                QMessageBox.information(self, "高级检查", "这些都发过了,不用查水印。")
+                return
 
         def fn(emit, stopped):
             done = [0]
@@ -919,18 +978,24 @@ class ApiTab(QWidget):
             def one(i):
                 if stopped():
                     return
-                checks.check_one(vs[i], words, ff)
-                self._remember_check(vs[i])
-                emit(i, "")
+                if not (deep and vs[i].checks):          # 高级检查:普通检查过的就不再做一遍
+                    checks.check_one(vs[i], words, ff)
+                    self._attach_wm(vs[i])
+                    self._remember_check(vs[i])
+                    emit(i, "")
                 with lock:
                     done[0] += 1
                     k = done[0]
-                if k % 10 == 0 or k == len(rows):
+                if not deep and (k % 10 == 0 or k == len(rows)):
                     emit(PROGRESS, f"检查中 {k}/{len(rows)}…")
             with ThreadPoolExecutor(4) as ex:            # 4 条一起读(网络盘上一条条读太慢)
                 list(ex.map(one, rows))
             if stopped():
                 return "检查停下了"
+            if deep:
+                self._scan_wm(rows, emit, stopped, ff)
+                if stopped():
+                    return "查水印停下了(查完的记着,下次接着查没查的)"
             got = [vs[i] for i in rows]
             land = sum(1 for v in got if checks.needs_vertical(v.checks))
             plat = sum(1 for v in got if v.checks.get("platform"))
@@ -938,10 +1003,56 @@ class ApiTab(QWidget):
             fmt = sum(1 for v in got if len(v.checks.get("tags") or []) <= 1 and topic.bad_format(v.title))
             unread = sum(1 for v in got if v.checks.get("bad_read"))
             ok = sum(1 for v in got if not checks.problems(v))
-            return (f"检查完:{len(got)} 条,能发 {ok};横屏 / 偏方 {land} · 标题有别的平台 {plat}(要你自己改)· "
+            wm = sum(1 for v in got if checks.wm_blocks(v.checks.get("wm")))
+            return (("高级检查完" if deep else "检查完") + f":{len(got)} 条,能发 {ok};横屏 / 偏方 {land} · 标题有别的平台 {plat}(要你自己改)· "
                     f"多个话题 {many} · 话题写法 / 结尾空格 {fmt}" + (f" · 视频读不出来 {unread}" if unread else "") +
-                    ("" if ok == len(got) else "。话题问题点「整理话题」一键改"))
-        self._start(fn, "" if quiet else f"检查中…({self._who(rows)})", quiet=quiet)
+                    (f" · 有水印 {wm}(鼠标放在「要处理的」上看截图;不是水印就右键「没水印,能发」)" if deep else "") +
+                    ("" if ok == len(got) or deep else "。话题问题点「整理话题」一键改"))
+        self._start(fn, "" if quiet else (f"高级检查中…({self._who(rows)})" if deep else f"检查中…({self._who(rows)})"),
+                    quiet=quiet)
+
+    def _scan_wm(self, rows: list[int], emit, stopped, ff: str):
+        """查水印(后台线程里):查过、文件没变的不再查;3 条一起查(解码 + 找 logo 吃 CPU)。"""
+        from qe import watermark as WM
+        vs = self.videos
+        todo = []
+        for i in rows:
+            w = wmstore.get(vs[i].path)
+            if w is not None:
+                vs[i].checks["wm"] = w
+                emit(i, "")
+            else:
+                todo.append(i)
+        if not todo:
+            return
+        done = [0]
+        lock = threading.Lock()
+        emit(PROGRESS, f"查水印 0/{len(todo)}…(一条几秒,点「停」随时停,查完的记着)")
+
+        def one(i):
+            if stopped():
+                return
+            v = vs[i]
+            emit(i, "查水印中…")
+            try:
+                info = {"w": v.checks.get("w", 0), "h": v.checks.get("h", 0), "dur": v.checks.get("dur", 0)}
+                res = WM.detect(v.path, ff, info, stop=stopped)
+            except Exception as e:                      # 查不了不拦着(和没查一样),日志里说一声
+                emit(-1, f"「{v.title}」查水印出错:{type(e).__name__} {e}")
+                emit(i, CLEAR)
+                return
+            if stopped():
+                emit(i, CLEAR)
+                return
+            v.checks["wm"] = wmstore.put(v.path, res)
+            self._remember_check(v)
+            emit(i, CLEAR)
+            with lock:
+                done[0] += 1
+                k = done[0]
+            emit(PROGRESS, f"查水印 {k}/{len(todo)}…")
+        with ThreadPoolExecutor(3) as ex:
+            list(ex.map(one, todo))
 
     def _who(self, rows: list[int]) -> str:
         accs = sorted({self.videos[i].account for i in rows})
@@ -1003,6 +1114,7 @@ class ApiTab(QWidget):
             v.checks["tags"] = topic.split_topics(v.title)["tags"]
             v.checks["platform"] = checks.platform_hits(v.title, self.st.get("api_platform_words") or None)
         hit = self.cache.pop(pkey(old), None)
+        wmstore.move(old, v.path)                        # 查水印的结果跟着新名字走
         if hit:
             self._remember_check(v)
 

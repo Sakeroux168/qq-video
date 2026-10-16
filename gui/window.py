@@ -51,6 +51,37 @@ class CoverWorker(QThread):
         self.done.emit()
 
 
+class WmWorker(QThread):
+    """后台查水印(教育号页的「查水印」):一条几秒,3 条一起查;查过、文件没变的不再查(记在 wmstore)。"""
+    one = Signal(int)
+    log = Signal(str)
+
+    def __init__(self, videos, rows, parent=None):
+        super().__init__(parent)
+        self.videos, self.rows = videos, rows
+        self.stop = False
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from qe import vertical, watermark as WM, wmstore
+        ff = vertical.ffmpeg_path()
+
+        def one(i):
+            if self.stop:
+                return
+            v = self.videos[i]
+            try:
+                res = WM.detect(v.path, ff, vertical.probe(v.path, ff), stop=lambda: self.stop)
+            except Exception as e:
+                self.log.emit(f"「{v.title}」查水印出错:{type(e).__name__} {e}")
+                return
+            if not self.stop:
+                v.wm = wmstore.put(v.path, res)
+                self.one.emit(i)
+        with ThreadPoolExecutor(3) as ex:
+            list(ex.map(one, self.rows))
+
+
 class BatchWorker(QThread):
     log = Signal(str)
     one = Signal(object, bool, str)
@@ -224,7 +255,12 @@ class MainWindow(QMainWindow):
         self.b_preview.clicked.connect(lambda: self.preview_cover())
         self.b_move = QPushButton("这天发完,挪走…")
         self.b_move.clicked.connect(self.move_day)
-        for b in (self.b_go, self.b_stop, self.b_sent, self.b_drop):
+        self.b_wm = QPushButton("查水印")
+        self.b_wm.setToolTip("勾上的员工的视频,查一遍有没有别的平台的水印 / 广告图标(B站、抖音、快手、得物、转转 …)。\n"
+                             "查到的标黄、不摆;鼠标放在状态上看截图,不是水印就右键「没水印,能摆」。查过的记着,不再查。")
+        self.b_wm.clicked.connect(self.run_wm)
+        self.wm_worker = None
+        for b in (self.b_wm, self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addWidget(self.k_auto)
         bar.addStretch(1)
@@ -426,6 +462,9 @@ class MainWindow(QMainWindow):
 
     def _load_videos(self):
         date = self.c_date.currentData() or ""
+        if getattr(self, "wm_worker", None) and self.wm_worker.isRunning():   # 列表要换了:查水印停下(行号会对不上)
+            self.wm_worker.stop = True
+            self.wm_worker.wait(15000)
         self.videos = []
         scan = getattr(self, "_scan", {})
         for acc, d, emp in self.checked_dirs():
@@ -433,6 +472,9 @@ class MainWindow(QMainWindow):
                 scan[d] = F.scan_account(d, acc, date)
                 self._mark_skips(scan[d])
             self.videos += [copy.deepcopy(v) for v in scan[d] if v.employee == emp]      # 拷一份:和以前每次新读一样
+        from qe import wmstore
+        for v in self.videos:                          # 查过水印的(记在硬盘上)
+            v.wm = wmstore.get(v.path)
         self.table.setRowCount(len(self.videos))
         for i, v in enumerate(self.videos):
             self._fill_row(i)
@@ -455,12 +497,20 @@ class MainWindow(QMainWindow):
         note = "" if stt else self.row_note.get(v.path, "")
         cov = v.cover_why if (v.cover_kind or v.warn) else "认人中…"
         skip = "" if stt or note else v.skip               # 不摆的(同号同名 / 0 字节 / 发过同名的)写清楚为什么
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt or note or (f"不发:{skip}" if skip else "没发")]):
+        from qe import checks, wmstore
+        wmb = not (stt or note or skip) and wmstore.blocks(v.wm)       # 查到水印、人还没说没问题:不摆
+        wtxt = f"有水印:{checks.wm_text(v.wm)}" if wmb else ""
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt or note or (f"不发:{skip}" if skip else wtxt or "没发")]):
             it = QTableWidgetItem(t)
             if c == 4 and (note or skip):
                 it.setToolTip(note or skip)
-            if c == 4 and skip:
+            if c == 4 and (skip or wmb):
                 it.setBackground(YELLOW)
+            if c == 4 and wmb:
+                shot = (v.wm or {}).get("shot") or ""
+                from PySide6.QtCore import QUrl
+                it.setToolTip(f"<b>{checks.wm_text(v.wm)}</b>" + (f"<br><img src='{QUrl.fromLocalFile(shot).toString()}' width='300'>"
+                              if shot and os.path.isfile(shot) else "") + "<br>不是水印:右键「没水印,能摆」")
             if stt == "已发":
                 it.setBackground(GREEN)
             elif stt == "摆好":
@@ -529,7 +579,66 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("预览 / 调封面…", lambda: self.preview_cover(row))
         m.addAction("标成已发(我手动发了)", self.mark_manual)
+        wm = self.videos[row].wm if row < len(self.videos) else None
+        if wm and wm.get("hits"):
+            m.addSeparator()
+            if wm.get("shot"):
+                m.addAction("看水印截图", lambda: os.startfile(wm["shot"]) if os.path.isfile(wm["shot"]) else None)
+            if wm.get("ok"):
+                m.addAction("其实有水印(先不摆)", lambda: self.set_wm_ok(False))
+            else:
+                m.addAction("没水印 / 不用管,能摆", lambda: self.set_wm_ok(True))
         m.exec(self.table.viewport().mapToGlobal(pos))
+
+    # ---------- 查水印 ----------
+    def run_wm(self):
+        """查勾上的员工的视频(没发的)有没有水印。查过、文件没变的直接用上次的。"""
+        if self.wm_worker and self.wm_worker.isRunning():
+            self.wm_worker.stop = True
+            self.say("正在停查水印…(手上的几条查完就停,查完的记着)")
+            return
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "查水印", "正在摆,摆完再查。")
+            return
+        rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path) and v.wm is None and not v.skip]
+        if not self.videos:
+            QMessageBox.information(self, "查水印", "先在左边勾上员工。")
+            return
+        if not rows:
+            n = sum(1 for v in self.videos if v.wm and v.wm.get("hits") and not v.wm.get("ok"))
+            QMessageBox.information(self, "查水印", "勾上的都查过了" + (f",有 {n} 条有水印(标黄的)。" if n else ",没查到水印。"))
+            return
+        self.wm_worker = WmWorker(self.videos, rows, self)
+        self._wm_left = len(rows)
+        self.wm_worker.one.connect(self._wm_one)
+        self.wm_worker.log.connect(self.say)
+        self.wm_worker.finished.connect(self._wm_done)
+        self.b_wm.setText("停查水印")
+        self.say(f"查水印:{len(rows)} 条(一条几秒,3 条一起查;再点一下按钮就停)")
+        self.wm_worker.start()
+
+    def _wm_one(self, i: int):
+        self._wm_left -= 1
+        self._fill_row(i)
+        self.b_wm.setText(f"停查水印(还剩 {self._wm_left})")
+
+    def _wm_done(self):
+        from qe import wmstore
+        self.b_wm.setText("查水印")
+        n = sum(1 for v in self.videos if wmstore.blocks(v.wm))
+        self.say(f"查水印完了:{n} 条有水印(标黄,不摆;鼠标放在状态上看截图,不是水印就右键「没水印,能摆」)" if n else "查水印完了:没查到水印")
+
+    def set_wm_ok(self, ok: bool):
+        from qe import wmstore
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
+        rows = [r for r in rows if r < len(self.videos) and (self.videos[r].wm or {}).get("hits")]
+        for r in rows:
+            v = self.videos[r]
+            wmstore.set_ok(v.path, ok)
+            v.wm["ok"] = ok
+            self._fill_row(r)
+        if rows:
+            self.say(f"{len(rows)} 条标成" + ("「没水印,能摆」" if ok else "「有水印,先不摆」"))
 
     def _tree_menu(self, pos):
         it = self.tree.itemAt(pos)
@@ -604,8 +713,10 @@ class MainWindow(QMainWindow):
 
     def next_batch(self) -> tuple[str, list]:
         """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
+        from qe import wmstore
         todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and v.cover
-                and not v.skip]                       # 同号同名 / 0 字节 / 发过同名的不摆(表里写着为什么)
+                and not v.skip                        # 同号同名 / 0 字节 / 发过同名的不摆(表里写着为什么)
+                and not wmstore.blocks(v.wm)]         # 查到水印、人还没说没问题的不摆
         if not todo:
             return "", []
         acc = todo[0].account
@@ -619,8 +730,12 @@ class MainWindow(QMainWindow):
     def _nothing_left(self) -> str:
         """没有能摆的了:说清楚是真发完了,还是剩下的缺无字封面(png)。"""
         nocover = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and not v.cover]
+        from qe import wmstore
         skip = [v for v in self.videos if not self.rec.status_of(v.path) and v.skip]
         tail = (f"\n\n另有 {len(skip)} 条不发:「{skip[0].title[:24]}」{skip[0].skip}" + ("等" if len(skip) > 1 else "")) if skip else ""
+        wmv = [v for v in self.videos if not self.rec.status_of(v.path) and not v.skip and wmstore.blocks(v.wm)]
+        if wmv:
+            tail += f"\n\n有 {len(wmv)} 条查到水印没摆(标黄的),比如「{wmv[0].title[:24]}」;不是水印就右键「没水印,能摆」。"
         if nocover:
             return (f"能摆的都摆完了,但还有 {len(nocover)} 条没有无字封面(png),没摆,比如「{nocover[0].title[:24]}」。\n\n"
                     "让员工补上 png 以后点「刷新」再摆。" + tail)
@@ -633,6 +748,9 @@ class MainWindow(QMainWindow):
             self.say("已勾上:摆好后软件自己点「全部发布」,接着摆下一批(有问题会停下来叫你)")
 
     def start_batch(self, chained: bool = False):
+        if self.wm_worker and self.wm_worker.isRunning():
+            QMessageBox.information(self, "企鹅号发布助手", "还在查水印,查完再摆(或者点「停查水印」)。")
+            return
         if self.cover_worker and self.cover_worker.isRunning():
             QMessageBox.information(self, "企鹅号发布助手", "封面还在认人,等几秒再点。")
             return
@@ -1082,6 +1200,9 @@ class MainWindow(QMainWindow):
         self._load_dates()
 
     def closeEvent(self, e):
+        if self.wm_worker and self.wm_worker.isRunning():
+            self.wm_worker.stop = True
+            self.wm_worker.wait(15000)
         if self.cover_worker and self.cover_worker.isRunning():
             self.cover_worker.stop = True
             self.cover_worker.wait(10000)

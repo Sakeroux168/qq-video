@@ -2,6 +2,7 @@
 1. 是不是竖屏 —— 横的标出来,能一键转竖(vertical.py);
 2. 标题里有没有别的平台的名字 —— 只标出来,用户自己改或删;
 3. 话题是不是只有一个 —— 多的用 AI 挑一个留下(topic.py,和 ainame 一样)。
+高级检查(用户 2026-10-16)再加:4. 有没有别的平台的水印 / 广告图标(watermark.py,结果记在 wmstore)。
 """
 from . import topic, vertical
 
@@ -63,7 +64,22 @@ def problems(v) -> list[str]:
         out.append(f"{len(c['tags'])} 个话题")
     elif topic.bad_format(v.title):                  # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
         out.append(format_kind(v.title))
+    if wm_blocks(c.get("wm")):                       # 高级检查查到水印、人还没说「没水印」
+        out.append(wm_text(c["wm"]))
     return out
+
+
+def wm_blocks(wm) -> bool:
+    return bool(wm and wm.get("hits") and not wm.get("ok"))
+
+
+def wm_text(wm) -> str:
+    """「B站水印(右上角)」这种;查水印的模块改了也不影响这里。"""
+    try:
+        from .watermark import label_of
+        return label_of(wm) or "疑似水印"
+    except Exception:
+        return "疑似水印"
 
 
 def format_kind(title: str) -> str:

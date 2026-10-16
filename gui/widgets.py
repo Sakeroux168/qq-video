@@ -1,8 +1,42 @@
 """界面小部件:大数字卡片、左边导航栏(用户 2026-10-15 选的「抖音创作者中心」那种:白卡片、大数字、红粉色强调)。
 颜色都在 gui/theme.py 的 QSS 里按 objectName 配(#stat / #statVal / #sidebar / #nav …),这里只管摆。"""
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout,
                                QWidget)
+
+
+class MenuButton(QPushButton):
+    """带下拉的按钮:鼠标挪上去停一下就弹出列表(用户 2026-10-16:「鼠标挪到检查 弹出列表」),点也弹。
+    b = MenuButton("检查"); b.add("普通检查", fn, "说明")。"""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.menu_ = QMenu(self)
+        self.menu_.setToolTipsVisible(True)
+        self.setMenu(self.menu_)
+        self._t = QTimer(self)
+        self._t.setSingleShot(True)
+        self._t.setInterval(300)                         # 停 0.3 秒再弹,鼠标只是路过不弹
+        self._t.timeout.connect(self._pop)
+
+    def add(self, text: str, fn, tip: str = ""):
+        a = self.menu_.addAction(text, fn)
+        if tip:
+            a.setToolTip(tip)
+        return a
+
+    def enterEvent(self, e):
+        if self.isEnabled():
+            self._t.start()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._t.stop()
+        super().leaveEvent(e)
+
+    def _pop(self):
+        if self.isEnabled() and self.underMouse() and not self.menu_.isVisible():
+            self.showMenu()
 
 
 class StatCards(QWidget):
