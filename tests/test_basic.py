@@ -328,14 +328,18 @@ def test_api(tmp: Path):
             self.calls.append((path, kw.get("json")))
             assert kw["params"]["access_token"] == "T"
             if path == "/video/clientuploadready":
+                self.size = kw["json"]["size"]
                 return R({"code": "0", "data": {"transaction_id": "U1"}})
-            if path == "/video/clientuploadtrunk":       # 和真接口一样:end_offset = 收到的最后一个字节(含),文件名只能英文
+            if path == "/video/clientuploadtrunk":       # 和真接口一样:回下一片的起止;最后一片回 文件大小-1;文件名只能英文
                 off = int(kw["data"]["start_offset"])
                 name, chunk, _ct = kw["files"]["mediatrunk"]
                 assert name.isascii(), "文件名得是英文"
                 assert off == sum(len(c) for c in self.trunks), "多传 / 少传了"
                 self.trunks.append(chunk)
-                return R({"code": "0", "data": {"start_offset": off + len(chunk) - 1, "end_offset": off + len(chunk) - 1}})
+                nxt = off + len(chunk)
+                if nxt >= self.size:              # 最后一片:回 start = end = 文件大小 - 1(真接口)
+                    return R({"code": "0", "data": {"start_offset": self.size - 1, "end_offset": self.size - 1}})
+                return R({"code": "0", "data": {"start_offset": nxt, "end_offset": min(self.size, nxt + len(chunk)) - 1}})
             if path == "/articlev2/clientpubvideo":
                 return R({"code": "0", "data": {"transaction_id": "P1", "article_id": "A9"}})
             if path == "/transaction/infoclient":
@@ -362,7 +366,7 @@ def test_api(tmp: Path):
         omapi.Client("cid", "sec1", session=s2).upload(str(big))
     finally:
         omapi.TRUNK = real_trunk
-    check(b"".join(s2.trunks) == bytes(range(10)) and len(s2.trunks) == 4, "分片上传:一片接一片,传完不多传(end_offset 含最后一个字节)")
+    check(b"".join(s2.trunks) == bytes(range(10)) and len(s2.trunks) == 4, "分片上传:多片按平台说的下一片位置接着传,不跳片、传完不多传")
     check(r == {"vid": "V7", "article_id": "A9", "transaction_id": "P1", "status": "成功", "cover": ""}, "发布流程:传 → vid → 发 → 等成功")
     check(pub == {"title": v.title, "tags": "", "vid": "V7", "cat": 1604, "desc": v.title, "aigc_userstatement": "2",
                   "ext_info": "{\"self_declare\": 0}"},

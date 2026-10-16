@@ -142,12 +142,21 @@ class Client:
                                data={"transaction_id": tid, "start_offset": str(off)},
                                # 文件名只用英文:中文名平台报 invalid_file_upload(40023);旧软件也是传临时文件「qepm-chunk-*」
                                files={"mediatrunk": (f"qepm-chunk-{off}", chunk, "application/octet-stream")})
-                # end_offset 是收到的最后一个字节的位置(从 0 数,含它):6498881 字节的文件传完回 6498880。
-                # 下一片从 end_offset + 1 开始;到文件大小就传完了(2026-10-15 真接口试出来的,按「= 文件大小」算会多传一次报 40023)
-                nxt = int(d.get("end_offset") or 0) + 1
-                if nxt <= off:
-                    raise ApiError("上传视频:平台没收下这一片")
-                off = min(nxt, size)
+                # 平台回的是「下一片」的起止位置:start_offset = 下一片从哪开始,end_offset = 下一片到哪(含)。
+                # 最后一片传完回 start = end = 文件大小 - 1(6498881 字节的文件回 6498880,2026-10-15 真接口)。
+                # 2026-10-16 修:以前拿 end_offset + 1 当下一片开头,单片(<100MB)碰巧对,多片会跳过一整片 → 40023。
+                # 现在:我们这片传到文件末尾就算传完(不再多传);没到末尾就从平台说的 start_offset 接着传。
+                sent_to = off + len(chunk)
+                if sent_to >= size:
+                    off = size
+                else:
+                    try:
+                        nxt = int(d["start_offset"])
+                    except (KeyError, TypeError, ValueError):
+                        nxt = sent_to
+                    if nxt <= off or nxt > size:
+                        raise ApiError("上传视频:平台没收下这一片")
+                    off = nxt
                 if on_progress:
                     on_progress(off, size)
         return tid
