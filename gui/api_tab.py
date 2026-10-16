@@ -1306,7 +1306,7 @@ class ApiTab(QWidget):
                     rid["id"] = got
                 try:
                     r = cl.send(v.path, v.title, cat, stop=stopped, before_publish=begin,
-                                on_progress=lambda o, s, i=i: emit(i, f"上传 {o * 100 // max(1, s)}%"),
+                                on_progress=lambda o, s, i=i: emit(i, f"上传 {o * 100 // max(1, s)}%({o >> 20}/{s >> 20}MB)"),
                                 log=lambda m, i=i: emit(i, m + "…"))
                 except Stopped:
                     emit(i, "停下了,没发")

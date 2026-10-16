@@ -20,7 +20,9 @@ import requests
 
 AUTH = "https://auth.om.qq.com/omoauth2/accesstoken"
 API = "https://api.om.qq.com"
-TRUNK = 100 * 1024 * 1024        # 一片 100MB(上限 500MB,小一点出错重来快)
+TRUNK = 10 * 1024 * 1024         # 一片 10MB(上限 500MB)。2026-10-16 从 100MB 改小:这台电脑上传只有 0.5MB/s 左右,
+                                 # 100MB 一片要传三分钟进度才跳一次,用户以为卡死了;小片进度勤、断网只重传这一片
+TRUNK_TRIES = 3                  # 一片因为网络没传上(没收到平台回话),原地重传几次
 
 
 class ApiError(Exception):
@@ -138,10 +140,18 @@ class Client:
                     raise Stopped("停下了")
                 f.seek(off)
                 chunk = f.read(TRUNK)
-                d = self._call("POST", "/video/clientuploadtrunk", "上传视频", timeout=600,
-                               data={"transaction_id": tid, "start_offset": str(off)},
-                               # 文件名只用英文:中文名平台报 invalid_file_upload(40023);旧软件也是传临时文件「qepm-chunk-*」
-                               files={"mediatrunk": (f"qepm-chunk-{off}", chunk, "application/octet-stream")})
+                for k in range(TRUNK_TRIES):
+                    try:
+                        d = self._call("POST", "/video/clientuploadtrunk", "上传视频", timeout=300,
+                                       data={"transaction_id": tid, "start_offset": str(off)},
+                                       # 文件名只用英文:中文名平台报 invalid_file_upload(40023);旧软件也是传临时文件「qepm-chunk-*」
+                                       files={"mediatrunk": (f"qepm-chunk-{off}", chunk, "application/octet-stream")})
+                        break
+                    except ApiError as e:
+                        # 平台回了错误码 = 真不收,别重试;网络断了 / 超时(没错误码)= 这一片原地再传(只是上传,不是发布,重传安全)
+                        if e.code or k == TRUNK_TRIES - 1 or (stop and stop()):
+                            raise
+                        time.sleep(5)
                 # 平台回的是「下一片」的起止位置:start_offset = 下一片从哪开始,end_offset = 下一片到哪(含)。
                 # 最后一片传完回 start = end = 文件大小 - 1(6498881 字节的文件回 6498880,2026-10-15 真接口)。
                 # 2026-10-16 修:以前拿 end_offset + 1 当下一片开头,单片(<100MB)碰巧对,多片会跳过一整片 → 40023。

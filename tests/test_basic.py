@@ -367,6 +367,23 @@ def test_api(tmp: Path):
     finally:
         omapi.TRUNK = real_trunk
     check(b"".join(s2.trunks) == bytes(range(10)) and len(s2.trunks) == 4, "分片上传:多片按平台说的下一片位置接着传,不跳片、传完不多传")
+    class Flaky(S):                              # 第二片第一次断网:原地重传这一片,接着传完
+        def request(self, method, url, **kw):
+            if url.endswith("clientuploadtrunk") and kw["data"]["start_offset"] == "3" and not getattr(self, "boom", False):
+                self.boom = True
+                import requests as _rq
+                raise _rq.ConnectionError("断网")
+            return S.request(self, method, url, **kw)
+    s3 = Flaky()
+    omapi.TRUNK = 3
+    real_sleep = omapi.time.sleep
+    omapi.time.sleep = lambda x: None
+    try:
+        omapi.Client("cid", "sec1", session=s3).upload(str(big))
+    finally:
+        omapi.TRUNK = real_trunk
+        omapi.time.sleep = real_sleep
+    check(b"".join(s3.trunks) == bytes(range(10)) and s3.boom, "上传一片断网:原地重传这一片,不用整条重来")
     check(r == {"vid": "V7", "article_id": "A9", "transaction_id": "P1", "status": "成功", "cover": ""}, "发布流程:传 → vid → 发 → 等成功")
     check(pub == {"title": v.title, "tags": "", "vid": "V7", "cat": 1604, "desc": v.title, "aigc_userstatement": "2",
                   "ext_info": "{\"self_declare\": 0}"},
