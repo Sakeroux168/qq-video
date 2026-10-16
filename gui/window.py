@@ -114,6 +114,9 @@ class BlurWorker(QThread):
             list(ex.map(one, self.rows))
 
 
+WAIT_NOTE = "上传中(这批一起传,传完再一条条弄封面)"
+
+
 class BatchWorker(QThread):
     log = Signal(str)
     one = Signal(object, bool, str)
@@ -870,11 +873,11 @@ class MainWindow(QMainWindow):
         self.worker.one.connect(self._one_done)
         self.worker.finished_batch.connect(self._batch_done)
         self.worker.start()
-        for v in vids:                                # 这批的行先写「排队中」,摆到哪条一眼看得出
-            self.row_note[v.path] = "排队中"
+        for v in vids:                                # 这批的行先写「上传中」:罐头先把整批视频传完,再一条条弄封面
+            self.row_note[v.path] = WAIT_NOTE            # (用户:一直「排队中」以为卡住了,其实在传)
             if v in self.videos:
                 self._fill_row(self.videos.index(v))
-        self.say(f"开始给「{acc}」摆 {len(vids)} 条…")
+        self.say(f"开始给「{acc}」摆 {len(vids)} 条:先把这 {len(vids)} 条视频一起传到罐头里(网慢的话要几分钟),传完再一条条弄封面…")
         self._refresh_buttons()
 
     def stop_batch(self):
@@ -896,7 +899,7 @@ class MainWindow(QMainWindow):
 
     def _batch_done(self, res, err, pub=""):
         for v in self.batch_videos:                   # 没轮到摆的(停了 / 出错)不再写「排队中」
-            if self.row_note.get(v.path) == "排队中":
+            if self.row_note.get(v.path) == WAIT_NOTE:
                 self.row_note.pop(v.path, None)
                 if v in self.videos:
                     self._fill_row(self.videos.index(v))
