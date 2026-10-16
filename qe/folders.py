@@ -236,7 +236,7 @@ def _titleish(name: str) -> bool:
     return len(norm_name(name)) >= 12 and any(c in name for c in "，,：:！!？?、")
 
 
-ORIG_DIRS = {"横屏原片", "水印原片"}                   # 转竖屏 / 模糊水印后原片放这里(已经处理过的,不能再发一遍)
+ORIG_DIRS = {"横屏原片", "水印原片", "广告原片"}                   # 转竖屏 / 模糊水印后原片放这里(已经处理过的,不能再发一遍)
 
 
 def _skip_dir(name: str, path: str = "") -> bool:

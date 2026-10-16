@@ -1676,6 +1676,77 @@ def test_blur(tmp: Path):
     check(w["blurred"] and not wmstore.blocks(w), "糊过的记下来,不再拦")
 
 
+def test_ads(tmp: Path):
+    print("[查口播广告 / 剪掉广告:挨着的广告句连成一段、只拦很像广告的、剪完变短、原片进「广告原片」]")
+    import subprocess
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from qe import ads, apiacc, asr, checks, cut, vertical, wmstore
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    kw = ads.split_keywords(ads.DEFAULT_KEYWORDS)
+    sents = [{"start": 1, "end": 3, "text": "这把枪很好用,"}, {"start": 40, "end": 42, "text": "关注我,"},
+             {"start": 42.5, "end": 45, "text": "点击下方链接领取福利。"}, {"start": 60, "end": 61, "text": "限时活动开始了"}]
+    g = ads.groups(sents, kw)
+    check(len(g) == 1 and g[0]["start"] == 40 and g[0]["end"] == 45, "「关注我 + 点击下方链接领取」连成一段;单独一个「限时」不算")
+    check(asr.sentences(["一", "个", "，", "好", "。"], [0.1, 0.2, 0.3, 0.5, 0.6], 10) ==
+          [{"start": 10.1, "end": 10.5, "text": "一个，"}, {"start": 10.5, "end": 10.8, "text": "好。"}], "每个字的时间 → 一句一句几秒到几秒")
+    check(cut.spans_to_cut([{"start": 5, "end": 6}, {"start": 6.2, "end": 7}], 20) == [(4.7, 7.3)], "要剪的段:前后多 0.3 秒、挨着的并起来")
+    ff = vertical.ffmpeg_path()
+    if ff:
+        d = tmp / "adcut"
+        d.mkdir()
+        src = d / "广告.mp4"
+        subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x568:rate=10:duration=6",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-shortest", "-pix_fmt", "yuv420p", str(src)], check=True)
+        new, orig, gone = cut.cut(str(src), [{"start": 2, "end": 3.4}], ff)
+        dur = vertical.probe(new, ff)["dur"]
+        check(abs(gone - 2.0) < 0.05 and 3.6 < dur < 4.4 and os.path.basename(os.path.dirname(orig)) == "广告原片",
+              f"剪掉 2 秒:6 秒变 {dur:.1f} 秒,原片进「广告原片」")
+    root = tmp / "apiad" / "游戏视频" / "CSGO--CSGO战神君" / "10.15"
+    root.mkdir(parents=True)
+    for f in ("a1.mp4", "a2.mp4"):
+        (root / f).write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_ad.json")
+    st["api_roots"] = [str(tmp / "apiad" / "游戏视频")]
+    tab = T.ApiTab(st, Records(tmp / "rec_ad.sqlite"), lambda m: None)
+    tab.c_date.setCurrentText("10.15")
+    tab.load()
+    _settle(tab)
+    for v in tab.videos:
+        v.checks.update(bad_read=False, landscape=False, squarish=False, w=1080, h=1920)
+        tab._remember_check(v)
+
+    class FakeT:
+        n = 0
+
+        def transcribe(self, path, stop=None):
+            FakeT.n += 1
+            return sents if path.endswith("a1.mp4") else [{"start": 1, "end": 2, "text": "今天打一把排位。"}]
+    real_shared, real_dir = asr.shared, asr.model_dir
+    asr.shared, asr.model_dir = (lambda ff: FakeT()), (lambda: "x")
+    try:
+        tab.run_ads()
+        _settle(tab)
+        i1 = next(i for i, v in enumerate(tab.videos) if v.title == "a1")
+        i2 = next(i for i, v in enumerate(tab.videos) if v.title == "a2")
+        check(any(p.startswith("口播广告 1 处(0:40") for p in checks.problems(tab.videos[i1])) and not tab._can_send(i1)
+              and tab._can_send(i2), "查到口播广告:标「口播广告 1 处(0:40…)」不发;没广告的能发")
+        FakeT.n = 0
+        tab.load()
+        _settle(tab)
+        tab.run_ads()
+        _settle(tab)
+        check(FakeT.n == 0, "查过的(记在硬盘上)不再转文字")
+        i1 = next(i for i, v in enumerate(tab.videos) if v.title == "a1")
+        tab.set_ad_ok(i1, True)
+        check(tab._can_send(i1) and wmstore.ADS.get(tab.videos[i1].path)["ok"], "右键「不是广告,能发」:能发了")
+    finally:
+        asr.shared, asr.model_dir = real_shared, real_dir
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1969,6 +2040,7 @@ if __name__ == "__main__":
     test_api_wm(tmp)
     test_edu_wm(tmp)
     test_blur(tmp)
+    test_ads(tmp)
     test_api_cover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))

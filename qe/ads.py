@@ -45,3 +45,31 @@ def summary(hits: list[dict]) -> str:
     h = strong[0]
     sec = int(h["start"])
     return f"口播广告 {len(strong)} 处({sec // 60}:{sec % 60:02d}「{h['text'][:14]}」)"
+
+
+def groups(sents: list[dict], keywords: list[str], gap: float = 1.5) -> list[dict]:
+    """要剪 / 要拦的广告段:挨着的广告句(间隔不到 gap 秒)连成一段,段里至少有一句「很像广告」才算。
+    返回 [{"start","end","text","keywords"}](剪的时候前后再各留一点)。"""
+    hits = scan(sents, keywords)
+    out, cur = [], None
+    for h in hits:
+        if cur and h["start"] - cur["end"] <= gap:
+            cur["end"] = max(cur["end"], h["end"])
+            cur["text"] += h["text"]
+            cur["keywords"] += [k for k in h["keywords"] if k not in cur["keywords"]]
+            cur["strong"] = cur["strong"] or h["strong"]
+        else:
+            if cur:
+                out.append(cur)
+            cur = dict(h, keywords=list(h["keywords"]))
+    if cur:
+        out.append(cur)
+    return [{"start": g["start"], "end": g["end"], "text": g["text"], "keywords": g["keywords"]} for g in out if g["strong"]]
+
+
+def label(hits: list[dict]) -> str:
+    """「口播广告 2 处(0:41「点击下方链接领取…」)」"""
+    if not hits:
+        return ""
+    sec = int(hits[0]["start"])
+    return f"口播广告 {len(hits)} 处({sec // 60}:{sec % 60:02d}「{hits[0]['text'][:12]}」)"

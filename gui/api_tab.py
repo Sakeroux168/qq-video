@@ -227,12 +227,17 @@ class ApiTab(QWidget):
                          "竖屏、标题里的平台名、话题。换日期 / 刷新以后会自动做")
         self.b_check.add("高级检查(再查水印)", lambda: self.run_check(deep=True),
                          "普通检查 + 查水印 / 广告图标。普通检查过的只查水印;查过水印、文件没变的不再查")
+        self.b_check.add("查口播广告", lambda: self.run_ads(),
+                         "把视频里说的话转成文字,找「点击下方链接」「扫码」「得物」这类广告词,标出第几秒。转过的不再转")
         self.b_vert = QPushButton("转标准竖屏")
         self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n原片挪进同文件夹的「横屏原片」,不删。")
         self.b_vert.clicked.connect(lambda: self.run_vertical())
-        self.b_blur = QPushButton("模糊水印")
-        self.b_blur.setToolTip("高级检查查到水印的,把水印那块糊掉(只糊水印出现的那几段)。\n原片挪进同文件夹的「水印原片」,不删。")
-        self.b_blur.clicked.connect(lambda: self.run_blur())
+        self.b_blur = MenuButton("去水印 / 广告")
+        self.b_blur.setToolTip("查到的水印糊掉、查到的口播广告剪掉。原片都留着(「水印原片」「广告原片」),不删。")
+        self.b_blur.add("模糊水印", lambda: self.run_blur(),
+                        "高级检查查到水印的,把水印那块糊掉(只糊水印出现的那几段)。原片挪进同文件夹的「水印原片」")
+        self.b_blur.add("剪掉口播广告", lambda: self.run_cut(),
+                        "查口播广告查到的那几句剪掉(前后各多剪 0.3 秒)。原片挪进同文件夹的「广告原片」")
         self.b_topic = QPushButton("整理话题")
         self.b_topic.setToolTip("一键把话题弄对:\n· 写法不对的(结尾空格、「# 话题」「##话题」、话题前粘的 n、重复的)按固定规矩改,不用 AI;\n"
                                 "· 挂了好几个话题的,AI 挑最好搜的留一个(游戏 / 剧 / 电影 / 动漫名优先)。\n改文件名,同名封面跟着改。能撤销。")
@@ -409,13 +414,14 @@ class ApiTab(QWidget):
 
     @staticmethod
     def _attach_wm(v):
-        """查过水印的(记在硬盘上,关了再开也在)挂到 checks 上;文件变了 / 没查过就没有。"""
+        """查过水印 / 口播广告的(记在硬盘上,关了再开也在)挂到 checks 上;文件变了 / 没查过就没有。"""
         if v.checks is not None:
-            w = wmstore.get(v.path)
-            if w is not None:
-                v.checks["wm"] = w
-            else:
-                v.checks.pop("wm", None)
+            for k, store in (("wm", wmstore.WM), ("ads", wmstore.ADS)):
+                w = store.get(v.path)
+                if w is not None:
+                    v.checks[k] = w
+                else:
+                    v.checks.pop(k, None)
 
     def _remember_check(self, v):
         sig = self._sig(v.path)
@@ -586,6 +592,10 @@ class ApiTab(QWidget):
         for col, t in enumerate([v.title, res, "、".join(probs) if c else "", st]):
             it.setText(col, t)
             it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else t)
+        ad = c.get("ads") or {}
+        if ad.get("hits") and not (c.get("wm") or {}).get("hits"):     # 鼠标放上去看是哪几句
+            it.setToolTip(2, "查到的口播广告" + ("(已经剪掉了)" if ad.get("blurred") else "(你标过:不是广告)" if ad.get("ok") else "") +
+                          ":\n" + "\n".join(f"{int(x['start']) // 60}:{int(x['start']) % 60:02d}  {x['text']}" for x in ad["hits"][:8]))
         wm = c.get("wm") or {}
         if wm.get("hits") and wm.get("shot") and os.path.isfile(wm["shot"]):   # 鼠标放上去看查到水印的那一帧(红框)
             from PySide6.QtCore import QUrl
@@ -837,6 +847,17 @@ class ApiTab(QWidget):
             if sel:
                 m.addAction(f"高级检查选中的 {len(sel)} 条(再查水印)", lambda: self.run_check(sel, deep=True)).setEnabled(not busy)
                 m.addAction(f"模糊水印(选中的 {len(sel)} 条)", lambda: self.run_blur(sel)).setEnabled(not busy)
+                m.addAction(f"查口播广告(选中的 {len(sel)} 条)", lambda: self.run_ads(sel)).setEnabled(not busy)
+                m.addAction(f"剪掉口播广告(选中的 {len(sel)} 条)", lambda: self.run_cut(sel)).setEnabled(not busy)
+            ad = (self.videos[i].checks or {}).get("ads") if i != -1 else None
+            if ad and ad.get("hits") and not self._sent(i):
+                m.addSeparator()
+                if ad.get("blurred"):
+                    m.addAction("口播广告已经剪掉了(原片在「广告原片」里)").setEnabled(False)
+                elif ad.get("ok"):
+                    m.addAction("其实是广告(先不发)", lambda: self.set_ad_ok(i, False)).setEnabled(not busy)
+                else:
+                    m.addAction("不是广告,这条能发", lambda: self.set_ad_ok(i, True)).setEnabled(not busy)
             wm = (self.videos[i].checks or {}).get("wm") if i != -1 else None
             if wm and wm.get("hits") and not self._sent(i):
                 m.addSeparator()
@@ -1144,6 +1165,116 @@ class ApiTab(QWidget):
             return "模糊水印做完了(原片在各自文件夹的「水印原片」里)"
         self._start(fn, f"模糊水印:{len(rows)} 条")
 
+    def run_ads(self, only: list[int] | None = None):
+        """查口播广告:转文字(本地模型,转过的不再转)→ 找广告词。查到的标「口播广告 N 处」不发。"""
+        if self.busy():
+            return
+        from qe import asr
+        if not asr.model_dir():
+            QMessageBox.information(self, "查口播广告", "这台电脑上没有语音识别模型(ainame 的 sense-voice),查不了。")
+            return
+        rows = [i for i in self.target_rows(only) if not self._sent(i)]
+        if not rows:
+            return
+        vs = self.videos
+        ff = vertical.ffmpeg_path()
+        words = self.st.get("api_platform_words") or None
+        from qe import ads
+        kw = ads.split_keywords(self.st.get("ad_keywords") or ads.DEFAULT_KEYWORDS)
+
+        def fn(emit, stopped):
+            T = asr.shared(ff)
+            n = [0]
+            for i in rows:
+                if stopped():
+                    return "查口播广告停下了(查完的记着)"
+                v = vs[i]
+                if not v.checks:
+                    checks.check_one(v, words, ff)
+                    self._attach_wm(v)
+                old = wmstore.ADS.get(v.path)
+                if old is None:
+                    emit(i, "听广告中…")
+                    try:
+                        sents = T.transcribe(v.path, stop=stopped)
+                    except Exception as e:
+                        emit(i, CLEAR)
+                        emit(-1, f"「{v.title}」查口播广告出错:{e}")
+                        continue
+                    if stopped():
+                        emit(i, CLEAR)
+                        return "查口播广告停下了(查完的记着)"
+                    old = wmstore.ADS.put(v.path, {"hits": ads.groups(sents, kw)})
+                v.checks["ads"] = old
+                self._remember_check(v)
+                emit(i, CLEAR)
+                n[0] += 1
+                emit(PROGRESS, f"查口播广告 {n[0]}/{len(rows)}…")
+            bad = sum(1 for i in rows if checks.wm_blocks(vs[i].checks.get("ads")))
+            return (f"查口播广告完了:{len(rows)} 条,有广告 {bad}(鼠标放在「要处理的」上看是哪几句;"
+                    "要剪就点「去水印 / 广告 → 剪掉口播广告」,不是广告就右键「不是广告,能发」)")
+        self._start(fn, f"查口播广告:{self._who(rows)}(一条几秒,转过的不再转)")
+
+    def run_cut(self, only: list[int] | None = None):
+        """把查到的口播广告那几句剪掉。原片挪进「广告原片」。"""
+        if self.busy():
+            return
+        from qe import ads, cut
+        rows = [i for i in self.target_rows(only) if checks.wm_blocks((self.videos[i].checks or {}).get("ads"))
+                and not self._sent(i)]
+        if not rows:
+            QMessageBox.information(self, "剪掉口播广告", "这些里没有查到口播广告的(还没查的先点「检查 → 查口播广告」)。")
+            return
+        lines = []
+        for i in rows[:6]:
+            h = self.videos[i].checks["ads"]["hits"]
+            lines.append(f"· {self.videos[i].title[:20]}:" + ";".join(f"{int(x['start']) // 60}:{int(x['start']) % 60:02d}「{x['text'][:14]}」"
+                                                                       for x in h[:2]))
+        if not ask(self, "剪掉口播广告", f"{self._who(rows)}:把这些广告句剪掉(前后各多剪 0.3 秒)?\n\n" + "\n".join(lines) +
+                   ("\n…" if len(rows) > 6 else "") + "\n\n原片挪进同一个文件夹里的「广告原片」,不删。", "剪掉", "先不"):
+            return
+        vs = self.videos
+        ff = vertical.ffmpeg_path()
+        words = self.st.get("api_platform_words") or None
+
+        def one(i, emit, stopped):
+            v = vs[i]
+            hits = list(v.checks["ads"]["hits"])
+            emit(i, "剪广告中…")
+            try:
+                new, _orig, gone = cut.cut(v.path, hits, ff, stop=stopped)
+            except Exception as e:
+                if stopped() or str(e) == "停下了":
+                    emit(i, "停下了,没剪")
+                    return
+                emit(i, CLEAR)
+                emit(-1, f"「{v.title}」剪广告失败:{e}")
+                return
+            v.path = new
+            checks.check_one(v, words, ff)
+            v.checks["ads"] = wmstore.ADS.put(new, {"hits": hits}, ok=True, blurred=True)   # 剪过的不再拦
+            self._remember_check(v)
+            emit(i, CLEAR)
+            emit(-1, f"「{v.title}」剪掉了 {gone} 秒口播广告")
+
+        def fn(emit, stopped):
+            with ThreadPoolExecutor(2) as ex:
+                list(ex.map(lambda i: None if stopped() else one(i, emit, stopped), rows))
+            return "剪口播广告做完了(原片在各自文件夹的「广告原片」里)"
+        self._start(fn, f"剪掉口播广告:{len(rows)} 条")
+
+    def set_ad_ok(self, i: int, ok: bool):
+        rows = [r for r in (self.selected_rows() or [i]) if (self.videos[r].checks or {}).get("ads", {}).get("hits")]
+        for r in rows or [i]:
+            v = self.videos[r]
+            wmstore.ADS.set_ok(v.path, ok)
+            if v.checks and v.checks.get("ads"):
+                v.checks["ads"]["ok"] = ok
+            self._remember_check(v)
+            self._fill(r)
+        self.say(f"{len(rows) or 1} 条标成" + ("「不是广告,能发」" if ok else "「是广告,先不发」"))
+        self._update_scope()
+
     def _sent(self, i: int) -> bool:
         """已发 / 结果不明:不能再发、不能再改名(改名会让防重发认不出来)。"""
         st = self.state.get(i, "")
@@ -1163,7 +1294,8 @@ class ApiTab(QWidget):
             v.checks["tags"] = topic.split_topics(v.title)["tags"]
             v.checks["platform"] = checks.platform_hits(v.title, self.st.get("api_platform_words") or None)
         hit = self.cache.pop(pkey(old), None)
-        wmstore.move(old, v.path)                        # 查水印的结果跟着新名字走
+        wmstore.move(old, v.path)                        # 查水印 / 口播广告的结果跟着新名字走
+        wmstore.ADS.move(old, v.path)
         if hit:
             self._remember_check(v)
 

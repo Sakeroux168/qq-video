@@ -105,10 +105,14 @@ def blur(path: str, boxes: list[dict], ffmpeg: str = "", stop=None) -> tuple[str
 
 
 def _swap(src: Path, tmp: Path) -> tuple[str, str]:
-    """原片挪进「水印原片」,新的放回原名(.mp4)。新的放不回去就把原片挪回来。"""
-    odir = src.parent / ORIG_DIR
+    return _swap_into(src, tmp, ORIG_DIR)
+
+
+def _swap_into(src: Path, tmp: Path, orig_dir: str) -> tuple[str, str]:
+    """原片挪进 orig_dir(「水印原片」「广告原片」),新的放回原名(.mp4)。新的放不回去就把原片挪回来。"""
+    odir = src.parent / orig_dir
     if odir.exists() and not odir.is_dir():
-        raise RuntimeError(f"模糊水印失败:文件夹里有个叫「{ORIG_DIR}」的文件挡着,原片没地方放")
+        raise RuntimeError(f"文件夹里有个叫「{orig_dir}」的文件挡着,原片没地方放")
     odir.mkdir(exist_ok=True)
     orig = odir / src.name
     k = 2

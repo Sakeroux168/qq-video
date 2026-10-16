@@ -66,6 +66,9 @@ def problems(v) -> list[str]:
         out.append(format_kind(v.title))
     if wm_blocks(c.get("wm")):                       # 高级检查查到水印、人还没说「没水印」
         out.append(wm_text(c["wm"]))
+    if wm_blocks(c.get("ads")):                      # 查到口播广告、人还没说「不是广告」
+        from .ads import label
+        out.append(label(c["ads"]["hits"]))
     return out
 
 
