@@ -1305,6 +1305,217 @@ def test_scan_any_layout(tmp: Path):
     check([g for g, _n in F.groups(list(vs.values()))][-1] == F.NO_EMP, "「没分人」排最后")
 
 
+def test_scan_tricky(tmp: Path):
+    print("[教育素材:漏不漏、多不多、分错人没有(刁钻放法)]")
+    from qe import folders as F
+    from qe.config import Settings
+    a = tmp / "tricky" / "小天地"
+
+    def mk(rel, data=b"x"):
+        (a / rel).parent.mkdir(parents=True, exist_ok=True)
+        (a / rel).write_bytes(data)
+    mk("张/a/b/c/d/e/f/g/h/深.mp4")                         # 超深
+    (a / "空的" / "更空").mkdir(parents=True)                # 空文件夹
+    _img(a / "只有封面的人" / "只有封面.png", 64, 36)          # 只有封面没视频:不成为员工
+    mk("张/大写.MP4")
+    mk("张/._苹果垃圾.mp4")                                  # 苹果电脑留下的小文件,不是视频
+    mk("张/Thumbs.db")
+    mk("张/快捷 - 快捷方式.lnk")
+    mk("张/零字节.mp4", b"")
+    mk("张/表情😀🎉.mp4")
+    mk("张/没脏话/干净的.mp4")                               # 脏话检测工具分出来的「没脏话」正是要发的
+    mk("张/1疑似脏话/脏的.mp4")                              # 这个要跳过
+    mk("张/31条（已发）/发过的.mp4")
+    mk("张/31条（已发）/发过的2.mp4")
+    mk("张/不重复/不重复的那条.mp4")
+    mk("张/孩子不要玩手机，三招管住.mp4")                     # 封面工具按标题建的文件夹,标题里有「不要」
+    _img(a / "张/封面/孩子不要玩手机，三招管住/横屏16x9.png", 320, 180)
+    mk("张/孩子已发烧三天怎么办.mp4")                         # 标题里有「已发」(已发烧),里面是封面工具的图
+    _img(a / "张/封面/孩子已发烧三天怎么办/横屏16x9.png", 320, 180)
+    mk("10.16/李/嵌套日期.mp4")                              # 号文件夹里又套了一层日期:人还是「李」
+    mk("一条放在自己标题文件夹里/一条放在自己标题文件夹里.mp4")  # <号>\<标题>\<标题>.mp4:不是人名
+    mk("下载中.mp4.part")
+    rep = []
+    vs = {v.title: v for v in F.scan_account(str(a), "家长小天地", "10.16", rep)}
+    want = ["深", "大写", "零字节", "表情😀🎉", "干净的", "不重复的那条", "孩子不要玩手机，三招管住", "孩子已发烧三天怎么办",
+            "嵌套日期", "一条放在自己标题文件夹里"]
+    check(sorted(vs) == sorted(want), f"该有的都有,._ / .lnk / Thumbs.db / .part / 疑似脏话 / 已发 的没有 -> {sorted(vs)}")
+    check(vs["深"].employee == "张" and vs["大写"].employee == "张" and vs["干净的"].employee == "张", "超深 / 大写 .MP4 / 没脏话 里的都算张的")
+    check(vs["嵌套日期"].employee == "李", f"号文件夹里套了日期:人是李 -> {vs['嵌套日期'].employee}")
+    check(vs["一条放在自己标题文件夹里"].employee == F.NO_EMP, "放在自己标题文件夹里的不把标题当人名")
+    check("只有封面的人" not in {v.employee for v in vs.values()} and "空的" not in {v.employee for v in vs.values()},
+          "只有封面 / 空文件夹不成为员工")
+    check(vs["零字节"].skip.startswith("0 字节") and not vs["深"].skip, "0 字节的列出来但写明不发")
+    check(vs["孩子不要玩手机，三招管住"].png.endswith("横屏16x9.png") and vs["孩子已发烧三天怎么办"].png.endswith("横屏16x9.png"),
+          "标题里有「不要 / 已发」的封面文件夹照样配得上")
+    skipped = {os.path.basename(p): n for k, p, n in rep if k == "跳过"}
+    check(skipped == {"1疑似脏话": 1, "31条（已发）": 2}, f"跳过的文件夹和条数报出来 -> {skipped}")
+    # 路径太长(超过 260 字):文件夹打不开 → 报出来;文件夹打得开、文件太长 → 列出来写明不发
+    P = "\\\\?\\"
+    b = tmp / "tricky2" / "小天地"
+    b.mkdir(parents=True)
+    cur = str(b / "王")
+    os.mkdir(cur)
+    while len(cur) < 190:
+        cur = os.path.join(cur, "长" * 40)
+        os.mkdir(P + cur)
+    cur = os.path.join(cur, "补" * (240 - len(cur) - 1))           # 文件夹正好 240 字:打得开,里面的文件超过 260
+    os.mkdir(P + cur)
+    open(P + os.path.join(cur, "文件名也很长" * 8 + ".mp4"), "wb").write(b"x")
+    deep = os.path.join(cur, "再深一层" * 10)
+    os.mkdir(P + deep)
+    open(P + os.path.join(deep, "更深.mp4"), "wb").write(b"x")
+    rep = []
+    vs2 = F.scan_account(str(b), "家长小天地", "10.16", rep)
+    long_ok = os.path.isdir(deep)                             # 这台电脑开了长路径就都读得到
+    check(long_ok or (len(vs2) == 1 and "路径太长" in vs2[0].skip and any(k == "打不开" for k, _p, _n in rep)),
+          f"路径太长:读不到的文件夹报「打不开」,文件写明不发 -> {[(v.title[:6], v.skip) for v in vs2]} {[k for k, _p, _n in rep]}")
+    shutil.rmtree(P + str(tmp / "tricky2"), ignore_errors=True)
+    # 同号同名只发一条(两个人各放一份);0 字节的那份不把好的挤掉;已经发了的那条优先留着
+    mk2 = lambda p, t, e, s="": F.Video(path=p, title=t, account="家长小天地", employee=e, date="10.16", skip=s)
+    x1, x2, x3 = mk2("z/同名.mp4", "同名", "卓金凤13"), mk2("y/同名.mp4", "同名 ", "卓金凤14"), mk2("w/同名.mp4", "同名", "51", "0 字节")
+    check(F.mark_dups([x2, x1, x3]) == 1 and not x1.skip and "卓金凤13" in x2.skip and x3.skip == "0 字节",
+          "同号同名:留卓金凤13 的,卓金凤14 的写明不发")
+    y1, y2 = mk2("z/同名.mp4", "同名", "卓金凤13"), mk2("y/同名.mp4", "同名", "卓金凤14")
+    F.mark_dups([y1, y2], prefer=lambda v: v is y2)
+    check(not y2.skip and y1.skip, "已经发了 / 摆了的那条优先留着")
+    other = F.Video(path="q/同名.mp4", title="同名", account="家长研习空间", employee="卓", date="10.16")
+    check(F.mark_dups([mk2("z/同名.mp4", "同名", "卓"), other]) == 0, "不同号同名不算重复")
+    # 号文件夹:套了一层同名日期、名字多了空格 / 多了字、两个号都像的、带「已发」的
+    st = Settings(tmp / "s_tricky.json")
+    r = tmp / "tricky_root"
+    for rel in ("10.15/10.15/研习空间/梁/x.mp4", "10.16/ 家长小天地/x.mp4", "10.18/小天地 /x.mp4", "10.16/研习空间2/x.mp4",
+                "10.16/研习空间和小天地/x.mp4", "10.16/小天地（已发）/x.mp4", "10.16/别的/x.mp4"):
+        p = Path(P + str(r / rel))                           # 「小天地 」末尾带空格:Windows 只有加 \\?\ 才建得出来(苹果电脑能建)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    ad = F.account_dirs(str(r), "10.15", st)
+    check(ad["家长研习空间"] == [str(r / "10.15" / "10.15" / "研习空间")] and not F.unknown_dirs(str(r), "10.15", st),
+          f"10.15\\10.15\\研习空间:里面那层照样认 -> {ad}")
+    ad = F.account_dirs(str(r), "10.16", st)
+    check(ad["家长小天地"] == [str(r / "10.16" / " 家长小天地")] and ad["家长研习空间"] == [str(r / "10.16" / "研习空间2")],
+          f"「 家长小天地」「研习空间2」认得出 -> {ad}")
+    ad = F.account_dirs(str(r), "10.18", st)
+    rep = []
+    got = F.scan_account(ad["家长小天地"][0], "家长小天地", "10.18", rep) if ad["家长小天地"] else None
+    check(got == [] and [k for k, _p, _n in rep] == ["打不开"] or got and len(got) == 1,
+          f"「小天地 」末尾带空格:认得出是哪个号,读不了就报「打不开」(不悄悄漏) -> {ad} {rep}")
+    check(sorted(F.unknown_dirs(str(r), "10.16", st)) == sorted(["研习空间和小天地", "小天地（已发）", "别的"]),
+          f"两个号都像的 / 带已发的 / 不认识的不分给号,报出来 -> {F.unknown_dirs(str(r), '10.16', st)}")
+    check(F.account_dirs(str(r), "9.9", st) == {}, "没有这天的文件夹:空")
+    shutil.rmtree(P + str(r), ignore_errors=True)
+
+
+def test_scan_cover_match(tmp: Path):
+    print("[教育素材:封面配对不能配错(A 的视频配上 B 的封面)]")
+    import time
+    from qe import folders as F
+    a = tmp / "covmatch"
+
+    def mk(rel):
+        (a / rel).parent.mkdir(parents=True, exist_ok=True)
+        (a / rel).write_bytes(b"x")
+
+    def im(rel, w=320, h=180, t=None):
+        _img(a / rel, w, h)
+        if t:
+            os.utime(a / rel, (t, t))
+
+    def scan(sub):
+        return {os.path.relpath(v.path, a / sub): v for v in F.scan_account(str(a / sub), "号", "10.16")}
+    rel = lambda p, sub: os.path.relpath(p, a / sub) if p else ""
+    # ① 两个标题去掉标点后一样(「三个方法，」「三个方法。」):各配各的;只有一张时另一条不能拿
+    mk("p1/人/三个方法，.mp4"); mk("p1/人/三个方法。.mp4"); im("p1/人/三个方法，.png"); im("p1/人/三个方法。.png")
+    vs = scan("p1")
+    check(vs[r"人\三个方法，.mp4"].png.endswith("三个方法，.png") and vs[r"人\三个方法。.mp4"].png.endswith("三个方法。.png"),
+          "只差标点的两条:各配各的 png")
+    mk("p2/人/三个方法，.mp4"); mk("p2/人/三个方法。.mp4"); im("p2/人/三个方法，.png")
+    vs = scan("p2")
+    check(vs[r"人\三个方法，.mp4"].png.endswith("三个方法，.png") and not vs[r"人\三个方法。.mp4"].png,
+          f"只差标点、只有一张:另一条不给(宁可没封面) -> {rel(vs[r'人\三个方法。.mp4'].png, 'p2')}")
+    mk("p3/三个方法，A.mp4"); mk("p3/三个方法。A.mp4"); im("p3/封面/三个方法，A/横屏16x9.png"); im("p3/封面/三个方法。A/横屏16x9.png")
+    vs = scan("p3")
+    check(rel(vs["三个方法，A.mp4"].png, "p3") == os.path.join("封面", "三个方法，A", "横屏16x9.png")
+          and rel(vs["三个方法。A.mp4"].png, "p3") == os.path.join("封面", "三个方法。A", "横屏16x9.png"), "封面工具文件夹只差标点:各配各的")
+    # ② 两个员工都有同名的:各用各的;乙没有封面不能拿甲的
+    mk("p4/甲/视频/同一个标题.mp4"); im("p4/甲/封面/同一个标题/横屏16x9.png"); mk("p4/乙/同一个标题.mp4"); im("p4/乙/封面/同一个标题/横屏16x9.png")
+    vs = scan("p4")
+    check(rel(vs[r"甲\视频\同一个标题.mp4"].png, "p4").startswith("甲") and rel(vs[r"乙\同一个标题.mp4"].png, "p4").startswith("乙"),
+          "甲、乙各有同名封面工具文件夹:各用各的(原来两条都配到乙的)")
+    mk("p5/甲/同一个标题.mp4"); im("p5/甲/同一个标题.png"); mk("p5/乙/同一个标题.mp4")
+    vs = scan("p5")
+    check(vs[r"甲\同一个标题.mp4"].png and not vs[r"乙\同一个标题.mp4"].png, "乙的视频不拿甲的同名 png")
+    mk("p5b/甲/视频/只此一条.mp4"); im("p5b/封面/只此一条/横屏16x9.png")
+    check(scan("p5b")[r"甲\视频\只此一条.mp4"].png.endswith("横屏16x9.png"), "号\\封面\\ 里的(没分人)封面,员工的视频也能用")
+    # ③ 前缀、全是表情、全角数字
+    mk("p6/三个方法.mp4"); mk("p6/三个方法帮孩子.mp4"); im("p6/三个方法帮孩子.png")
+    mk("p6/🔥🔥.mp4"); mk("p6/❤❤.mp4"); im("p6/❤❤.png")
+    mk("p6/好习惯１２招.mp4"); im("p6/封面/好习惯12招/横屏16x9.png")
+    vs = scan("p6")
+    check(not vs["三个方法.mp4"].png, "一个标题是另一个的前缀:不配")
+    check(not vs["🔥🔥.mp4"].png and vs["❤❤.mp4"].png.endswith("❤❤.png"), "全是表情的标题不互相配")
+    check(vs["好习惯１２招.mp4"].png.endswith("横屏16x9.png"), "全角数字「１２」和「12」算一样")
+    # ④ 封面工具文件夹里好几张:用最后改的;只有「修改 (1).png」没有横屏竖屏也认;带字 jpg 不当无字封面
+    now = time.time()
+    mk("p7/多版本.mp4")
+    im("p7/封面/多版本/横屏16x9.png", t=now - 300); im("p7/封面/多版本/横屏16x9 (2).png", t=now - 200); im("p7/封面/多版本/横屏16x9 (3).png", t=now - 100)
+    mk("p7/改过.mp4"); im("p7/封面/改过/横屏16x9.png", t=now - 300); im("p7/封面/改过/修改 (1).png", 400, 225, t=now - 100)
+    mk("p7/只有修改.mp4"); im("p7/封面/只有修改/修改 (1).png"); im("p7/封面/只有修改/原图.png", 180, 320); mk("p7/封面/只有修改/_thumb.jpg")
+    mk("p7/带字.mp4"); im("p7/封面/带字/原图.png"); im("p7/封面/带字/带字.jpg"); im("p7/封面/带字/竖屏9x16.png", 180, 320)
+    mk("p7/人/修改作文的三个技巧.mp4"); im("p7/人/修改作文的三个技巧.png")
+    vs = scan("p7")
+    check(vs["多版本.mp4"].png.endswith("横屏16x9 (3).png"), f"横屏跑了几遍:用最新的 -> {os.path.basename(vs['多版本.mp4'].png)}")
+    check(vs["改过.mp4"].png.endswith("修改 (1).png"), "他自己改的「修改 (1).png」比横屏晚:用修改的")
+    check(vs["只有修改.mp4"].png.endswith("修改 (1).png"), "只有「修改 (1).png + 原图.png」(没横屏竖屏)也认(真实素材梁有 9 条)")
+    check(not vs["带字.mp4"].png and vs["带字.mp4"].vpng.endswith("竖屏9x16.png"), "工具文件夹里的带字 jpg / 原图 不当无字横封面")
+    check(vs[r"人\修改作文的三个技巧.mp4"].png.endswith("修改作文的三个技巧.png"), "标题以「修改」开头的同名 png 照样配")
+
+
+def test_window_dups(tmp: Path):
+    print("[界面:同号同名只摆一条、挪过地方的发过的不再摆]")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from gui.window import MainWindow
+    from qe import folders as F
+    from qe.config import Settings
+    from qe.records import Records
+    app = QApplication.instance() or QApplication([])
+    root = tmp / "素材dup"
+    a = root / "10.17" / "小天地"
+    for rel in ("张/同名.mp4", "李/同名.mp4", "李/挪过的.mp4", "李/新的.mp4"):
+        (a / rel).parent.mkdir(parents=True, exist_ok=True)
+        (a / rel).write_bytes(b"x")
+        _img(str(a / rel)[:-4] + ".png", 640, 360)
+    rec = Records(tmp / "rdup.sqlite")
+    rec.manual_published(F.Video(path=str(tmp / "早就挪走了" / "挪过的.mp4"), title="挪过的", account="家长小天地",
+                                 employee="李", date="10.15"))
+    st = Settings(tmp / "sdup.json")
+    st["material_root"] = str(root)
+    st["api_roots"] = [str(tmp / "api_none")]
+    st["ai_key"] = "test"
+    w = MainWindow(st, rec)
+    w.c_date.setCurrentIndex(w.c_date.findData("10.17"))
+    top = next(w.tree.topLevelItem(i) for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地")
+    kids = {top.child(k).data(0, Qt.ItemDataRole.UserRole + 3): top.child(k) for k in range(top.childCount())}
+    check(kids["张"].text(1) == "1 条" and kids["李"].text(1).startswith("3 条") and "2 条不发" in kids["李"].text(1),
+          f"树:李 3 条里 2 条不发 -> 张「{kids['张'].text(1)}」李「{kids['李'].text(1)}」")
+    for it in kids.values():
+        it.setCheckState(0, Qt.CheckState.Checked)
+    t0 = time.time()
+    while (w.cover_worker and w.cover_worker.isRunning()) and time.time() - t0 < 30:
+        app.processEvents()
+        time.sleep(0.05)
+    app.processEvents()
+    _acc, vids = w.next_batch()
+    check(sorted((v.employee, v.title) for v in vids) == sorted([("张", "同名"), ("李", "新的")]),
+          f"这批只摆 张的同名 + 李的新的 -> {[(v.employee, v.title) for v in vids]}")
+    st4 = {w.table.item(i, 0).text() + "/" + w.table.item(i, 2).text(): w.table.item(i, 4).text() for i in range(w.table.rowCount())}
+    check(st4["同名/李"].startswith("不发:和「张」") and st4["挪过的/李"].startswith("不发:这个号发过同名的") and st4["新的/李"] == "没发",
+          f"表里写清楚为什么不发 -> {st4}")
+    check("另有 2 条不发" in w._nothing_left(), "没得摆时也说还有几条不发")
+    w.close()
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1369,6 +1580,80 @@ def test_window(tmp: Path):
     w.rec.mark_batch_published("X")
     acc, vids2 = w.next_batch()
     check(vids2[0].title != vids[0].title and len(vids2) == 10, "发过的下一批不再拿")
+    w.close()
+
+
+def test_window_scan(tmp: Path):
+    print("[界面:号文件夹整个翻(没分人 / 有人名)、勾选三元组、缓存、刷新、发了几条]")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from gui.window import MainWindow
+    from qe import folders as F
+    from qe.config import Settings
+    from qe.records import Records
+    app = QApplication.instance() or QApplication([])
+    root = tmp / "素材2"
+    a = root / "10.16" / "小天地"
+    for rel in ("直接放一.mp4", "直接放二.mp4", "张三/视频/张三的一.mp4"):
+        (a / rel).parent.mkdir(parents=True, exist_ok=True)
+        (a / rel).write_bytes(b"x")
+        _img(str(a / rel)[:-4] + ".png", 640, 360)
+    st = Settings(tmp / "sw2.json")
+    st["material_root"] = str(root)
+    st["api_roots"] = [str(tmp / "api_none")]
+    st["ai_key"] = "test"
+    w = MainWindow(st, Records(tmp / "rw2.sqlite"))
+
+    def wait():
+        t0 = time.time()
+        while (w.cover_worker and w.cover_worker.isRunning()) and time.time() - t0 < 30:
+            app.processEvents()
+            time.sleep(0.05)
+        app.processEvents()
+
+    def kid(emp):
+        top = next(w.tree.topLevelItem(i) for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地")
+        return next((top.child(k) for k in range(top.childCount()) if top.child(k).data(0, Qt.ItemDataRole.UserRole + 3) == emp), None)
+    w.c_date.setCurrentIndex(w.c_date.findData("10.16"))
+    zs, no = kid("张三"), kid(F.NO_EMP)
+    check(zs is not None and no is not None and zs.text(1) == "1 条" and no.text(1) == "2 条", "树:张三 1 条、没分人 2 条")
+    check(os.path.normcase(zs.data(0, Qt.ItemDataRole.UserRole)) == os.path.normcase(str(a / "张三"))
+          and os.path.normcase(no.data(0, Qt.ItemDataRole.UserRole)) == os.path.normcase(str(a)), "打开文件夹:张三 → 张三\\,没分人 → 号文件夹")
+    no.setCheckState(0, Qt.CheckState.Checked)
+    wait()
+    check(w.checked_dirs() == [("家长小天地", str(a), F.NO_EMP)], f"checked_dirs = (号, 号文件夹, 员工) -> {w.checked_dirs()}")
+    check(w.table.rowCount() == 2 and all(v.employee == F.NO_EMP for v in w.videos), "勾没分人:只列直接放的 2 条,张三的不混进来")
+    # 软件开着时员工加了一条:重新勾不重新翻(缓存),「刷新」才看得到,勾选还在
+    (a / "直接放三.mp4").write_bytes(b"x")
+    no.setCheckState(0, Qt.CheckState.Unchecked)
+    no.setCheckState(0, Qt.CheckState.Checked)
+    wait()
+    check(w.table.rowCount() == 2, "重新勾:用缓存,不翻文件夹")
+    w._load_dates()                                   # 「刷新」
+    wait()
+    no = kid(F.NO_EMP)
+    check(no.checkState(0) == Qt.CheckState.Checked and w.table.rowCount() == 3 and "1 条没无字封面" in no.text(1),
+          f"刷新:新加的看得到、勾着的还勾着 -> {w.table.rowCount()} 行,{no.text(1)}")
+    # 标成已发:树上「发了 N」跟着变
+    w.table.selectRow(0)
+    w.mark_manual()
+    check("发了 1" in kid(F.NO_EMP).text(1), f"标成已发后树上写「发了 1」-> {kid(F.NO_EMP).text(1)}")
+    check(w.rec.rows("10.16")[0]["employee"] == F.NO_EMP, "记录里员工 = 没分人")
+    # 摆之前文件被改名了(缓存里还是旧路径):挡下来,不开始摆
+    import gui.window as GW
+    real_bw, started = GW.BatchWorker, []
+    GW.BatchWorker = lambda *a_, **k_: started.append(1) or (_ for _ in ()).throw(RuntimeError("不该开始摆"))
+    try:
+        acc, vids = w.next_batch()
+        os.rename(vids[0].path, vids[0].path + ".bak")
+        w.start_batch()
+        check(not started and not w.batch_id, "这批里有文件找不到了:不开始摆,叫人刷新")
+        os.rename(vids[0].path + ".bak", vids[0].path)
+    finally:
+        GW.BatchWorker = real_bw
+    # 换日期:勾选不带过去
+    w.c_date.setCurrentIndex(0)
+    check(not w.checked_dirs() and w.table.rowCount() == 0, "换日期:什么都不勾")
     w.close()
 
 
@@ -1498,12 +1783,16 @@ if __name__ == "__main__":
     test_folders(tmp)
     test_cover_dir(tmp)
     test_scan_any_layout(tmp)
+    test_scan_tricky(tmp)
+    test_scan_cover_match(tmp)
+    test_window_dups(tmp)
     test_cover(tmp)
     test_records(tmp)
     test_failed_steps(tmp)
     test_bj_time()
     test_guard()
     test_window(tmp)
+    test_window_scan(tmp)
     test_preview(tmp)
     test_title_zone(tmp)
     test_group(tmp)

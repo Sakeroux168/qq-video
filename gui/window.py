@@ -135,9 +135,13 @@ class MainWindow(QMainWindow):
         self.c_date.setMinimumWidth(120)
         self.c_date.currentIndexChanged.connect(self._load_tree)
         top.addWidget(self.c_date)
-        b = QPushButton("刷新")
+        b = self.b_refresh = QPushButton("刷新")
+        b.setToolTip("重新读一遍素材文件夹(F5)。员工往文件夹里加了视频 / 补了封面 / 改了名,点这个才看得到;勾着的员工还勾着")
         b.clicked.connect(self._load_dates)
         top.addWidget(b)
+        from PySide6.QtGui import QKeySequence, QShortcut
+        sc = QShortcut(QKeySequence("F5"), w)              # 只在教育号这页管用(16 个号那页有它自己的 F5)
+        sc.activated.connect(lambda: self.b_refresh.isEnabled() and self._load_dates())
         top.addSpacing(16)
         self.lab_root = QLabel("")
         self.lab_root.setStyleSheet("color:#8a8b91")
@@ -310,6 +314,10 @@ class MainWindow(QMainWindow):
         if self.st.get("last_date") != date:          # 真换了日期才存(审查:原来一打开就存一次,会冲掉别处改的设置)
             self.st["last_date"] = date
             self.st.save()
+        # 同一天点「刷新」:原来勾着的员工还勾着(勾员工用的是下面翻好的缓存,员工加了视频 / 补了封面要点刷新才看得到,
+        # 刷新一下勾选全没了很烦);换了日期就都不勾
+        keep = set(self.checked_dirs()) if date and date == getattr(self, "_tree_date", None) else set()
+        self._tree_date = date
         self.tree.blockSignals(True)
         self.tree.clear()
         self._scan = {}                                # 号文件夹 → 翻出来的视频(勾员工时不再翻网络盘)
@@ -319,15 +327,17 @@ class MainWindow(QMainWindow):
                 top = QTreeWidgetItem([acc, ""])
                 top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 n_all = 0
-                for d in dirs:
+                rep: list = []
+                for d in dirs:                                 # 先把这个号的文件夹都翻完(同号同名要跨文件夹比)
                     # 每个人放法都不一样(用户:「跟他们沟通不了的」):号文件夹整个翻一遍,按人分,封面按名字配
-                    vs_all = self._scan[d] = F.scan_account(d, acc, date)
+                    self._scan[d] = F.scan_account(d, acc, date, rep)
+                self._mark_skips([v for d in dirs for v in self._scan[d]])
+                bad = self._say_report(acc, rep)
+                for d in dirs:
+                    vs_all = self._scan[d]
                     for emp, _n in F.groups(vs_all):
                         vids = [x for x in vs_all if x.employee == emp]
-                        sent = sum(1 for x in vids if self.rec.status_of(x.path) == "已发")
-                        nocov = sum(1 for x in vids if not x.png)
-                        it = QTreeWidgetItem([emp, f"{len(vids)} 条" + (f",发了 {sent}" if sent else "") +
-                                              (f",{nocov} 条没无字封面" if nocov else "")])
+                        it = QTreeWidgetItem([emp, self._emp_text(vids)])
                         it.setToolTip(0, f"{emp}({os.path.basename(d)})" +
                                       ("\n视频直接放在号文件夹里,没按人分" if emp == F.NO_EMP else ""))
                         it.setData(0, Qt.ItemDataRole.UserRole, F.emp_dir(d, emp))
@@ -335,17 +345,69 @@ class MainWindow(QMainWindow):
                         it.setData(0, Qt.ItemDataRole.UserRole + 2, d)
                         it.setData(0, Qt.ItemDataRole.UserRole + 3, emp)
                         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                        it.setCheckState(0, Qt.CheckState.Unchecked)
+                        it.setCheckState(0, Qt.CheckState.Checked if (acc, d, emp) in keep else Qt.CheckState.Unchecked)
                         top.addChild(it)
                         n_all += len(vids)
-                top.setText(1, f"{n_all} 条" if dirs else "这天没有它的文件夹")
+                top.setText(1, (f"{n_all} 条" if dirs else "这天没有它的文件夹") + (f",⚠ {bad} 个文件夹打不开" if bad else ""))
                 self.tree.addTopLevelItem(top)
                 top.setExpanded(True)
             unk = F.unknown_dirs(root, date, self.st)
             if unk:
-                self.say(f"{date} 里这些文件夹不认识是哪个号的:{'、'.join(unk)}(在「设置」里给号加上这个缩写)")
+                self.say(f"⚠ {date} 里这些文件夹没读(认不出是哪个号 / 两个号都像 / 名字带已发):{'、'.join(unk)}"
+                         "(是哪个号的,就在「设置」里给号加上这个缩写)")
         self.tree.blockSignals(False)
         self._load_videos()
+
+    def _emp_text(self, vids) -> str:
+        """员工那行第二列:几条、发了几条、几条没无字封面、几条不发(同名 / 发过 / 坏的)。"""
+        sent = sum(1 for x in vids if self.rec.status_of(x.path) == "已发")
+        nocov = sum(1 for x in vids if not x.png)
+        skip = sum(1 for x in vids if x.skip and not self.rec.status_of(x.path))
+        return f"{len(vids)} 条" + (f",发了 {sent}" if sent else "") + (f",{nocov} 条没无字封面" if nocov else "") + \
+            (f",{skip} 条不发(同名 / 发过 / 坏的)" if skip else "")
+
+    def _mark_skips(self, vs):
+        """不摆的写上原因(Video.skip):① 同一个号里同名的只留一条(已经发了 / 摆了的那条优先);
+        ② 这个号以前发过同名的 —— 发布记录是按路径认的,员工把发过的挪了地方(10.15 真有人把发过的 31 条挪进
+        「31条（已发）」),路径一变就认不出来了,所以再按 号 + 标题 对一遍。"""
+        F.mark_dups(vs, prefer=lambda v: bool(self.rec.status_of(v.path)))
+        sent = {}
+        for r in self.rec.rows():
+            if r["status"] == "已发":
+                sent.setdefault((r["account"], F.norm_name(r["title"]) or r["title"]), r)
+        for v in vs:
+            if v.skip or self.rec.status_of(v.path):
+                continue
+            r = sent.get(F.dup_key(v))
+            if r:
+                v.skip = f"这个号发过同名的({r['date']} {r['employee']}),不再发(真要发就让员工改个名)"
+
+    def _say_report(self, acc: str, rep: list) -> int:
+        """翻文件夹时跳过的 / 打不开的说给人听(不悄悄漏掉)。返回打不开的个数。"""
+        bad = 0
+        for kind, p, n in rep:
+            if kind == "跳过":
+                if n:
+                    self.say(f"「{acc}」跳过了「{os.path.basename(p)}」里的 {n} 条视频(文件夹名带 已发 / 不要 / 重复…,当成不发的)")
+            else:
+                bad += 1
+                self.say(f"⚠「{acc}」有个文件夹打不开,里面的视频没读到:{p}(路径太长 / 没权限 / 网断了?)")
+        return bad
+
+    def _update_tree_counts(self):
+        """「这批发好了」「标成已发」以后,左边员工那行的「发了 N」跟着变(不重新翻文件夹,用缓存)。"""
+        scan = getattr(self, "_scan", {})
+        self.tree.blockSignals(True)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                top = self.tree.topLevelItem(i)
+                for k in range(top.childCount()):
+                    it = top.child(k)
+                    d, emp = it.data(0, Qt.ItemDataRole.UserRole + 2), it.data(0, Qt.ItemDataRole.UserRole + 3)
+                    if d in scan:
+                        it.setText(1, self._emp_text([x for x in scan[d] if x.employee == emp]))
+        finally:
+            self.tree.blockSignals(False)
 
     def _tree_changed(self, *_a):
         self._load_videos()
@@ -369,6 +431,7 @@ class MainWindow(QMainWindow):
         for acc, d, emp in self.checked_dirs():
             if d not in scan:
                 scan[d] = F.scan_account(d, acc, date)
+                self._mark_skips(scan[d])
             self.videos += [copy.deepcopy(v) for v in scan[d] if v.employee == emp]      # 拷一份:和以前每次新读一样
         self.table.setRowCount(len(self.videos))
         for i, v in enumerate(self.videos):
@@ -391,10 +454,13 @@ class MainWindow(QMainWindow):
         stt = self.rec.status_of(v.path)
         note = "" if stt else self.row_note.get(v.path, "")
         cov = v.cover_why if (v.cover_kind or v.warn) else "认人中…"
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt or note or "没发"]):
+        skip = "" if stt or note else v.skip               # 不摆的(同号同名 / 0 字节 / 发过同名的)写清楚为什么
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt or note or (f"不发:{skip}" if skip else "没发")]):
             it = QTableWidgetItem(t)
-            if c == 4 and note:
-                it.setToolTip(note)
+            if c == 4 and (note or skip):
+                it.setToolTip(note or skip)
+            if c == 4 and skip:
+                it.setBackground(YELLOW)
             if stt == "已发":
                 it.setBackground(GREEN)
             elif stt == "摆好":
@@ -489,6 +555,7 @@ class MainWindow(QMainWindow):
         for r in rows:
             self._fill_row(r)
         self._update_sum()
+        self._update_tree_counts()
 
     def preview_cover(self, row: int | None = None):
         """封面预览:看软件选的、拖框改。"""
@@ -532,11 +599,13 @@ class MainWindow(QMainWindow):
         self.b_drop.setEnabled(not running and bool(self.batch_id))
         self.b_move.setEnabled(not running and bool(self.c_date.currentData()))
         self.c_date.setEnabled(not running)
+        self.b_refresh.setEnabled(not running)          # 摆的时候不许刷新(会换掉中间的列表)
         self.tree.setEnabled(not running)
 
     def next_batch(self) -> tuple[str, list]:
         """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
-        todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and v.cover]
+        todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and v.cover
+                and not v.skip]                       # 同号同名 / 0 字节 / 发过同名的不摆(表里写着为什么)
         if not todo:
             return "", []
         acc = todo[0].account
@@ -550,10 +619,12 @@ class MainWindow(QMainWindow):
     def _nothing_left(self) -> str:
         """没有能摆的了:说清楚是真发完了,还是剩下的缺无字封面(png)。"""
         nocover = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and not v.cover]
+        skip = [v for v in self.videos if not self.rec.status_of(v.path) and v.skip]
+        tail = (f"\n\n另有 {len(skip)} 条不发:「{skip[0].title[:24]}」{skip[0].skip}" + ("等" if len(skip) > 1 else "")) if skip else ""
         if nocover:
             return (f"能摆的都摆完了,但还有 {len(nocover)} 条没有无字封面(png),没摆,比如「{nocover[0].title[:24]}」。\n\n"
-                    "让员工补上 png 以后点「刷新」再摆。")
-        return "勾上的员工都发完了(或者都摆好了等你确认)。"
+                    "让员工补上 png 以后点「刷新」再摆。" + tail)
+        return "勾上的员工都发完了(或者都摆好了等你确认)。" + tail
 
     def _auto_toggled(self, on: bool):
         self.st["auto_publish"] = bool(on)
@@ -569,6 +640,13 @@ class MainWindow(QMainWindow):
         if not vids:
             QMessageBox.information(self, "企鹅号发布助手", self._nothing_left())
             return
+        # 列表是打开 / 刷新时翻的(缓存):员工后来改了名 / 挪走了,罐头里会传个不存在的文件 → 先挡下来叫人刷新
+        gone = [v for v in vids if not os.path.isfile(v.path)]
+        if gone:
+            QMessageBox.information(self, "企鹅号发布助手",
+                                    f"这批里有 {len(gone)} 条视频文件找不到了(员工改名 / 挪走了?),比如「{gone[0].title[:24]}」。\n\n"
+                                    "点「刷新」重新读一遍文件夹再摆。")
+            return
         warn = [v for v in vids if v.warn]
         # 没有无字封面(png)的不摆,跳过(审查:原来一条没 png 就挡住这个号后面所有的)
         nocover = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and not v.cover]
@@ -576,6 +654,9 @@ class MainWindow(QMainWindow):
         if nocover:
             msg += (f"\n\n另有 {len(nocover)} 条没有无字封面(png)先跳过,比如「{nocover[0].title[:24]}」"
                     "(jpg 有字不能用,让员工补上 png)。")
+        skip = [v for v in self.videos if not self.rec.status_of(v.path) and v.skip]
+        if skip:
+            msg += f"\n\n另有 {len(skip)} 条不发(同号同名 / 坏文件 / 发过同名的),比如「{skip[0].title[:24]}」:{skip[0].skip}。"
         if warn:
             msg += f"\n\n其中 {len(warn)} 条封面标黄,建议先点「预览封面」看一眼。"
         auto = self.k_auto.isChecked()
@@ -703,6 +784,7 @@ class MainWindow(QMainWindow):
         for i in range(len(self.videos)):
             self._fill_row(i)
         self._update_sum()
+        self._update_tree_counts()
         self._refresh_buttons()
 
     # ---------------- 挪走一整天 ----------------
