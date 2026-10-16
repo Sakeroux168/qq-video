@@ -209,6 +209,15 @@ class Records:
         with _LOCK:
             return [dict(r) for r in self.conn.execute(q + " ORDER BY id", a)]
 
+    def sent_on(self, day: str) -> dict[str, int]:
+        """这天(发布时间的北京日期 2026-10-16)每个号发了几条:按「哪天发出去的」算,同一个视频只算一次。"""
+        self._fill()
+        with _LOCK:
+            rows = self.conn.execute(
+                "SELECT account, COUNT(DISTINCT pkey) AS n FROM posts WHERE status='已发' AND published_at LIKE ? GROUP BY account",
+                (f"{day}%",)).fetchall()
+        return {r["account"]: int(r["n"]) for r in rows}
+
     def summary(self, date: str = "") -> list[dict]:
         """按 日期 / 号 / 员工 数:已发几条、摆好还没发几条、没发成几条(后来发成了的不算)、结果不明几条。"""
         self._fill()

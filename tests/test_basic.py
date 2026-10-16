@@ -1168,6 +1168,46 @@ def test_bughunt(tmp: Path):
     check(T._num("5秒", 1) == 5 and T._num(None, 3) == 3, "设置里数字写坏了:有兜底")
 
 
+def test_daily_plan(tmp: Path):
+    print("[每日规定条数 / 实际(按发出去的日期)/ 复制到企业微信表]")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from qe import plan
+    from qe.config import Settings
+    from qe.records import Records
+    from gui.daily_tab import DailyTab
+    st = Settings(tmp / "plan_st.json")
+    check(plan.quota_of(st, "和平精英上分君") == 80 and plan.quota_of(st, "国漫解说馆z") == 50 and plan.quota_of(st, "家长小天地") == 0,
+          "每个号每天规定条数(教育不分号)")
+    check([plan.cat_total(g) for g in plan.plan(st)] == [380, 106, 200], "游戏 380 / 教育 106 / 动漫 200")
+    rec = Records(tmp / "plan.sqlite")
+
+    class V:
+        date, employee, cover_kind = "10.15", "接口", ""
+
+        def __init__(self, acc, title):
+            self.account, self.title, self.path = acc, title, str(tmp / acc / f"{title}.mp4")
+    day = plan.today()
+    for k in range(3):
+        rec.api_result(V("PUBG突围君", f"p{k}"), "已发")
+    rec.api_result(V("国漫趣谈", "g1"), "已发")
+    rec.api_result(V("国漫趣谈", "g2"), "没发成")
+    rec.manual_published(type("E", (), {"date": "10.14", "account": "家长小天地", "employee": "张三", "title": "e1",
+                                        "path": str(tmp / "e1.mp4"), "cover_kind": ""}))
+    s1 = plan.summary(rec, st, day)
+    check(s1["rows"] == [("游戏总发布量", 380, 3), ("教育总发布量", 106, 1), ("动漫总发布量", 200, 1)] and s1["total"] == (686, 5),
+          f"按发出去的日期数(素材文件夹 10.14 / 10.15 都算今天发的)-> {s1['rows']}")
+    tsv = plan.as_tsv(s1).splitlines()
+    check(tsv[0].split("\t") == [plan.short_day(day), "发布企鹅号视频", "游戏总发布量", "380", "3"] and tsv[3].split("\t")[2:] == ["总发布量", "686", "5"],
+          "复制的文字:日期 / 工作内容 / 品类 / 规定 / 实际,和企业微信表一样")
+    short = plan.short_list(s1)
+    check(short[0][0] == "和平精英上分君" and all(n != "家长小天地" for n, _q, _a in short), "没达标的号:差得多的排前面;教育不算")
+    dt = DailyTab(st, rec)
+    check("3 / 380" in dt.cards.vals["游戏"].text() and dt.t.rowCount() == 18, "每日汇总页:卡片和每个号的表")
+    dt.copy_day()
+    check(QApplication.clipboard().text().startswith(plan.short_day(day)), "点「复制」:剪贴板里就是那四行")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1377,6 +1417,7 @@ if __name__ == "__main__":
     test_squarish(tmp)
     test_audit_r3(tmp)
     test_bughunt(tmp)
+    test_daily_plan(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

@@ -274,10 +274,13 @@ class MainWindow(QMainWindow):
         self.t_rec.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         rv2.addWidget(self.t_rec, 1)
         # 外壳:左边导航(教育号 / 16 个号 / 数据记录 / 设置),右边一页一页换(用户选的「抖音创作者中心」那种)
-        root, self.nav, self.stack = shell([("", "教育号", w), ("", "16 个号", self.api_tab), ("", "数据记录", r)],
+        from gui.daily_tab import DailyTab
+        self.daily = DailyTab(self.st, self.rec, self)
+        root, self.nav, self.stack = shell([("", "教育号", w), ("", "16 个号", self.api_tab), ("", "每日汇总", self.daily),
+                                            ("", "数据记录", r)],
                                            self.edit_settings, f"第 {APP_VERSION} 版")
         self.setCentralWidget(root)
-        self.stack.currentChanged.connect(lambda i: i == 2 and self.refresh_records())
+        self.stack.currentChanged.connect(lambda i: self.daily.refresh() if i == 2 else (i == 3 and self.refresh_records()))
 
     def say(self, m: str):
         self.logbox.appendPlainText(f"[{bj_str()[11:]}] {m}")

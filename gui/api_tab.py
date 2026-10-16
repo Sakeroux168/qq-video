@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from qe import apiacc, apisrc, checks, topic, vertical
+from qe import apiacc, apisrc, checks, plan, topic, vertical
 from qe.config import bj_now, bj_str, data_dir
 from qe.records import pkey
 
@@ -153,7 +153,7 @@ class ApiTab(QWidget):
         top.addWidget(b)
         v.addLayout(top)
 
-        self.cards = StatCards([("all", "这天的视频"), ("ok", "能发"), ("bad", "要处理"), ("sent", "已发"), ("accs", "号发完")],
+        self.cards = StatCards([("all", "这天的视频"), ("ok", "能发"), ("bad", "要处理"), ("sent", "已发"), ("accs", "今天达标")],
                                clickable=("bad", "ok"))
         self.cards.clicked.connect(self._card_clicked)
         v.addWidget(self.cards)
@@ -197,7 +197,7 @@ class ApiTab(QWidget):
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setStretchLastSection(False)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        for i, wd in ((1, 90), (2, 230), (3, 170)):
+        for i, wd in ((1, 90), (2, 220), (3, 200)):
             self.tree.setColumnWidth(i, wd)
         v.addWidget(self.tree, 1)
 
@@ -432,6 +432,7 @@ class ApiTab(QWidget):
             elif not s.startswith("已发"):
                 todo.append(i)
         # 这天已经发出去、挪走了的(列表里没有了,但记录里有):号那一行和上面卡片要算上
+        self.today_sent = self.rec.sent_on(plan.today())
         self.archived = {}
         if d:
             here = {pkey(v.path) for v in self.videos}
@@ -489,7 +490,7 @@ class ApiTab(QWidget):
                     gone = self.archived.get(nick, 0)
                     if gone:
                         g.setText(0, f"{nick}  这天已发 {gone} 条(发完挪走了)")
-                        g.setText(3, f"已发 {gone}")
+                        g.setText(3, self._quota_text(nick) or f"已发 {gone}")
                         g.setToolTip(0, "这天的视频都发出去了,已经挪到「企鹅号软件发布」里")
                         for c in range(len(COLS)):
                             g.setBackground(c, GREEN)
@@ -599,12 +600,37 @@ class ApiTab(QWidget):
         if unsure:
             parts.append(f"结果不明 {unsure}")
         g.setText(2, " · ".join(parts))
-        g.setText(3, "✓ 发完了" if n and sent == n else (f"能发 {ok} · 已发 {sent}" if checked or sent else ""))
+        base = "发完了" if n and sent == n else (f"能发 {ok}" if checked else "")
+        q = self._quota_text(nick)
+        g.setText(3, " · ".join(x for x in (base, q) if x))
+        g.setToolTip(3, "「今天 X / Y」= 今天(按发出去的时间)已经发了 X 条,规定每天 Y 条")
         g.setToolTip(0, self.picked(self.c_date.currentText()).get(nick, "") or nick)
         col = GREEN if n and sent == n else ORANGE if unsure else YELLOW if bad or fail else None
         for c in range(len(COLS)):
             g.setBackground(c, col if col else QColor(0, 0, 0, 0))
         self._update_sum()
+
+    def _quota_text(self, nick: str) -> str:
+        q = plan.quota_of(self.st, nick)
+        t = (getattr(self, "today_sent", {}) or {}).get(nick, 0)
+        if not q:
+            return f"今天 {t}" if t else ""
+        return f"今天 {t}/{q}" + (" √" if t >= q else "")
+
+    def _quota_card(self):
+        """「今天达标」卡片:有规定的号里今天发够了几个(按发出去的时间算)。"""
+        got = getattr(self, "today_sent", {}) or {}
+        qs = [(n, plan.quota_of(self.st, n)) for n in apiacc.nicks()]
+        qs = [(n, q) for n, q in qs if q]
+        if not qs:
+            return "–"
+        ok = sum(1 for n, q in qs if got.get(n, 0) >= q)
+        return (f"{ok} / {len(qs)}", "good" if ok == len(qs) else "")
+
+    def _quota_sub(self) -> str:
+        got = getattr(self, "today_sent", {}) or {}
+        short = sum(max(0, plan.quota_of(self.st, n) - got.get(n, 0)) for n in apiacc.nicks())
+        return f"今天还差 {short} 条" if short else "今天都发够了"
 
     def _update_sum(self):
         n = len(self.videos)
@@ -626,10 +652,10 @@ class ApiTab(QWidget):
         subs = [x for x in ((f"不确定发没发 {unsure}" if unsure else ""), (f"没发成 {fail}" if fail else ""),
                             (f"有问题 {bad}" if bad else "")) if x]
         self.cards.set(all=n + gone, ok=(ok, "good" if ok else ""), bad=(bad + fail + unsure, "warn" if bad + fail + unsure else ""),
-                       sent=sent + gone, accs=(f"{done} / {len(accs)}" if accs else "–", "good" if accs and done == len(accs) else ""),
+                       sent=sent + gone, accs=self._quota_card(),
                        bad_sub=" · ".join(subs),
                        ok_sub="点「发布」发这些" if ok else "",
-                       sent_sub=f"其中 {gone} 条已挪走" if gone else "", all_sub="")
+                       sent_sub=f"其中 {gone} 条已挪走" if gone else "", all_sub="", accs_sub=self._quota_sub())
 
     def _hidden(self, i: int) -> bool:
         key = self.e_find.text().strip().lower()
@@ -848,6 +874,8 @@ class ApiTab(QWidget):
         if t == CLEAR:
             self.state.pop(i, None)
         elif t:
+            if t.startswith("已发") and not self.state.get(i, "").startswith("已发"):
+                self.today_sent = self.rec.sent_on(plan.today())
             self.state[i] = t
             if t.startswith(("上传", "发布中")) and i in self.items:   # 发布中:列表跟着滚到正在发的那条
                 self.tree.scrollToItem(self.items[i])
