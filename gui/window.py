@@ -82,6 +82,37 @@ class WmWorker(QThread):
             list(ex.map(one, self.rows))
 
 
+class BlurWorker(QThread):
+    """后台把查到的水印糊掉(教育号页「模糊水印」):2 条一起做,原片挪进「水印原片」。"""
+    one = Signal(int, str)            # (行, 出错说明;空 = 糊好了)
+
+    def __init__(self, videos, rows, parent=None):
+        super().__init__(parent)
+        self.videos, self.rows = videos, rows
+        self.stop = False
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from qe import blur, vertical, wmstore
+        ff = vertical.ffmpeg_path()
+
+        def one(i):
+            if self.stop:
+                return
+            v = self.videos[i]
+            wm = dict(v.wm or {})
+            try:
+                new, _orig = blur.blur(v.path, blur.boxes_of(wm), ff, stop=lambda: self.stop)
+            except Exception as e:
+                self.one.emit(i, str(e))
+                return
+            v.path = new
+            v.wm = wmstore.put(new, wm, ok=True, blurred=True)
+            self.one.emit(i, "")
+        with ThreadPoolExecutor(2) as ex:
+            list(ex.map(one, self.rows))
+
+
 class BatchWorker(QThread):
     log = Signal(str)
     one = Signal(object, bool, str)
@@ -260,7 +291,11 @@ class MainWindow(QMainWindow):
                              "查到的标黄、不摆;鼠标放在状态上看截图,不是水印就右键「没水印,能摆」。查过的记着,不再查。")
         self.b_wm.clicked.connect(self.run_wm)
         self.wm_worker = None
-        for b in (self.b_wm, self.b_go, self.b_stop, self.b_sent, self.b_drop):
+        self.b_blur = QPushButton("模糊水印")
+        self.b_blur.setToolTip("查到水印的(标黄的),把水印那块糊掉(只糊水印出现的那几段);原片挪进同文件夹的「水印原片」,不删。")
+        self.b_blur.clicked.connect(self.run_blur)
+        self.blur_worker = None
+        for b in (self.b_wm, self.b_blur, self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addWidget(self.k_auto)
         bar.addStretch(1)
@@ -462,9 +497,10 @@ class MainWindow(QMainWindow):
 
     def _load_videos(self):
         date = self.c_date.currentData() or ""
-        if getattr(self, "wm_worker", None) and self.wm_worker.isRunning():   # 列表要换了:查水印停下(行号会对不上)
-            self.wm_worker.stop = True
-            self.wm_worker.wait(15000)
+        for wk in (getattr(self, "wm_worker", None), getattr(self, "blur_worker", None)):
+            if wk and wk.isRunning():                   # 列表要换了:查水印 / 糊水印停下(行号会对不上)
+                wk.stop = True
+                wk.wait(60000)
         self.videos = []
         scan = getattr(self, "_scan", {})
         for acc, d, emp in self.checked_dirs():
@@ -584,7 +620,9 @@ class MainWindow(QMainWindow):
             m.addSeparator()
             if wm.get("shot"):
                 m.addAction("看水印截图", lambda: os.startfile(wm["shot"]) if os.path.isfile(wm["shot"]) else None)
-            if wm.get("ok"):
+            if wm.get("blurred"):
+                m.addAction("水印已经糊掉了(原片在「水印原片」里)").setEnabled(False)
+            elif wm.get("ok"):
                 m.addAction("其实有水印(先不摆)", lambda: self.set_wm_ok(False))
             else:
                 m.addAction("没水印 / 不用管,能摆", lambda: self.set_wm_ok(True))
@@ -627,6 +665,37 @@ class MainWindow(QMainWindow):
         self.b_wm.setText("查水印")
         n = sum(1 for v in self.videos if wmstore.blocks(v.wm))
         self.say(f"查水印完了:{n} 条有水印(标黄,不摆;鼠标放在状态上看截图,不是水印就右键「没水印,能摆」)" if n else "查水印完了:没查到水印")
+
+    def run_blur(self):
+        """把查到水印、还没处理的糊掉。"""
+        from qe import blur, wmstore
+        busy = [w for w in (self.wm_worker, self.blur_worker, self.worker) if w and w.isRunning()]
+        if busy:
+            QMessageBox.information(self, "模糊水印", "还在查水印 / 摆 / 糊,等它做完。")
+            return
+        rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path) and wmstore.blocks(v.wm)
+                and blur.boxes_of(v.wm)]
+        if not rows:
+            QMessageBox.information(self, "模糊水印", "勾上的里面没有查到水印的(还没查的先点「查水印」)。")
+            return
+        if not self._ask("模糊水印", f"把 {len(rows)} 条查到的水印糊掉(只糊水印出现的那几段)?\n\n"
+                         "原片挪进同一个文件夹里的「水印原片」,不删。", "糊掉", "先不"):
+            return
+        self.blur_worker = BlurWorker(self.videos, rows, self)
+        self._blur_left = len(rows)
+        self.blur_worker.one.connect(self._blur_one)
+        self.blur_worker.finished.connect(lambda: (self.b_blur.setText("模糊水印"), self.b_blur.setEnabled(True),
+                                                   self.say("模糊水印做完了(原片在各自文件夹的「水印原片」里)")))
+        self.b_blur.setEnabled(False)
+        self.say(f"模糊水印:{len(rows)} 条(2 条一起做)")
+        self.blur_worker.start()
+
+    def _blur_one(self, i: int, err: str):
+        self._blur_left -= 1
+        self.b_blur.setText(f"糊水印中(还剩 {self._blur_left})")
+        v = self.videos[i]
+        self.say(f"「{v.title}」模糊水印失败:{err}" if err else f"「{v.title}」水印糊掉了")
+        self._fill_row(i)
 
     def set_wm_ok(self, ok: bool):
         from qe import wmstore
@@ -750,6 +819,9 @@ class MainWindow(QMainWindow):
     def start_batch(self, chained: bool = False):
         if self.wm_worker and self.wm_worker.isRunning():
             QMessageBox.information(self, "企鹅号发布助手", "还在查水印,查完再摆(或者点「停查水印」)。")
+            return
+        if getattr(self, "blur_worker", None) and self.blur_worker.isRunning():
+            QMessageBox.information(self, "企鹅号发布助手", "还在糊水印,糊完再摆。")
             return
         if self.cover_worker and self.cover_worker.isRunning():
             QMessageBox.information(self, "企鹅号发布助手", "封面还在认人,等几秒再点。")
@@ -1200,9 +1272,10 @@ class MainWindow(QMainWindow):
         self._load_dates()
 
     def closeEvent(self, e):
-        if self.wm_worker and self.wm_worker.isRunning():
-            self.wm_worker.stop = True
-            self.wm_worker.wait(15000)
+        for wk in (self.wm_worker, self.blur_worker):
+            if wk and wk.isRunning():
+                wk.stop = True
+                wk.wait(60000)
         if self.cover_worker and self.cover_worker.isRunning():
             self.cover_worker.stop = True
             self.cover_worker.wait(10000)

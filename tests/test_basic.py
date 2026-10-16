@@ -1649,6 +1649,33 @@ def test_edu_wm(tmp: Path):
     w.close()
 
 
+def test_blur(tmp: Path):
+    print("[模糊水印:只糊出现的那几段、原片进「水印原片」、教育号不会把原片再读进来、16 个号糊完能发]")
+    import subprocess
+    from qe import blur, folders as F, vertical, wmstore
+    ff = vertical.ffmpeg_path()
+    check(blur._enable([[0, 3], [10, 12.5]]) == ":enable='between(t,0.00,3.00)+between(t,10.00,12.50)'" and blur._enable([]) == "",
+          "只在水印出现的那几段糊")
+    px, py, pw, ph = blur.pixel_box([0.8, 0.02, 0.15, 0.03], 1080, 1920)
+    check(px % 2 == 0 and py % 2 == 0 and px + pw <= 1080 and py + ph <= 1920 and pw > 0.15 * 1080, "框放宽一点、不出界、偶数")
+    if not ff:
+        print("  (没有 ffmpeg,跳过真糊)")
+        return
+    d = tmp / "blur" / "10.16" / "小天地"
+    d.mkdir(parents=True)
+    src = d / "一条.mp4"
+    subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=360x640:rate=10:duration=3",
+                    "-pix_fmt", "yuv420p", str(src)], check=True)
+    new, orig = blur.blur(str(src), [{"ratio": [0.6, 0.02, 0.3, 0.05], "spans": [[0, 1.5]]}], ff)
+    check(os.path.normcase(new) == os.path.normcase(str(src)) and os.path.isfile(orig)
+          and os.path.basename(os.path.dirname(orig)) == "水印原片" and vertical.probe(new, ff)["w"] == 360,
+          "糊好的放回原名,原片进「水印原片」")
+    check([v.title for v in F.scan_account(str(d), "家长小天地", "10.16")] == ["一条"], "教育号不会把「水印原片」里的原片再当成一条")
+    wmstore.put(new, {"hits": [{"label": "B站", "ratio": [0.6, 0.02, 0.3, 0.05]}]}, ok=True, blurred=True)
+    w = wmstore.get(new)
+    check(w["blurred"] and not wmstore.blocks(w), "糊过的记下来,不再拦")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1941,6 +1968,7 @@ if __name__ == "__main__":
     test_login_key(tmp)
     test_api_wm(tmp)
     test_edu_wm(tmp)
+    test_blur(tmp)
     test_api_cover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))

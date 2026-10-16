@@ -230,6 +230,9 @@ class ApiTab(QWidget):
         self.b_vert = QPushButton("转标准竖屏")
         self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n原片挪进同文件夹的「横屏原片」,不删。")
         self.b_vert.clicked.connect(lambda: self.run_vertical())
+        self.b_blur = QPushButton("模糊水印")
+        self.b_blur.setToolTip("高级检查查到水印的,把水印那块糊掉(只糊水印出现的那几段)。\n原片挪进同文件夹的「水印原片」,不删。")
+        self.b_blur.clicked.connect(lambda: self.run_blur())
         self.b_topic = QPushButton("整理话题")
         self.b_topic.setToolTip("一键把话题弄对:\n· 写法不对的(结尾空格、「# 话题」「##话题」、话题前粘的 n、重复的)按固定规矩改,不用 AI;\n"
                                 "· 挂了好几个话题的,AI 挑最好搜的留一个(游戏 / 剧 / 电影 / 动漫名优先)。\n改文件名,同名封面跟着改。能撤销。")
@@ -249,7 +252,7 @@ class ApiTab(QWidget):
         self.b_stop = QPushButton("停")
         self.b_stop.setMinimumHeight(34)
         self.b_stop.clicked.connect(self.stop)
-        for b in (self.b_check, self.b_vert, self.b_topic, self.b_settopic, self.b_undo):
+        for b in (self.b_check, self.b_vert, self.b_blur, self.b_topic, self.b_settopic, self.b_undo):
             bar.addWidget(b)
         bar.addStretch(1)
         bar.addWidget(self.b_pub)
@@ -291,7 +294,7 @@ class ApiTab(QWidget):
     def _busy(self, on: bool):
         has = bool(self.items)
         quiet = on and getattr(self, "_quiet", False)   # 只是后台自动检查:换日期 / 刷新 / 选文件夹照样能点
-        for b in (self.b_check, self.b_vert, self.b_topic, self.b_settopic, self.b_pub):
+        for b in (self.b_check, self.b_vert, self.b_blur, self.b_topic, self.b_settopic, self.b_pub):
             b.setEnabled(not on and has)
         for b in (self.b_undo, self.b_clear):
             b.setEnabled(not on)
@@ -587,7 +590,7 @@ class ApiTab(QWidget):
         if wm.get("hits") and wm.get("shot") and os.path.isfile(wm["shot"]):   # 鼠标放上去看查到水印的那一帧(红框)
             from PySide6.QtCore import QUrl
             src = QUrl.fromLocalFile(wm["shot"]).toString()
-            it.setToolTip(2, f"<b>{checks.wm_text(wm)}</b>" + ("(你标过:不用管)" if wm.get("ok") else "") +
+            it.setToolTip(2, f"<b>{checks.wm_text(wm)}</b>" + ("(已经糊掉了)" if wm.get("blurred") else "(你标过:不用管)" if wm.get("ok") else "") +
                           f"<br><img src='{src}' width='300'><br>不是水印:右键「没水印 / 不用管,这条能发」")
         bg = GREEN if st.startswith("已发") else ORANGE if st == "结果不明" else RED if st.startswith(FAILED) \
             else YELLOW if probs else None
@@ -833,12 +836,15 @@ class ApiTab(QWidget):
                         m.addAction(text, fn).setEnabled(not busy)
             if sel:
                 m.addAction(f"高级检查选中的 {len(sel)} 条(再查水印)", lambda: self.run_check(sel, deep=True)).setEnabled(not busy)
+                m.addAction(f"模糊水印(选中的 {len(sel)} 条)", lambda: self.run_blur(sel)).setEnabled(not busy)
             wm = (self.videos[i].checks or {}).get("wm") if i != -1 else None
             if wm and wm.get("hits") and not self._sent(i):
                 m.addSeparator()
                 if wm.get("shot"):
                     m.addAction("看水印截图", lambda: self._open_file(wm["shot"]))
-                if wm.get("ok"):
+                if wm.get("blurred"):
+                    m.addAction("水印已经糊掉了(原片在「水印原片」里)").setEnabled(False)
+                elif wm.get("ok"):
                     m.addAction("其实有水印(先不发)", lambda: self.set_wm_ok(i, False)).setEnabled(not busy)
                 else:
                     m.addAction("没水印 / 不用管,这条能发", lambda: self.set_wm_ok(i, True)).setEnabled(not busy)
@@ -1094,6 +1100,49 @@ class ApiTab(QWidget):
                 list(ex.map(lambda i: None if stopped() else one(i, emit, stopped), rows))
             return "转竖屏做完了"
         self._start(fn, f"转竖屏:{len(rows)} 条(3 条一起转)")
+
+    def run_blur(self, only: list[int] | None = None):
+        """查到水印的糊掉(高级检查查出来的框、只糊出现的那几段)。原片挪进「水印原片」。"""
+        if self.busy():
+            return
+        from qe import blur
+        rows = [i for i in self.target_rows(only) if checks.wm_blocks((self.videos[i].checks or {}).get("wm"))
+                and not self._sent(i) and blur.boxes_of(self.videos[i].checks["wm"])]
+        if not rows:
+            QMessageBox.information(self, "模糊水印", "这些里没有查到水印的(还没查的先点「检查 → 高级检查」)。")
+            return
+        if not ask(self, "模糊水印", f"{self._who(rows)}:把查到的水印糊掉(只糊水印出现的那几段)?\n\n"
+                   "原片挪进同一个文件夹里的「水印原片」,不删。糊完鼠标放在那条上能看截图对不对。", "糊掉", "先不"):
+            return
+        vs = self.videos
+        ff = vertical.ffmpeg_path()
+        words = self.st.get("api_platform_words") or None
+
+        def one(i, emit, stopped):
+            v = vs[i]
+            wm = dict(v.checks["wm"])
+            emit(i, "糊水印中…")
+            try:
+                new, _orig = blur.blur(v.path, blur.boxes_of(wm), ff, stop=stopped)
+            except Exception as e:
+                if stopped() or str(e) == "停下了":
+                    emit(i, "停下了,没糊")
+                    return
+                emit(i, CLEAR)
+                emit(-1, f"「{v.title}」模糊水印失败:{e}")
+                return
+            v.path = new
+            checks.check_one(v, words, ff)
+            v.checks["wm"] = wmstore.put(new, wm, ok=True, blurred=True)   # 糊过的不再拦
+            self._remember_check(v)
+            emit(i, CLEAR)
+            emit(-1, f"「{v.title}」糊掉了:{checks.wm_text(wm)}")
+
+        def fn(emit, stopped):
+            with ThreadPoolExecutor(2) as ex:
+                list(ex.map(lambda i: None if stopped() else one(i, emit, stopped), rows))
+            return "模糊水印做完了(原片在各自文件夹的「水印原片」里)"
+        self._start(fn, f"模糊水印:{len(rows)} 条")
 
     def _sent(self, i: int) -> bool:
         """已发 / 结果不明:不能再发、不能再改名(改名会让防重发认不出来)。"""

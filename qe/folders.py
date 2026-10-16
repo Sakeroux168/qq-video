@@ -217,7 +217,7 @@ _NEG_RE = re.compile(r"(没|无|未|非|不|不含|不是)$")    # 「没脏话 
 GENERIC_DIRS = {"视频", "原", "横", "竖", "横屏", "竖屏", "原图", "封面", "新建文件夹", "成品", "处理", "已改封面"}
 NO_EMP = "没分人"
 IMG_EXTS = (".png", ".webp", ".jpg", ".jpeg")
-JUNK_PREFIX = ("._", "~$")                           # 苹果电脑 / Office 留下的小垃圾文件(「._xxx.mp4」不是视频)
+JUNK_PREFIX = ("._", "~$", "_处理中_")                           # 苹果电脑 / Office 留下的小垃圾文件(「._xxx.mp4」不是视频)
 
 
 def _has_word(name: str, words) -> bool:
@@ -236,12 +236,17 @@ def _titleish(name: str) -> bool:
     return len(norm_name(name)) >= 12 and any(c in name for c in "，,：:！!？?、")
 
 
+ORIG_DIRS = {"横屏原片", "水印原片"}                   # 转竖屏 / 模糊水印后原片放这里(已经处理过的,不能再发一遍)
+
+
 def _skip_dir(name: str, path: str = "") -> bool:
     """名字带「已发 / 不能用 / 脏话 / 作废 / 废弃 / 不要 / 重复」的文件夹整个不碰。但这些不算(真实素材里见过):
     ①「没脏话 / 无重复」:前面是「没 / 无 / 不含」;
     ②「不要 / 重复」在一句标题里(封面工具按标题建的文件夹:「理性规划课外培训，家长不要盲目给孩子报…」);
     ③ 给了 path 时看一眼里面:有 横屏 / 竖屏 / 原图(封面工具的标题文件夹),或者有和文件夹同名的视频 → 是标题文件夹,不跳
        (「孩子已发烧三天…」这种标题里带「已发」的也认得出)。"""
+    if name.strip() in ORIG_DIRS:
+        return True
     if not _has_word(name, SKIP_WORDS):
         return False
     if not _has_word(name, tuple(w for w in SKIP_WORDS if w not in _WEAK_WORDS)) and _titleish(name):

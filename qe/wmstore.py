@@ -55,20 +55,25 @@ def get(path: str) -> dict | None:
         r = _load().get(_key(path))
         if not r or r.get("sig") != _sig(path):
             return None
-        return {"hits": r.get("hits") or [], "shot": r.get("shot") or "", "ok": bool(r.get("ok"))}
+        return _view(r)
 
 
-def put(path: str, res: dict) -> dict:
-    """记下一条的查水印结果(以前点过「没水印」的,同一个文件再查还算数)。返回记下的。"""
+def put(path: str, res: dict, ok: bool | None = None, blurred: bool = False) -> dict:
+    """记下一条的查水印结果(以前点过「没水印」的,同一个文件再查还算数)。返回记下的。
+    模糊过的:blurred=True、ok=True(查到的那些已经糊掉了,不再拦)。"""
     with _lock:
         d = _load()
         old = d.get(_key(path)) or {}
         sig = _sig(path)
-        keep_ok = bool(old.get("ok")) and old.get("sig") == sig
+        keep_ok = (bool(old.get("ok")) and old.get("sig") == sig) if ok is None else bool(ok)
         d[_key(path)] = {"sig": sig, "hits": res.get("hits") or [], "shot": res.get("shot") or "",
-                         "ok": keep_ok, "at": int(time.time())}
+                         "ok": keep_ok, "blurred": bool(blurred), "at": int(time.time())}
         _save()
-        return {"hits": d[_key(path)]["hits"], "shot": d[_key(path)]["shot"], "ok": keep_ok}
+        return _view(d[_key(path)])
+
+
+def _view(r: dict) -> dict:
+    return {"hits": r.get("hits") or [], "shot": r.get("shot") or "", "ok": bool(r.get("ok")), "blurred": bool(r.get("blurred"))}
 
 
 def set_ok(path: str, ok: bool) -> None:
