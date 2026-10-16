@@ -24,6 +24,7 @@ def check(c, m):
 
 def _img(path, w, h):
     from PIL import Image
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (w, h), (200, 200, 200)).save(path)
 
 
@@ -1271,6 +1272,39 @@ def test_api_cover(tmp: Path):
     check(not os.path.exists(out) and os.path.exists(src), "传完删临时的,原图还在")
 
 
+def test_scan_any_layout(tmp: Path):
+    print("[教育素材:每个人怎么放都认]")
+    from qe import folders as F
+    a = tmp / "scan" / "小天地"
+    mk = lambda rel: ((a / rel).parent.mkdir(parents=True, exist_ok=True), (a / rel).write_bytes(b"x"))
+    mk("卓金凤13/视频/卓的一条.mp4")                       # 卓金凤:视频\ + 封面\_标题.jpg
+    mk("卓金凤13/封面/_卓的一条.jpg")
+    mk("51/横/五一 的一条.mp4")                            # 51:原\ 横\(51 是人名,纯数字也算人)
+    mk("51/横/五一 的一条.png")
+    mk("51/原/五一 的一条.jpg")
+    mk("梁/1/梁的一条.mp4")                                # 梁:梁/1/视频 + 封面/标题/横屏16x9.png
+    _img(a / "梁/封面/梁的一条/横屏16x9.png", 320, 180)
+    _img(a / "梁/封面/梁的一条/竖屏9x16.png", 180, 320)
+    _img(a / "梁/封面/梁的一条/原图.png", 180, 320)
+    mk("直接放 的一条.mp4")                                # 10.16:没有员工层,封面工具文件夹堆在旁边 / 套在封面\里
+    mk("直接放 的一条.jpg")
+    _img(a / "直接放_的一条/横屏16x9.png", 320, 180)
+    mk("另一条.mp4")
+    _img(a / "封面/另一条/横屏16x9.png", 320, 180)
+    mk("31条（已发）/发过的.mp4")                          # 名字带「已发」的文件夹不碰
+    mk("快捷方式 - 快捷方式.lnk")
+    vs = {v.title: v for v in F.scan_account(str(a), "家长小天地", "10.16")}
+    check(sorted(vs) == sorted(["卓的一条", "五一 的一条", "梁的一条", "直接放 的一条", "另一条"]), f"视频都翻出来,「已发」文件夹和快捷方式不算 -> {sorted(vs)}")
+    check(vs["卓的一条"].employee == "卓金凤13" and vs["五一 的一条"].employee == "51" and vs["梁的一条"].employee == "梁"
+          and vs["直接放 的一条"].employee == F.NO_EMP and vs["另一条"].employee == F.NO_EMP, "按第一层人名分人;直接放的算「没分人」")
+    check(not vs["卓的一条"].png and vs["卓的一条"].jpg.endswith("_卓的一条.jpg"), "卓:只有带字 jpg(前面多个下划线也配得上),不当无字封面")
+    check(vs["五一 的一条"].png.endswith("五一 的一条.png") and vs["五一 的一条"].jpg.endswith("五一 的一条.jpg"), "51:横里的 png 当无字封面")
+    check(vs["梁的一条"].png.endswith("横屏16x9.png") and vs["梁的一条"].vpng.endswith("竖屏9x16.png"), "梁:封面工具的横屏 / 竖屏")
+    check(vs["直接放 的一条"].png.endswith(os.path.join("直接放_的一条", "横屏16x9.png")) and vs["另一条"].png.endswith(os.path.join("另一条", "横屏16x9.png")),
+          "10.16:封面工具文件夹在旁边 / 在封面里都配得上(空格变下划线也认)")
+    check([g for g, _n in F.groups(list(vs.values()))][-1] == F.NO_EMP, "「没分人」排最后")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -1463,6 +1497,7 @@ if __name__ == "__main__":
     _no_dialogs()
     test_folders(tmp)
     test_cover_dir(tmp)
+    test_scan_any_layout(tmp)
     test_cover(tmp)
     test_records(tmp)
     test_failed_steps(tmp)

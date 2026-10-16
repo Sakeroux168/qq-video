@@ -6,6 +6,7 @@
 下面:「摆下一批」「这批发好了」「这批不要了」「这天发完了,挪走」;日志。
 「记录」页签:每条什么时候发的,按员工汇总,能导出 Excel。
 """
+import copy
 import os
 import time
 
@@ -311,6 +312,7 @@ class MainWindow(QMainWindow):
             self.st.save()
         self.tree.blockSignals(True)
         self.tree.clear()
+        self._scan = {}                                # 号文件夹 → 翻出来的视频(勾员工时不再翻网络盘)
         if date:
             root = self.st["material_root"]
             for acc, dirs in F.account_dirs(root, date, self.st).items():
@@ -318,17 +320,22 @@ class MainWindow(QMainWindow):
                 top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 n_all = 0
                 for d in dirs:
-                    for emp in F.employees(d):
-                        vids = F.videos_in(os.path.join(d, emp), acc, date)
+                    # 每个人放法都不一样(用户:「跟他们沟通不了的」):号文件夹整个翻一遍,按人分,封面按名字配
+                    vs_all = self._scan[d] = F.scan_account(d, acc, date)
+                    for emp, _n in F.groups(vs_all):
+                        vids = [x for x in vs_all if x.employee == emp]
                         sent = sum(1 for x in vids if self.rec.status_of(x.path) == "已发")
-                        it = QTreeWidgetItem([emp, f"{len(vids)} 条" + (f",发了 {sent}" if sent else "")])
-                        it.setToolTip(0, f"{emp}({os.path.basename(d)})")
-                        it.setData(0, Qt.ItemDataRole.UserRole, os.path.join(d, emp))
+                        nocov = sum(1 for x in vids if not x.png)
+                        it = QTreeWidgetItem([emp, f"{len(vids)} 条" + (f",发了 {sent}" if sent else "") +
+                                              (f",{nocov} 条没无字封面" if nocov else "")])
+                        it.setToolTip(0, f"{emp}({os.path.basename(d)})" +
+                                      ("\n视频直接放在号文件夹里,没按人分" if emp == F.NO_EMP else ""))
+                        it.setData(0, Qt.ItemDataRole.UserRole, F.emp_dir(d, emp))
                         it.setData(0, Qt.ItemDataRole.UserRole + 1, acc)
+                        it.setData(0, Qt.ItemDataRole.UserRole + 2, d)
+                        it.setData(0, Qt.ItemDataRole.UserRole + 3, emp)
                         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                         it.setCheckState(0, Qt.CheckState.Unchecked)
-                        if not vids:
-                            it.setDisabled(True)
                         top.addChild(it)
                         n_all += len(vids)
                 top.setText(1, f"{n_all} 条" if dirs else "这天没有它的文件夹")
@@ -343,21 +350,26 @@ class MainWindow(QMainWindow):
     def _tree_changed(self, *_a):
         self._load_videos()
 
-    def checked_dirs(self) -> list[tuple[str, str]]:
+    def checked_dirs(self) -> list[tuple[str, str, str]]:
+        """勾上的员工:[(号, 号文件夹, 员工)]。"""
         out = []
         for i in range(self.tree.topLevelItemCount()):
             top = self.tree.topLevelItem(i)
             for k in range(top.childCount()):
                 it = top.child(k)
                 if it.checkState(0) == Qt.CheckState.Checked:
-                    out.append((it.data(0, Qt.ItemDataRole.UserRole + 1), it.data(0, Qt.ItemDataRole.UserRole)))
+                    out.append((it.data(0, Qt.ItemDataRole.UserRole + 1), it.data(0, Qt.ItemDataRole.UserRole + 2),
+                                it.data(0, Qt.ItemDataRole.UserRole + 3)))
         return out
 
     def _load_videos(self):
         date = self.c_date.currentData() or ""
         self.videos = []
-        for acc, d in self.checked_dirs():
-            self.videos += F.videos_in(d, acc, date)
+        scan = getattr(self, "_scan", {})
+        for acc, d, emp in self.checked_dirs():
+            if d not in scan:
+                scan[d] = F.scan_account(d, acc, date)
+            self.videos += [copy.deepcopy(v) for v in scan[d] if v.employee == emp]      # 拷一份:和以前每次新读一样
         self.table.setRowCount(len(self.videos))
         for i, v in enumerate(self.videos):
             self._fill_row(i)
@@ -706,8 +718,7 @@ class MainWindow(QMainWindow):
         left = []
         for acc, dirs in F.account_dirs(self.st["material_root"], date, self.st).items():
             for d in dirs:
-                for emp in F.employees(d):
-                    left += [v for v in F.videos_in(os.path.join(d, emp), acc, date) if self.rec.status_of(v.path) != "已发"]
+                left += [v for v in F.scan_account(d, acc, date) if self.rec.status_of(v.path) != "已发"]
         msg = f"把整个「{date}」文件夹挪到:\n{dst}\n"
         if left:
             per = {}

@@ -1,4 +1,5 @@
 """素材文件夹:X:\\知乎视频\\小学生教育\\<日期>\\<号的缩写>\\<员工>\\ 里每条 同名 .mp4 + .png(无字封面,用这个)+ .jpg(原封面,带字,不能用)。
+实际每个人放法都不一样 → 界面用 scan_account():号文件夹整个翻一遍,按名字配封面(见下面)。
 
 发完一整天:把 <日期> 文件夹剪切到 X:\\知乎视频\\内容查看\\<月>月发布视频\\企鹅号\\教育\\ 下面。
 """
@@ -147,6 +148,89 @@ def videos_in(emp_dir: str, account: str, date: str) -> list[Video]:
         v.vpng = vpng
         out.append(v)
     return out
+
+
+# ---------------- 不管怎么放都认(用户 2026-10-16:「跟他们沟通不了的」)----------------
+# 每个人放法不一样,每天也不一样:卓金凤「视频\ + 封面\」、51「原\ 横\」、梁「封面\标题\横屏16x9.png」、
+# 10.16 干脆没有员工这一层(视频直接在号文件夹里,封面工具的文件夹直接堆在旁边或套在「封面\」里)。
+# 所以:号文件夹整个翻一遍,视频按所在的第一层「人名」文件夹分人;封面按名字在整个号文件夹里配。
+SKIP_WORDS = ("已发", "不能用", "不要", "脏话", "作废", "废弃", "重复")
+GENERIC_DIRS = {"视频", "原", "横", "竖", "横屏", "竖屏", "原图", "封面", "新建文件夹", "成品", "处理"}
+NO_EMP = "没分人"
+IMG_EXTS = (".png", ".webp", ".jpg", ".jpeg")
+
+
+def _skip_dir(name: str) -> bool:
+    return any(w in name for w in SKIP_WORDS)
+
+
+def _generic(name: str) -> bool:
+    """「视频 / 原 / 横 / 封面」这种不是人名的文件夹。纯数字不算(「51」是个人;梁的「梁/1/」第一层已经是梁了)。"""
+    return name.strip() in GENERIC_DIRS
+
+
+def scan_account(acc_dir: str, account: str, date: str) -> list[Video]:
+    """号文件夹里所有视频(翻到底),配好封面,employee = 所在第一层不是「视频 / 原 / 横 / 1」这类的文件夹名;
+    直接放在号文件夹(或只套了「视频」这种)的算「没分人」。名字带「已发 / 不能用」的文件夹不碰。"""
+    vids: list[tuple[str, str]] = []                 # (视频路径, 员工)
+    imgs: dict[str, list[str]] = {}                  # 名字(norm) → 同名图片
+    tools: dict[str, str] = {}                       # 名字(norm) → 封面工具的文件夹(横屏16x9.png / 竖屏9x16.png)
+    base = os.path.normpath(acc_dir)
+    for cur, dirs, files in os.walk(base):
+        dirs[:] = sorted(d for d in dirs if not _skip_dir(d))
+        rel = os.path.relpath(cur, base)
+        parts = [] if rel == "." else rel.split(os.sep)
+        emp = next((x.strip() for x in parts if not _generic(x)), NO_EMP) if parts else NO_EMP
+        if parts and any(f.startswith(("横屏", "竖屏")) for f in files):
+            tools.setdefault(norm_name(parts[-1]), cur)
+        for f in files:
+            stem, ext = os.path.splitext(f)
+            e = ext.lower()
+            if e in VIDEO_EXTS:
+                vids.append((os.path.join(cur, f), emp))
+            elif e in IMG_EXTS and not stem.startswith(("原图", "_thumb", "横屏", "竖屏", "修改")):
+                imgs.setdefault(norm_name(stem), []).append(os.path.join(cur, f))
+
+    def nearest(cands: list[str], vpath: str) -> str:
+        """同名图片好几张:同一个文件夹的优先,再是路径挨得最近的。"""
+        vd = os.path.dirname(vpath)
+        return min(cands, key=lambda c: (os.path.dirname(c) != vd, -len(os.path.commonpath([c, vpath])), c)) if cands else ""
+
+    out = []
+    for path, emp in vids:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        n = norm_name(stem)
+        same = imgs.get(n, [])
+        png = nearest([c for c in same if c.lower().endswith((".png", ".webp"))], path)
+        jpg = nearest([c for c in same if c.lower().endswith((".jpg", ".jpeg"))], path)
+        vpng = ""
+        if n in tools:
+            h, vv = covers_from_dir(tools[n])
+            png, vpng = h or png, vv
+        v = Video(path=path, title=stem.strip(), account=account, employee=emp, date=date, png=png, jpg=jpg)
+        v.vpng = vpng
+        out.append(v)
+    out.sort(key=lambda v: (v.employee, v.title, v.path))
+    return out
+
+
+def groups(videos: list[Video]) -> list[tuple[str, int]]:
+    """一个号下面分几个人:[(员工, 条数)],「没分人」放最后。"""
+    cnt: dict[str, int] = {}
+    for v in videos:
+        cnt[v.employee] = cnt.get(v.employee, 0) + 1
+    return sorted(cnt.items(), key=lambda kv: (kv[0] == NO_EMP, kv[0]))
+
+
+def emp_dir(acc_dir: str, emp: str) -> str:
+    """员工文件夹(打开所在文件夹用);没分人 / 找不到就给号文件夹。"""
+    if emp and emp != NO_EMP:
+        for cur, dirs, _f in os.walk(acc_dir):
+            for d in dirs:
+                if d.strip() == emp:
+                    return os.path.join(cur, d)
+            break
+    return acc_dir
 
 
 def archive_target(st, date: str) -> str:
