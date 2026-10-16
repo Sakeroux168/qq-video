@@ -43,10 +43,38 @@ class Adjustments:
         self.d.setdefault(video, {})["ai235"] = on
         self._save()
 
+    def own_cover(self, video: str) -> str:
+        """人在「封面预览」里自己换的封面(用户 2026-10-16:配错了「我自己去添加」);没换过给 ""。"""
+        return str((self.d.get(video) or {}).get("own_cover") or "")
+
+    def set_own_cover(self, video: str, path: str):
+        """换成人选的图;path 空 = 用回软件自动配的。手动拖过的框跟着作废(图换了)。"""
+        e = self.d.setdefault(video, {})
+        e.pop("manual", None)
+        if path:
+            e["own_cover"] = path
+        else:
+            e.pop("own_cover", None)
+        self._save()
+
+    def use_own(self, v) -> bool:
+        """自动配封面之前:人换过封面、那张图还在 → 用人选的(只有这一张,竖的比例也从它裁)。"""
+        if not hasattr(v, "auto_png"):                # 记下自动配的(「用回自动配的」用)
+            v.auto_png, v.auto_vpng = v.png, v.vpng
+        p = self.own_cover(v.path)
+        if p and os.path.isfile(p):
+            v.png, v.vpng = p, ""
+            return True
+        v.png, v.vpng = v.auto_png, v.auto_vpng
+        return False
+
     def reset(self, video: str):
-        """恢复自动:手动拖过的框都不要了。"""
+        """恢复自动:手动拖过的框都不要了(人自己换的封面留着,要换回去点「用回自动配的」)。"""
         if video in self.d:
+            own = self.d[video].get("own_cover")
             del self.d[video]
+            if own:
+                self.d[video] = {"own_cover": own}
             self._save()
 
     def apply(self, v) -> None:

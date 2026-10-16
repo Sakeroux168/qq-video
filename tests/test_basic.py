@@ -1757,6 +1757,36 @@ def test_cover_cache_unique(tmp: Path):
           "放大的封面也各存各的")
 
 
+def test_cover_dialog_src(tmp: Path):
+    print("[封面预览:显示封面的标题和位置、对不上标红、自己换封面 / 用回自动的]")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from gui.cover_dialog import CoverDialog
+    from qe import cover as C
+    from qe.adjust import Adjustments
+    from qe.folders import Video
+    d = tmp / "cdlg"
+    _img(d / "封面" / "别的视频" / "横屏16x9.png", 640, 360)
+    _img(d / "我选的.png", 640, 360)
+    (d / "这条视频.mp4").write_bytes(b"x")
+    v = Video(path=str(d / "这条视频.mp4"), title="这条视频", account="号", employee="甲", date="10.16",
+              png=str(d / "封面" / "别的视频" / "横屏16x9.png"))
+    adj = Adjustments(tmp / "adj_dlg.json")
+    adj.use_own(v)
+    C.decide(v)
+    dlg = CoverDialog([v], 0, adj)
+    t = dlg.lab_src.text()
+    check("别的视频" in t and "对不上" in t and "横屏16x9.png" in t, "封面标题 = 封面工具的文件夹名;和视频标题对不上标红;写位置")
+    dlg.set_cover(str(d / "我选的.png"))
+    check(v.cover.endswith("我选的.png") and "你自己换的" in dlg.lab_src.text() and adj.own_cover(v.path).endswith("我选的.png"),
+          "更换封面:用你选的,记下来")
+    v2 = Video(path=v.path, title=v.title, account="号", employee="甲", date="10.16", png=str(d / "封面" / "别的视频" / "横屏16x9.png"))
+    check(Adjustments(tmp / "adj_dlg.json").use_own(v2) and v2.png.endswith("我选的.png"), "关了再开:还是用你选的")
+    dlg.set_cover("")
+    check(v.cover.endswith("横屏16x9.png") and not adj.own_cover(v.path), "用回自动配的")
+    dlg.close()
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -2052,6 +2082,7 @@ if __name__ == "__main__":
     test_blur(tmp)
     test_ads(tmp)
     test_cover_cache_unique(tmp)
+    test_cover_dialog_src(tmp)
     test_api_cover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))

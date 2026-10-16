@@ -106,6 +106,10 @@ class CoverDialog(QDialog):
         self.lab_why = QLabel()
         self.lab_why.setStyleSheet("color:#666")
         v.addWidget(self.lab_why)
+        self.lab_src = QLabel()                          # 这张封面是哪个视频的、在哪(用户:好对一下有没有配错)
+        self.lab_src.setWordWrap(True)
+        self.lab_src.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(self.lab_src)
         mid = QHBoxLayout()
         side = QVBoxLayout()
         side.addWidget(QLabel("点一个比例,在右边大图上拖框:"))
@@ -133,6 +137,11 @@ class CoverDialog(QDialog):
         self.b_ai.clicked.connect(self.toggle_ai)
         self.b_again = QPushButton("重新扩一张")
         self.b_again.clicked.connect(self.ai_again)
+        self.b_pick = QPushButton("更换封面…")
+        self.b_pick.setToolTip("封面配错了:自己选一张图换上(png / jpg)。软件记着,摆的时候用你选的")
+        self.b_pick.clicked.connect(self.pick_cover)
+        self.b_unpick = QPushButton("用回自动配的")
+        self.b_unpick.clicked.connect(lambda: self.set_cover(""))
         self.b_auto = QPushButton("恢复自动")
         self.b_auto.setToolTip("框的位置按软件自己认的来")
         self.b_auto.clicked.connect(self.reset)
@@ -142,6 +151,8 @@ class CoverDialog(QDialog):
         self.b_next.clicked.connect(lambda: self.go(1))
         b_ok = QPushButton("关闭")
         b_ok.clicked.connect(self.accept)
+        bar.addWidget(self.b_pick)
+        bar.addWidget(self.b_unpick)
         bar.addWidget(self.b_ai)
         bar.addWidget(self.b_again)
         bar.addWidget(self.b_auto)
@@ -162,8 +173,9 @@ class CoverDialog(QDialog):
         self._vpm = QPixmap(v.vcover) if getattr(v, "vcover", "") else QPixmap()     # 竖的比例用的竖屏图
         self._wide = None
         self.canvas.set_image(self.pm)
-        self.lab_title.setText(f"{self.i + 1}/{len(self.videos)}  {v.title}")
+        self.lab_title.setText(f"{self.i + 1}/{len(self.videos)}  视频:{v.title}")
         self.lab_why.setText(v.cover_why)
+        self.b_unpick.setVisible(bool(self.adj.own_cover(v.path)))
         self.b_prev.setEnabled(self.i > 0)
         self.b_next.setEnabled(self.i < len(self.videos) - 1)
         self.refresh()
@@ -188,6 +200,62 @@ class CoverDialog(QDialog):
             if not self._wide.isNull():
                 return self._wide
         return self.pm
+
+    @staticmethod
+    def cover_title(path: str) -> str:
+        """封面的「标题」:封面工具出的图(横屏16x9.png / 竖屏9x16.png / 修改 (1).png)看它所在的文件夹名,别的看文件名。"""
+        import os
+        import re
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if re.match(r"^(横屏|竖屏|修改|原图)", stem):
+            return os.path.basename(os.path.dirname(path))
+        return stem
+
+    def show_src(self):
+        """标题下面:这个比例用的是哪张图、那张图叫什么、在哪;名字和视频标题对不上标红。"""
+        import html
+        from qe.folders import norm_name
+        v = self.v
+        if not v.cover:
+            self.lab_src.setText("<span style='color:#c00'>这条没有封面</span>(点「更换封面…」自己选一张)")
+            return
+        _tag, r = C.RATIOS[self.ratio_i]
+        pm = self.pix_for(self.ratio_i)
+        if pm is self._vpm:
+            path, what = v.vcover, "竖图"
+        elif pm is not self.pm:
+            path, what = v.cover, "AI 扩图,底图"
+        else:
+            path, what = v.cover, "图"
+        t = self.cover_title(path)
+        bad = norm_name(t) != norm_name(v.title)
+        own = self.adj.own_cover(v.path)
+        self.lab_src.setText(
+            f"封面({what}):<b style='color:{'#c00' if bad else '#1a7f37'}'>{html.escape(t)}</b>"
+            + (" <span style='color:#c00'>⚠ 和视频标题对不上,看一眼是不是配错了</span>" if bad and not own else "")
+            + (" <span style='color:#1a7f37'>(你自己换的)</span>" if own else "")
+            + f"<br><span style='color:#666'>位置:{html.escape(path)}</span>")
+
+    def pick_cover(self):
+        import os
+        from PySide6.QtWidgets import QFileDialog
+        start = os.path.dirname(self.v.cover or self.v.path)
+        p, _ = QFileDialog.getOpenFileName(self, f"给「{self.v.title[:30]}」换封面", start, "图片 (*.png *.jpg *.jpeg *.webp)")
+        if p:
+            self.set_cover(os.path.normpath(p))
+
+    def set_cover(self, path: str):
+        """换成人选的图(空 = 用回自动配的),重新定框。"""
+        v = self.v
+        self.adj.use_own(v)                             # 先记下自动配的那张
+        self.adj.set_own_cover(v.path, path)
+        v.cover_kind = ""
+        self.adj.use_own(v)                             # 换上人选的 / 用回自动的
+        C.decide(v)
+        self.adj.apply(v)
+        C.note_wide(v)
+        self.show_video()
+        self.changed.emit(self.i)
 
     def rect_for(self, k):
         _tag, r = C.RATIOS[k]
@@ -223,6 +291,7 @@ class CoverDialog(QDialog):
         self.b_ai.setEnabled(has_face and mode != "manual")
         self.b_ai.setChecked(mode == "ai")
         self.b_again.setEnabled(mode == "ai")
+        self.show_src()
 
     def pick_ratio(self, k):
         self.ratio_i = k

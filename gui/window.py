@@ -44,6 +44,7 @@ class CoverWorker(QThread):
             if self.stop:
                 break
             if not v.cover_kind:
+                self.adj.use_own(v)        # 人在预览里自己换过封面的,用他选的
                 C.decide(v)
                 self.adj.apply(v)          # 人在「封面预览」里调过的套上去
                 C.note_wide(v)             # 2.35:1 怎么躲标题区(切头顶 / AI 扩图)
