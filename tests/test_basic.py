@@ -1787,6 +1787,35 @@ def test_cover_dialog_src(tmp: Path):
     dlg.close()
 
 
+def test_api_direct(tmp: Path):
+    print("[接口发直连企鹅号(不走代理,快 7 倍);直连不通才走代理]")
+    import requests
+    from qe import omapi
+
+    class R:
+        def __init__(self, j):
+            self.j, self.status_code = j, 200
+
+        def json(self):
+            return self.j
+
+    class S:
+        trust_env = True
+
+        def __init__(self):
+            self.tries = []
+
+        def post(self, url, **kw):
+            self.tries.append(self.trust_env)
+            if not self.trust_env:
+                raise requests.ConnectionError("直连不通")
+            return R({"code": "0", "data": {"access_token": "T", "expires_in": 7200}})
+    s = S()
+    c = omapi.Client("a", "b", session=s)
+    check(s.trust_env is False, "默认直连(不用电脑上的代理)")
+    check(c.token() == "T" and s.tries == [False, True] and s.trust_env is True, "直连不通:换 token 时改走代理再试一次")
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -2038,6 +2067,90 @@ def test_preview(tmp: Path):
     dlg.close()
 
 
+def test_wm_detect_unit(tmp: Path):
+    """查水印的算法本身(合成图,不用 X 盘):找 logo、框的位置、出现在哪几段、认字规则、比例框、一句话。"""
+    print("[查水印:合成图找 logo / 认字规则 / 比例框]")
+    import cv2
+    import numpy as np
+    from qe import watermark as W
+
+    rng = np.random.default_rng(3)
+    cw, ch = W.CANVAS_V
+    rect = (0, 0, cw, ch)
+    # 一个「水印」:白色细笔画拼的小图案(像 bilibili 那种字)
+    mark = np.zeros((40, 110), np.uint8)
+    cv2.putText(mark, "bili", (4, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.1, 255, 3)
+
+    def frame(with_mark: bool, x=560, y=60):
+        f = cv2.resize(rng.integers(0, 140, (ch // 4, cw // 4), dtype=np.uint8), (cw, ch))   # 会动的画面
+        if with_mark:
+            reg = f[y:y + 40, x:x + 110].astype(np.float32)
+            f[y:y + 40, x:x + 110] = np.clip(reg * (1 - mark / 255 * 0.8) + mark * 0.8, 0, 255).astype(np.uint8)
+        return f
+
+    ys, xs = np.where(mark > 0)
+    gx, gy, gw, gh = 560 + xs.min(), 60 + ys.min(), xs.max() - xs.min() + 1, ys.max() - ys.min() + 1   # 真实位置
+    crops = [frame(True)[60:100, 560:670] for _ in range(3)]
+    lg = W.Logo("测试台", W.make_logo(crops), 0.75, "合成.png")
+    # 20 秒:前 6 秒有水印(右上角),后面没有
+    frames = [frame(i < 6) for i in range(20)]
+    times = [float(i) for i in range(20)]
+    maps = W.still_maps(frames)
+    check(len(maps) == 18 and maps[0][1].shape == (ch, cw), "不动的图:窗口挪 1 帧,20 帧出 18 张")
+    hits = W.match_logos(maps, [lg], times, rect)
+    check(len(hits) == 1 and hits[0]["label"] == "测试台" and hits[0]["score"] >= 0.75, f"找到合成的水印:{hits[:1]}")
+    if hits:
+        bx, by, bw, bh = hits[0]["box"]
+        check(abs(bx - gx) <= 5 and abs(by - gy) <= 5 and 0.8 < bw / gw < 1.25 and 0.8 < bh / gh < 1.25,
+              f"框的位置对:{hits[0]['box']} ≈ {[int(gx), int(gy), int(gw), int(gh)]}")
+        sp = W.spans_of(hits[0]["wins"], maps, times, 20.0)
+        check(len(sp) == 1 and sp[0][0] <= 0.5 and 5 <= sp[0][1] <= 9, f"只在前几秒有:spans={sp}")
+    clean = [frame(False) for _ in range(20)]
+    check(not W.match_logos(W.still_maps(clean), [lg], times, rect), "没水印的(画面一直在动):不报")
+    # 整条都有 → [[0, 时长]]
+    allm = W.still_maps([frame(True) for _ in range(12)])
+    h2 = W.match_logos(allm, [lg], times[:12], rect)
+    check(h2 and W.spans_of(h2[0]["wins"], allm, times[:12], 12.0) == [[0.0, 12.0]], "整条都有:spans=[[0, 时长]]")
+    # 认字规则:水印写法才算,夹在句子里 / 玩家名字不算
+    for txt, want in (("抖音号：jiangjiangACG", "抖音"), ("抖音", "抖音"), ("快手号:12345", "快手"),
+                      ("bilibili", "B站"), ("小红书号：99", "小红书"), ("得物", "得物"),
+                      ("抖音熊二大王", ""), ("开局不到30秒抖音直接上线", ""), ("我们下期教学再会", ""),
+                      ("快手", "快手"), ("微博视频", "微博"), ("抖音|悦策电影", "抖音"), ("三斤西瓜", ""),
+                      ("直播版号：Z1904073", "")):
+        check(W.text_label(txt) == want, f"认字规则:「{txt}」→「{want}」")
+    # 比例框:竖画布里放横视频(上下黑边),框伸进黑边的部分切掉
+    r = W.content_rect(1920, 1080)
+    check(r == (0, 0, 1280, 720), f"横视频画布:{r}")
+    r = (0, 437, 720, 406)
+    check(W.to_ratio([360, 437, 72, 40.6], r) == [0.5, 0.0, 0.1, 0.1], "比例框:画布 → 原画面比例")
+    check(W.to_ratio([700, 420, 40, 40], r)[1] == 0.0 and W.to_ratio([700, 420, 40, 40], r)[2] <= 0.0278,
+          "比例框:伸到黑边 / 画外的部分切掉")
+    check(W.where([600, 450, 80, 30], r) == "右上角", "位置说法:右上角")
+    res = {"hits": [{"kind": "logo", "label": "B站", "where": "右上角"}, {"kind": "text", "label": "抖音", "where": "右下角"},
+                    {"kind": "still", "label": "疑似水印", "where": "左边"}]}
+    check(W.label_of(res) == "B站水印(右上角)、抖音字样(右下角)、疑似水印(左边)", f"一句话:{W.label_of(res)}")
+    check(W.label_of({"hits": []}) == "", "没查到:空")
+    # 整条 detect(合成一个小视频;要 ffmpeg)
+    from qe import vertical
+    ff = vertical.ffmpeg_path()
+    if ff:
+        p = str(tmp / "wm_synth.mp4")
+        vw = cv2.VideoWriter(p, cv2.VideoWriter_fourcc(*"mp4v"), 2, (cw, ch), False)
+        for i in range(2 * 16):
+            vw.write(frame(i < 2 * 8))                     # 16 秒,前 8 秒有
+        vw.release()
+        info = vertical.probe(p, ff)
+        res = W.detect(p, ff, info, use_ocr=False, logos=[lg])
+        hs = res["hits"]
+        check(res["frames"] >= 15 and len(hs) == 1 and hs[0]["label"] == "测试台", f"整条 detect 找到:{hs}")
+        if hs:
+            x = hs[0]
+            check(all(k in x for k in ("label", "kind", "score", "box", "ratio", "where", "t", "spans")), "返回的字段都在")
+            check(x["spans"] and x["spans"][0][0] <= 0.5 and 7 <= x["spans"][-1][1] <= 11.5, f"出现的那几段:{x['spans']}")
+            check(abs(x["ratio"][0] - gx / cw) < 0.02 and abs(x["ratio"][1] - gy / ch) < 0.02, f"比例框:{x['ratio']}")
+            check(res["shot"] and os.path.isfile(res["shot"]), "存了截图")
+
+
 def _no_dialogs():
     """测试里不弹框:中文确认框(gui.api_tab.ask)一律点「是」,提示框一律关掉(不然 offscreen 下会一直等人点)。"""
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -2083,7 +2196,9 @@ if __name__ == "__main__":
     test_ads(tmp)
     test_cover_cache_unique(tmp)
     test_cover_dialog_src(tmp)
+    test_api_direct(tmp)
     test_api_cover(tmp)
+    test_wm_detect_unit(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
