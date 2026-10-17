@@ -80,6 +80,9 @@ class Client:
     def __init__(self, client_id: str, client_secret: str, session=None, log=None):
         self._cid, self._sec = client_id, client_secret
         self.s = session or requests.Session()
+        # 直连企鹅号,不走电脑上的代理(2026-10-16 实测:走 xray 代理上传 0.5 MB/s,直连 3.8 MB/s;
+        # 用户:「昨晚 api 发布速度好慢」)。直连连不上(这台电脑只能走代理上网)才退回走代理,见 token()
+        self.s.trust_env = False
         self.log = log or (lambda m: None)
         self._tok, self._exp = "", 0.0
 
@@ -87,8 +90,16 @@ class Client:
     def token(self) -> str:
         if self._tok and time.time() < self._exp - 300:
             return self._tok
-        r = _net(lambda: self.s.post(AUTH, params={"grant_type": "clientcredentials", "client_id": self._cid,
-                                                   "client_secret": self._sec}, timeout=30), "换 token")
+        post = lambda: self.s.post(AUTH, params={"grant_type": "clientcredentials", "client_id": self._cid,
+                                                 "client_secret": self._sec}, timeout=30)
+        try:
+            r = _net(post, "换 token")
+        except ApiError:
+            if getattr(self.s, "trust_env", True):
+                raise
+            self.s.trust_env = True                      # 直连不通:换 token 是第一步、没副作用,改走代理再试一次
+            self.log("直连企鹅号不通,改走电脑上的代理")
+            r = _net(post, "换 token")
         j = self._json(r)
         d = j.get("data") or {}
         if not _ok(j) or not d.get("access_token"):
@@ -186,7 +197,7 @@ class Client:
                 raise ApiError("上传后平台处理失败" + _why(d))
             if stop and stop():
                 raise Stopped("停下了")
-            time.sleep(3)
+            time.sleep(1.5)                          # 问得勤一点(原来 3 秒,一条白等好几秒)
         raise ApiError(f"上传完等了 {int(timeout)} 秒还没拿到视频编号(vid)")
 
     def cover(self, vid: str, img: str) -> dict:
@@ -223,7 +234,7 @@ class Client:
                 raise ApiError("平台说发布失败" + _why(d))
             if stop and stop():
                 return "处理中"
-            time.sleep(5)
+            time.sleep(2)
         return "处理中"
 
     def send(self, path: str, title: str, cat: int, on_progress=None, stop=None, log=None,
