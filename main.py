@@ -19,8 +19,10 @@ def main():
         # 只许开一个(审查:开两个会互相冲掉设置,接口发还可能同一条发两遍)
         lock = QLockFile(str(data_dir() / "运行中.lock"))
         lock.setStaleLockTime(0)
-        if not lock.tryLock(100):
-            QMessageBox.information(None, "企鹅号发布助手", "企鹅号发布助手已经开着了(看看任务栏)。\n\n只能开一个,免得两边互相冲掉设置、重复发视频。")
+        # 刚关掉马上又开:上一个还在收尾(等后台活停下、存设置),等它几秒(用户 2026-10-17:「已经开着了」可我没看到)
+        if not lock.tryLock(8000):
+            QMessageBox.information(None, "企鹅号发布助手", "企鹅号发布助手已经开着了(看看任务栏)。\n\n只能开一个,免得两边互相冲掉设置、重复发视频。\n"
+                                    "(要是刚关掉:它还在收尾,过十几秒再开)")
             return 0
         st = Settings()
         if st.get("theme"):                       # 界面风格(设置里选)
