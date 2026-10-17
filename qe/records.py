@@ -83,10 +83,11 @@ class Records:
                 (v.date, v.account, v.employee, v.title, v.path, v.cover_kind, batch, "没摆成", bj_str(), why))
             self.conn.commit()
 
-    def mark_batch_published(self, batch: str) -> int:
+    def mark_batch_published(self, batch: str, at: str = "") -> int:
+        """at = 罐头里定时发布定的时间(北京时间「YYYY-MM-DD HH:MM」):发布时间记成那个点(每日汇总算到那天),备注写上定时。"""
         with _LOCK:
-            cur = self.conn.execute("UPDATE posts SET status='已发', published_at=? WHERE batch=? AND status='摆好'",
-                                    (bj_str(), batch))
+            cur = self.conn.execute("UPDATE posts SET status='已发', published_at=?, note=note || ? WHERE batch=? AND status='摆好'",
+                                    (f"{at}:00" if at else bj_str(), f"(罐头定时发布 {at})" if at else "", batch))
             self.conn.commit()
             return cur.rowcount
 

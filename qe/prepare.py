@@ -595,6 +595,158 @@ class Runner:
                 return "ok"
         raise PrepError("点完发布 3 分钟还没看到发出去(发布页上视频还在),请你看一眼")
 
+    # ---------------- 软件自己点「全部定时发布」(用户 2026-10-17 同意:摆好一批就定时,到点企鹅号自己发,电脑能关) ----------------
+    def schedule_all(self, titles: list[str], when, confirm: bool = True) -> str:
+        """这批都摆好了:鼠标移到「定时发布」上 →「全部定时发布」(只有一条时直接点「定时发布」)→ 选时间 →
+        核对框里「本文章将于 X年X月X日 X时X分 发布」和要的一样 → 点「确定」→ 等发布页上这批的小页签都没了。返回 "ok"。
+        when = 电脑本地时间的 datetime(罐头按电脑时钟算:这台电脑是美国时间,北京时间要先换算,见 sched_local)。
+        confirm=False:填好、核对完点「取消」(测试用,什么都不会发)。对不上 / 弹出不认识的框:点「取消」抛 PrepError。"""
+        self.ensure_visible()
+        pend = self.pending_videos()
+        if sorted(pend) != sorted(titles):
+            raise PrepError(f"发布页上的视频和这批对不上(页面上 {len(pend)} 条,这批 {len(titles)} 条),不敢点定时发布")
+        if self.ev("!!window.__qe.dlg()"):
+            raise PrepError("发布页上还开着弹框,不敢点定时发布")
+        btn = self.ev("""(() => { const b = [...document.querySelectorAll('button')].filter(e => window.__qe.vis(e) && e.innerText.trim() === '定时发布').pop();
+            if (!b) return null; b.scrollIntoView({block: 'nearest'}); const x = b.getBoundingClientRect(); return [x.left + x.width / 2, x.top + x.height / 2]; })()""")
+        if not btn:
+            raise PrepError("找不到「定时发布」按钮")
+        for dx in (-30, -10, 0):                        # 鼠标慢慢移上去,菜单才弹出来(和「发布」一样)
+            self.page.cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": btn[0] + dx, "y": btn[1]})
+            self.sleep(0.3)
+        self.sleep(0.8)
+        menu = self.ev("""(() => { const b = [...document.querySelectorAll('button')].find(e => window.__qe.vis(e) && e.innerText.trim() === '全部定时发布');
+            if (!b) return null; const x = b.getBoundingClientRect(); return [x.left + x.width / 2, x.top + x.height / 2]; })()""")
+        if len(titles) > 1 and not menu:
+            raise PrepError("鼠标移到「定时发布」上没弹出「全部定时发布」")
+        self.page.click_xy(*(menu or btn))
+        self.wait("(() => { const d = window.__qe.dlg(); return d && (d.querySelector('.omui-dialog-header') || {}).innerText === '定时发布' "
+                  "&& d.innerText.includes('选择发布时间'); })()", 10, "「定时发布」选时间的框")
+        try:
+            self._set_sched_time(when)
+            want = when.strftime("%Y-%m-%d %H:%M")
+            got, desc = self.ev("""(() => { const d = window.__qe.dlg(); const i = d.querySelector('.omui-datepicker-input input');
+                const s = [...d.querySelectorAll('div')].find(e => window.__qe.vis(e) && e.children.length === 0 && (e.innerText||'').startsWith('本文章将于'));
+                return [i ? i.value : '', s ? s.innerText.trim() : '']; })()""") or ["", ""]
+            nums = [int(x) for x in re.findall(r"\d+", desc)]
+            if got != want or nums != [when.year, when.month, when.day, when.hour, when.minute]:
+                raise PrepError(f"定时时间没填对(要 {want},框里是「{got}」「{desc}」)")
+            self.log(f"定时时间填好了:{desc}")
+        except Exception:
+            self._cancel_sched()
+            raise
+        if not confirm:
+            self._cancel_sched()
+            return "checked"
+        r = self.ev("""(() => { const d = window.__qe.dlg(); if ((d.querySelector('.omui-dialog-header') || {}).innerText !== '定时发布') return 'wrong';
+            const b = [...d.querySelectorAll('button.omui-button--primary')].find(b => window.__qe.vis(b) && b.innerText.trim() === '确定' && !b.classList.contains('omui-time-confirm'));
+            if (!b) return 'no'; b.click(); return 'ok'; })()""")
+        if r != "ok":
+            self._cancel_sched()
+            raise PrepError("定时发布的框里找不到「确定」")
+        self.log(f"点了「{'全部定时发布' if menu else '定时发布'}」的确定({len(titles)} 条,{want})")
+        end = time.time() + 180
+        while time.time() < end:
+            self.sleep(1.5)
+            try:
+                left = self.pending_videos()
+                path = self.page.ev("location.pathname")
+                dlg = self.ev("(() => { const d = window.__qe.dlg(); return d ? (d.innerText || '').replace(/\\s+/g, ' ').slice(0, 120) : ''; })()")
+                err = self.ev("""[...document.querySelectorAll('[class*=message],[class*=toast],[class*=notice]')].filter(e => window.__qe.vis(e))
+                    .map(e => (e.innerText || '').trim()).filter(t => /失败|错误|不能|未通过|请/.test(t)).slice(0, 2).join(' / ')""")
+            except CdpError:
+                continue
+            if dlg:
+                raise PrepError(f"点完定时发布弹出了一个框,软件不认识,停下来了(请你看一眼):{dlg}")
+            if err:
+                raise PrepError(f"点完定时发布页面上提示:{err}")
+            if "login" in (path or "").lower() or "passport" in (path or "").lower():
+                raise PrepError("点完定时发布页面跳到了登录页(掉登录了?),不知道定上没有,请你去后台看一眼")
+            if not left or "/creation/video" not in (path or ""):
+                self.log("这批定时发布定好了")
+                return "ok"
+        raise PrepError("点完定时发布 3 分钟还没看到结果(发布页上视频还在),请你看一眼")
+
+    def _set_sched_time(self, when):
+        """在「定时发布」框里选日期、选时间(2026-10-17 实测):
+        点框里的时间 → 弹出选时间的小框(日历 + 时:分 +「清空 / 确定」),常开在窗口下边看不见、网页又被大框锁着滚不动 →
+        小框里的东西都用网页里的点击(不用真鼠标)。点日期会把时间变回 00:00,所以先点日期;
+        再点「时:分」弹出两列:小时 00~23、分钟 00/05/…/55(5 分钟一档),选好点它的「确定」,最后点小框的「确定」。"""
+        if when.minute % 5:
+            raise PrepError(f"定时只能选 5 分钟一档(00、05 … 55),{when.strftime('%H:%M')} 不行")
+        panel = "[...document.querySelectorAll('.omui-datepicker-input-ragePanelWrap')].find(e => window.__qe.vis(e))"
+
+        def tap(js_el: str, what: str):
+            """在小框里找元素(js_el 里能用 w = 小框),发 mousedown / mouseup / click。"""
+            r = self.ev(f"""(() => {{ const w = {panel}; if (!w) return 'closed'; const e = ({js_el}); if (!e) return 'no';
+                for (const t of ['mousedown', 'mouseup', 'click']) e.dispatchEvent(new MouseEvent(t, {{bubbles: true, cancelable: true, view: window}}));
+                return 'ok'; }})()""")
+            if r != "ok":
+                raise PrepError(f"选时间的小框{'关了' if r == 'closed' else '里找不到' + what}")
+            self.sleep(0.4)
+
+        inp = self.ev("""(() => { const i = window.__qe.dlg().querySelector('.omui-datepicker-input input'); if (!i) return null;
+            const b = i.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()""")
+        if not inp:
+            raise PrepError("定时发布的框里找不到时间输入框")
+        self.page.click_xy(*inp)
+        self.wait(f"!!{panel}", 5, "选时间的小框")
+        self.sleep(0.3)
+        for _ in range(3):                              # 翻到要的月份(只能选 7 天以内,最多翻一次)
+            ym = self.ev(f"(() => {{ const w = {panel}; return w ? ((w.querySelector('.curr-date') || {{}}).innerText || '') : ''; }})()") or ""
+            n = [int(x) for x in re.findall(r"\d+", ym)]
+            if n == [when.year, when.month]:
+                break
+            nav = "next-m" if (n and (n[0], n[1]) < (when.year, when.month)) else "prev-m"
+            tap(f"w.querySelector('.omui-calendar-nav.{nav}')", "翻月份的箭头")
+        else:
+            raise PrepError(f"选时间的小框翻不到 {when.year}年{when.month}月")
+        # 日期(7 天以内,同一个数字在日历上不会有两个能点的:上个月的都过去了)
+        tap(f"""[...w.querySelectorAll('.omui-calendar-table tbody td span')]
+            .find(s => (s.innerText || '').trim() === '{when.day}' && !s.classList.contains('no-drop'))""", f" {when.month}月{when.day}日(只能选 7 天以内)")
+        want_d = when.strftime("%Y-%m-%d")
+        got_d = self.ev(f"(() => {{ const w = {panel}; const i = w && w.querySelector('.omui-time-precision-item__date input'); return i ? i.value : ''; }})()")
+        if got_d != want_d:
+            raise PrepError(f"日历里点了 {when.day} 号,日期是「{got_d}」不是 {want_d}")
+        # 时:分
+        tap("w.querySelector('.omui-timepicker-input')", "「时:分」")
+        tp = "[...document.querySelectorAll('.omui-timepicker-panel')].find(e => window.__qe.vis(e))"
+        self.wait(f"!!{tp}", 5, "选小时分钟的下拉")
+        for col, val in ((0, f"{when.hour:02d}"), (1, f"{when.minute:02d}")):
+            r = self.ev(f"""(() => {{ const p = {tp}; const sel = p.querySelectorAll('.omui-timepicker-panel-select')[{col}]; if (!sel) return 'nocol';
+                const o = [...sel.querySelectorAll('li, [class*=option]')].find(e => e.children.length === 0 && (e.innerText || '').trim() === '{val}');
+                if (!o) return 'no'; o.scrollIntoView({{block: 'nearest'}});
+                for (const t of ['mousedown', 'mouseup', 'click']) o.dispatchEvent(new MouseEvent(t, {{bubbles: true, cancelable: true, view: window}}));
+                return 'ok'; }})()""")
+            if r != "ok":
+                raise PrepError(f"选{'小时' if col == 0 else '分钟'}的那列里找不到「{val}」")
+            self.sleep(0.3)
+        r = self.ev(f"""(() => {{ const p = {tp}; const b = p && p.querySelector('.omui-timepicker-panel-confirm'); if (!b) return 'no';
+            const x = b.querySelector('button, a, span') || b; if ((b.innerText || '').trim() !== '确定') return 'text';
+            for (const t of ['mousedown', 'mouseup', 'click']) x.dispatchEvent(new MouseEvent(t, {{bubbles: true, cancelable: true, view: window}}));
+            return 'ok'; }})()""")
+        if r != "ok":
+            raise PrepError("选小时分钟的下拉里找不到「确定」")
+        self.sleep(0.5)
+        hm = when.strftime("%H:%M")
+        got = self.ev(f"(() => {{ const w = {panel}; const i = w && w.querySelector('.omui-timepicker-input'); return i ? i.value : 'closed'; }})()")
+        if got != hm:
+            raise PrepError(f"「时:分」没选上(要 {hm},是 {got})")
+        # 小框自己的「确定」(只是把时间填进框里,不是定时发布框的确定)
+        tap("[...w.querySelectorAll('button.omui-time-confirm')].find(b => (b.innerText || '').trim() === '确定')", "「确定」")
+        self.sleep(0.4)
+
+    def _cancel_sched(self):
+        """定时发布的框:关掉选时间的小框,点「取消」。"""
+        try:
+            self.page.key("Escape", 27)
+            self.sleep(0.4)
+            self.ev("""(() => { const d = window.__qe.dlg(); if (!d) return;
+                const b = [...d.querySelectorAll('button')].find(b => window.__qe.vis(b) && b.innerText.trim() === '取消'); if (b) b.click(); })()""")
+            self.sleep(0.6)
+        except Exception:
+            pass
+
     def _close_dialog(self):
         """出错时把开着的弹框都关掉(点「取消」或右上角 ×,不点别的按钮)。换封面框和裁剪框可能同时开着,一个个关。"""
         for _ in range(4):
@@ -614,6 +766,14 @@ class Runner:
         if self.page:
             self.page.close()
             self.page = None
+
+
+def sched_local(bj: str):
+    """「2026-10-18 09:00」(北京时间)→ 电脑本地时间(罐头的定时框按电脑时钟:这台电脑是美国时间,
+    北京 10-18 09:00 = 电脑上 10-17 18:00)。"""
+    from datetime import datetime
+    from .config import BJ
+    return datetime.strptime(bj, "%Y-%m-%d %H:%M").replace(tzinfo=BJ).astimezone().replace(tzinfo=None, second=0, microsecond=0)
 
 
 def _js_list(items) -> str:

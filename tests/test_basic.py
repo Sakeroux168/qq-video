@@ -1629,6 +1629,17 @@ def test_prepare_retry(tmp: Path):
     check(tries == {"好": 1, "坏": 1, "第二次好": 1}, "平时(人看着)不重试")
     from qe.prepare import FORBID
     check(not FORBID.search("放弃编辑"), "「放弃编辑」能点(不是发布)")
+    import datetime as dt
+    from qe.config import BJ
+    from qe.prepare import sched_local
+    want = dt.datetime(2026, 10, 18, 9, 0, tzinfo=BJ).astimezone().replace(tzinfo=None)
+    check(sched_local("2026-10-18 09:00") == want, f"北京时间换成电脑上的时间(罐头的定时按电脑时钟)-> {sched_local('2026-10-18 09:00')}")
+    r2 = object.__new__(Runner)
+    try:
+        r2._set_sched_time(dt.datetime(2026, 10, 18, 9, 3))
+        check(False, "定时只能 5 分钟一档")
+    except Exception as e:
+        check("5 分钟" in str(e), "定时不是 5 分钟一档的直接拒绝(罐头只能选 00 / 05 … 55)")
 
 
 def test_sched_edu(tmp: Path):
@@ -1647,17 +1658,23 @@ def test_sched_edu(tmp: Path):
     for t in ("好的一条视频", "好的二条视频", "坏的一条视频", "黄的一条视频", "黄的二条视频"):
         (d / f"{t}.mp4").write_bytes(b"x")
         _img(d / f"{t}.png", 640, 360)
-    calls = []
+    d2 = root / "10.19" / "小天地" / "李"
+    d2.mkdir(parents=True)
+    for t in ("定时的一条视频", "定时的二条视频", "定时坏的视频"):
+        (d2 / f"{t}.mp4").write_bytes(b"x")
+        _img(d2 / f"{t}.png", 640, 360)
+    calls, ats = [], []
 
     class FakeBW(QObject):
         log = Signal(str)
         one = Signal(object, bool, str)
         finished_batch = Signal(object, str, str)
 
-        def __init__(self, acc, vids, shots, parent=None, auto_publish=False, unattended=False):
+        def __init__(self, acc, vids, shots, parent=None, auto_publish=False, unattended=False, sched_at=""):
             super().__init__(parent)
             self.vids, self.unattended = vids, unattended
             calls.append(([v.title for v in vids], unattended))
+            ats.append(sched_at)
 
         def isRunning(self):
             return False
@@ -1710,6 +1727,21 @@ def test_sched_edu(tmp: Path):
         w._ask = lambda *a, **k: True
         w.all_covers_ok()
         check(not y2.warn and Adjustments(tmp / "封面调整.json").is_ok(y2.path, y2.cover), "「全部调好了」:标黄的不再标黄,记在硬盘上")
+        # 罐头自带的定时(用户 2026-10-17):现在就摆,每批「全部定时发布」到同一个北京时间
+        calls.clear()
+        ats.clear()
+        boxes.clear()
+        w._sched_fire("10.19", "2026-10-19 09:00")
+        t0 = time.time()
+        while (w._unattended or not boxes) and time.time() - t0 < 60:
+            app.processEvents()
+            time.sleep(0.05)
+        rows = {r["title"]: r for r in rec.rows("10.19")}
+        check(ats and all(a == "2026-10-19 09:00" for a in ats), f"每批都定时到同一个点 -> {ats}")
+        check(rows["定时的一条视频"]["status"] == "已发" and rows["定时的一条视频"]["published_at"] == "2026-10-19 09:00:00"
+              and "罐头定时发布" in rows["定时的一条视频"]["note"] and (rows.get("定时坏的视频") or {}).get("status") != "已发",
+              "定好的记成已发,发布时间 = 定的那个点(每日汇总算到那天);没摆好的不算")
+        check(boxes and "定好了 2 条" in boxes[-1] and "电脑可以关" in boxes[-1] and not w._sched_at, f"写总结:定好了几条、电脑能关 -> {boxes[-1][:80] if boxes else ''}")
         w.close()
     finally:
         GW.BatchWorker, GW.C.decide, GW.C.note_wide, QMessageBox.information = real

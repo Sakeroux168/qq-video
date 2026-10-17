@@ -128,7 +128,7 @@ class Scheduler(QObject):
         return f"⏰ {short_at(p['at'])} 开始发 {p['date']} 的(还有 {left_text(p['at'])})" if p else ""
 
 
-def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "") -> tuple[str, str] | None:
+def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "", tip: str = "") -> tuple[str, str] | None:
     """弹框选:哪天的素材、哪天几点开始(北京时间)。返回 (「YYYY-MM-DD HH:MM」, 素材日期);不定了返回 None。"""
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
@@ -148,7 +148,7 @@ def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "")
     e_time = QTimeEdit(QTime(9, 0))
     e_time.setDisplayFormat("HH:mm")
     f.addRow("几点开始(北京时间):", e_time)
-    tip = QLabel("到点后软件自己发,发到完为止。\n电脑别关机、别睡眠(软件会叫它别睡);软件和创作罐头都要开着,罐头最小化没关系。" +
+    tip = QLabel((tip or "到点后软件自己发,发到完为止。\n电脑别关机、别睡眠(软件会叫它别睡);软件和创作罐头都要开着,罐头最小化没关系。") +
                  (f"\n\n{note}" if note else ""))
     tip.setWordWrap(True)
     tip.setStyleSheet("color:#8a8b91")
