@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".flv", ".wmv")
 _DATE_RE = re.compile(r"^(\d{1,2})[.\-_月](\d{1,2})日?$")
+# 日期文件夹会被人改名加后缀(10.17 真有人把「10.14」改成「10.14（101）」),月 / 日只看开头
+_DAY_RE = re.compile(r"^\s*(\d{1,2})[.\-_月](\d{1,2})(?!\d)")
 
 
 @dataclass
@@ -47,8 +49,14 @@ def list_dates(root: str) -> list[str]:
 
 
 def month_of(date: str) -> str:
-    m = _DATE_RE.match(date.strip())
+    m = _DAY_RE.match(date)
     return str(int(m.group(1))) if m else ""
+
+
+def day_of(date: str) -> str:
+    """日期文件夹是哪天:「10.14」「10.14（101）」「10-14」都是 10.14;认不出 → ""。"""
+    m = _DAY_RE.match(date)
+    return f"{int(m.group(1))}.{int(m.group(2))}" if m else ""
 
 
 def _subdirs(d: str) -> list[str]:

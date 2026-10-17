@@ -444,7 +444,9 @@ class MainWindow(QMainWindow):
     def _mark_skips(self, vs):
         """不摆的写上原因(Video.skip):① 同一个号里同名的只留一条(已经发了 / 摆了的那条优先);
         ② 这个号以前发过同名的 —— 发布记录是按路径认的,员工把发过的挪了地方(10.15 真有人把发过的 31 条挪进
-        「31条（已发）」),路径一变就认不出来了,所以再按 号 + 标题 对一遍。"""
+        「31条（已发）」),路径一变就认不出来了,所以再按 号 + 标题 对一遍。
+        ③ 同一天的(文件夹被改了名:10.17 有人把「10.14」改成「10.14（101）」)就是发过的那条 → 记下新位置,
+        直接算「已发」(不然显示没发,人会再标一遍手动发过,每日汇总就多算了)。"""
         F.mark_dups(vs, prefer=lambda v: bool(self.rec.status_of(v.path)))
         sent = {}
         for r in self.rec.rows():
@@ -454,8 +456,12 @@ class MainWindow(QMainWindow):
             if v.skip or self.rec.status_of(v.path):
                 continue
             r = sent.get(F.dup_key(v))
-            if r:
-                v.skip = f"这个号发过同名的({r['date']} {r['employee']}),不再发(真要发就让员工改个名)"
+            if not r:
+                continue
+            day = F.day_of(v.date)
+            if day and F.day_of(r["date"]) == day and self.rec.relink(r["id"], v.path):
+                continue
+            v.skip = f"这个号发过同名的({r['date']} {r['employee']}),不再发(真要发就让员工改个名)"
 
     def _say_report(self, acc: str, rep: list) -> int:
         """翻文件夹时跳过的 / 打不开的说给人听(不悄悄漏掉)。返回打不开的个数。"""

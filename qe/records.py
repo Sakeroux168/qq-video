@@ -130,6 +130,17 @@ class Records:
             self.conn.execute("UPDATE posts SET moved_pkey=? WHERE id=?", (pkey(new_path), rid))
             self.conn.commit()
 
+    def relink(self, rid: int, new_path: str) -> bool:
+        """发过的那条被人挪了 / 文件夹改了名:记下现在的位置,之后按路径也认得出发过。
+        已经记过挪走位置、而且那里文件还在的不动(不把归档的位置盖掉)。返回改没改。"""
+        with _LOCK:
+            r = self.conn.execute("SELECT path, moved_pkey FROM posts WHERE id=?", (rid,)).fetchone()
+            if r is None or (r["moved_pkey"] and r["moved_pkey"] != pkey(r["path"]) and os.path.exists(r["moved_pkey"])):
+                return False
+            self.conn.execute("UPDATE posts SET moved_pkey=? WHERE id=?", (pkey(new_path), rid))
+            self.conn.commit()
+            return True
+
     def api_finish(self, rid: int, status: str, note: str = "") -> None:
         """「发布中」那笔改成结果:已发 / 没发成 / 结果不明。"""
         with _LOCK:

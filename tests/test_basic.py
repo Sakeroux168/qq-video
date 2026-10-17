@@ -1520,6 +1520,56 @@ def test_window_dups(tmp: Path):
     w.close()
 
 
+def test_window_renamed(tmp: Path):
+    print("[界面:日期 / 号文件夹被人改了名(10.14 → 10.14（101）),发过的照样算已发,不用再标手动发过]")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from gui.window import MainWindow
+    from qe import folders as F
+    from qe.config import Settings
+    from qe.records import Records, pkey
+    app = QApplication.instance() or QApplication([])
+    check(F.day_of("10.14（101）") == "10.14" and F.day_of("10-14") == "10.14" and F.day_of("10.145") == ""
+          and F.month_of("10.14（101）") == "10", "改了名的日期文件夹也认得出哪天、几月(挪走要用月)")
+    root = tmp / "素材ren"
+    a = root / "10.14（101）" / "小天地（33）"
+    for rel in ("李/发过的.mp4", "李/没发的.mp4", "李/别天发过的.mp4", "李/归档过的.mp4"):
+        (a / rel).parent.mkdir(parents=True, exist_ok=True)
+        (a / rel).write_bytes(b"x")
+        _img(str(a / rel)[:-4] + ".png", 640, 360)
+    rec = Records(tmp / "rren.sqlite")
+    old = tmp / "素材ren" / "10.14" / "小天地" / "李"
+    for t, d in (("发过的", "10.14"), ("别天发过的", "10.12"), ("归档过的", "10.14")):
+        rec.manual_published(F.Video(path=str(old / f"{t}.mp4"), title=t, account="家长小天地", employee="李", date=d))
+    arch = tmp / "归档ren" / "归档过的.mp4"
+    arch.parent.mkdir(parents=True)
+    arch.write_bytes(b"x")
+    rid = next(r["id"] for r in rec.rows() if r["title"] == "归档过的")
+    rec.mark_moved(rid, str(arch))
+    st = Settings(tmp / "sren.json")
+    st["material_root"] = str(root)
+    st["api_roots"] = [str(tmp / "api_none")]
+    st["ai_key"] = "test"
+    w = MainWindow(st, rec)
+    w.c_date.setCurrentIndex(w.c_date.findData("10.14（101）"))
+    top = next(w.tree.topLevelItem(i) for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地")
+    li = top.child(0)
+    check("发了 1" in li.text(1) and "2 条不发" in li.text(1), f"同一天改了名的算已发,别天的 / 归档过的照旧不发 -> {li.text(1)}")
+    check(rec.status_of(str(a / "李" / "发过的.mp4")) == "已发", "记下了新位置,按路径就认得出")
+    check(rec.status_of(str(arch)) == "已发", "已经挪到归档的那条,归档位置没被盖掉")
+    li.setCheckState(0, Qt.CheckState.Checked)
+    t0 = time.time()
+    while (w.cover_worker and w.cover_worker.isRunning()) and time.time() - t0 < 30:
+        app.processEvents()
+        time.sleep(0.05)
+    app.processEvents()
+    _acc, vids = w.next_batch()
+    check([v.title for v in vids] == ["没发的"], f"下一批只摆没发的 -> {[v.title for v in vids]}")
+    n = sum(1 for r in rec.rows() if r["status"] == "已发")
+    check(n == 3 and pkey(str(old / "发过的.mp4")) in {r["pkey"] for r in rec.rows()}, "没多记一笔(每日汇总不会多算)")
+    w.close()
+
+
 def test_api_wm(tmp: Path):
     print("[高级检查:查水印(记在硬盘上)/ 普通检查过的只查水印 / 右键「没水印」能发]")
     from PySide6.QtWidgets import QApplication
@@ -2249,6 +2299,7 @@ if __name__ == "__main__":
     test_bughunt(tmp)
     test_daily_plan(tmp)
     test_login_key(tmp)
+    test_window_renamed(tmp)
     test_api_wm(tmp)
     test_edu_wm(tmp)
     test_blur(tmp)
