@@ -517,21 +517,29 @@ class Runner:
             self.ensure_visible()
             if t not in self.pending_videos():
                 continue
+            # 只有选中的那个页签才显示 ×(.omui-icon-close),没选中的那里是「传完了」的小勾(2026-10-17 实测)→ 先切过去
+            self.select_tab(t)
             xy = self.ev("""((w) => { const e = window.__qe.tabs().find(e => (e.innerText||'').trim() === w); if (!e) return null;
                 const it = e.parentElement; it.scrollIntoView({block: 'nearest', inline: 'nearest'});
-                const x = it.querySelector('[class^="icon-"]'); if (!x) return null;
+                const x = it.querySelector('.omui-icon-close'); if (!x || !window.__qe.vis(x)) return null;
                 const r = x.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })(%r)""" % t)
             if not xy:
                 raise PrepError(f"「{t[:20]}」的小页签上找不到关掉的 ×")
             self.page.cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": xy[0], "y": xy[1]})
             self.sleep(0.3)
             self.page.click_xy(xy[0], xy[1])
-            self.wait("(() => { const d = window.__qe.dlg(); return d && (d.innerText || '').includes('放弃'); })()", 10, "「放弃编辑」的框")
-            r = self.ev("""(() => { const d = window.__qe.dlg(); const b = [...d.querySelectorAll('button')].find(b => window.__qe.vis(b) && (b.innerText||'').trim().startsWith('放弃'));
-                if (!b) return 'no'; if (window.__qe.bad(b.innerText)) return 'forbidden'; b.click(); return 'ok'; })()""")
+            # 罐头弹的框(2026-10-17 实测):标题「放弃编辑」,正文「放弃后不可恢复,是否放弃编辑下面的视频? <标题>」,按钮「确认 / 取消」
+            # (「不可恢复」说的是罐头里编辑到一半的东西,硬盘上的视频文件不动)。认准是这条的「放弃编辑」框才点「确认」
+            self.wait("((w) => { const d = window.__qe.dlg(); const s = d ? (d.innerText || '') : ''; return s.includes('放弃编辑') && s.includes(w); })(%r)" % t,
+                      10, "「放弃编辑」的框")
+            r = self.ev("""((w) => { const d = window.__qe.dlg(); const s = d.innerText || '';
+                const h = ((d.querySelector('.omui-dialog-header') || {}).innerText || '').trim();
+                if (h !== '放弃编辑' || !s.includes(w)) return 'wrong';
+                const b = [...d.querySelectorAll('button')].find(b => window.__qe.vis(b) && (b.innerText||'').trim() === '确认');
+                if (!b) return 'no'; b.click(); return 'ok'; })(%r)""" % t)
             if r != "ok":
                 self._close_dialog()
-                raise PrepError(f"关「{t[:20]}」的框里找不到「放弃编辑」")
+                raise PrepError(f"关「{t[:20]}」的「放弃编辑」框不对劲({r}),没点")
             self.wait("((w) => !window.__qe.tabs().some(e => (e.innerText||'').trim() === w))(%r)" % t, 15, f"「{t[:20]}」的页签关掉")
             self.log(f"  没摆好的「{t[:20]}」关掉了(放弃编辑,没发)")
 
