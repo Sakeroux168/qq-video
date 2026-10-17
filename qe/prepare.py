@@ -599,8 +599,11 @@ class Runner:
     def schedule_all(self, titles: list[str], when, confirm: bool = True) -> str:
         """这批都摆好了:鼠标移到「定时发布」上 →「全部定时发布」(只有一条时直接点「定时发布」)→ 选时间 →
         核对框里「本文章将于 X年X月X日 X时X分 发布」和要的一样 → 点「确定」→ 等发布页上这批的小页签都没了。返回 "ok"。
-        when = 电脑本地时间的 datetime(罐头按电脑时钟算:这台电脑是美国时间,北京时间要先换算,见 sched_local)。
+        when = 北京时间的 datetime(企鹅号把定时框里的时间当北京时间,不换算,见 sched_local)。
         confirm=False:填好、核对完点「取消」(测试用,什么都不会发)。对不上 / 弹出不认识的框:点「取消」抛 PrepError。"""
+        from datetime import timedelta
+        if when <= bj_now().replace(tzinfo=None) + timedelta(minutes=10):   # 定在过去 / 太近:企鹅号会一定上就直接发(2026-10-17 吃过亏)
+            raise PrepError(f"定时 {when:%m-%d %H:%M}(北京时间)离现在不到 10 分钟或者已经过了,不定(不然会马上发出去)")
         self.ensure_visible()
         pend = self.pending_videos()
         if sorted(pend) != sorted(titles):
@@ -769,11 +772,12 @@ class Runner:
 
 
 def sched_local(bj: str):
-    """「2026-10-18 09:00」(北京时间)→ 电脑本地时间(罐头的定时框按电脑时钟:这台电脑是美国时间,
-    北京 10-18 09:00 = 电脑上 10-17 18:00)。"""
+    """「2026-10-18 09:00」(北京时间)→ 填进罐头定时框的时间:**就是北京时间,不换算**。
+    2026-10-17 教训:以为定时框按电脑时钟(这台电脑是美国时间),把北京 10-18 09:00 换成了 10-17 18:00 去填,
+    企鹅号把 18:00 当北京时间、已经过了 → 一定上就直接发了(后台显示「发布于 10-17 18:00:00」)。
+    定时框的默认值 / 日历是按电脑时钟画的,但企鹅号收到的时间是当北京时间算的。"""
     from datetime import datetime
-    from .config import BJ
-    return datetime.strptime(bj, "%Y-%m-%d %H:%M").replace(tzinfo=BJ).astimezone().replace(tzinfo=None, second=0, microsecond=0)
+    return datetime.strptime(bj, "%Y-%m-%d %H:%M")
 
 
 def _js_list(items) -> str:

@@ -1632,9 +1632,14 @@ def test_prepare_retry(tmp: Path):
     import datetime as dt
     from qe.config import BJ
     from qe.prepare import sched_local
-    want = dt.datetime(2026, 10, 18, 9, 0, tzinfo=BJ).astimezone().replace(tzinfo=None)
-    check(sched_local("2026-10-18 09:00") == want, f"北京时间换成电脑上的时间(罐头的定时按电脑时钟)-> {sched_local('2026-10-18 09:00')}")
+    check(sched_local("2026-10-18 09:00") == dt.datetime(2026, 10, 18, 9, 0) and BJ,
+          f"定时框里直接填北京时间,不按电脑时钟换算(2026-10-17 换算错了一回,一定上就发了)-> {sched_local('2026-10-18 09:00')}")
     r2 = object.__new__(Runner)
+    try:
+        r2.schedule_all(["x"], dt.datetime(2000, 1, 1, 9, 0))
+        check(False, "定在过去的不能定")
+    except Exception as e:
+        check("不定" in str(e), "定时时间已经过了 / 太近:不定(不然企鹅号会马上发)")
     try:
         r2._set_sched_time(dt.datetime(2026, 10, 18, 9, 3))
         check(False, "定时只能 5 分钟一档")
