@@ -259,7 +259,10 @@ def test_api(tmp: Path):
     check(apisrc.dates(roots, known) == ["10.14", "10.15"], "有哪些日子")
     vs = apisrc.videos(roots, "10.15", known)
     check(sorted(v.account for v in vs) == ["CSGO战神君", "DNF连招档案馆", "国漫趣谈"], "「不能用」「1疑似脏话」不算")
-    check(apisrc.archive_dir({}, "10.15") == r"X:\知乎视频\内容查看\10月发布视频\企鹅号\企鹅号软件发布", "发完挪到「企鹅号软件发布」")
+    check(apisrc.archive_dir({}, "10.15") == r"X:\知乎视频\内容查看\10月发布视频\企鹅号\企鹅号软件发布\10.15",
+          "发完挪到「企鹅号软件发布\日期」(日期 = 发出去那天)")
+    check(apisrc.archive_dir({}).endswith(apisrc.pub_day()) and f"{apisrc.pub_day().split('.')[0]}月发布视频" in apisrc.archive_dir({}),
+          "不给日期就按今天(北京时间)算,{month} 也是")
 
     p = topic.split_topics("标题 #a #B #b")
     check(p["body"] == "标题" and p["sep"] == " " and p["tags"] == ["a", "B"], "话题拆开、不分大小写去重")
@@ -481,11 +484,12 @@ def test_api_tab(tmp: Path):
     check(sorted((t, c) for _x, t, c in sent) == [("c1", 1604), ("c2", 1604), ("e1", 1605)], "三条都发了,分类按号")
     gaps = [b[0] - a[0] for a, b in zip(sent, sent[1:])]
     check(all(g >= 0.95 for g in gaps), f"每条之间歇够间隔 -> {[round(g, 2) for g in gaps]}")
-    out = tmp / "发布" / "10.15已发布"
-    check(sorted(os.listdir(out / "CSGO")) == ["c1.mp4", "c2.mp4"] and os.listdir(out / "电竞赛事") == ["e1.mp4"]
-          and os.path.isfile(os.path.join(esp, "e1.jpg")), "发完挪走,按游戏分子文件夹(名字 = 旧软件「账号」),只挪视频")
-    check(apisrc.archive_dir({"api_archive_by_game": False}, "10.15", accs[0]).endswith("企鹅号软件发布")
-          and apisrc.archive_dir({}, "10.15", accs[0]).endswith("企鹅号软件发布" + os.sep + "CSGO"), "不勾「按游戏分」就平铺")
+    out = tmp / "发布" / f"{apisrc.pub_day()}已发布"          # 按发出去那天(今天)算,不是素材文件夹的 10.15
+    check(sorted(os.listdir(out / "CSGO")) == ["c1.mp4", "c2.mp4"] and sorted(os.listdir(out / "电竞赛事")) == ["e1.jpg", "e1.mp4"]
+          and not os.path.isfile(os.path.join(esp, "e1.jpg")), "发完挪走,按游戏分子文件夹(名字 = 旧软件「账号」),同名封面跟着挪")
+    check(apisrc.archive_dir({"api_archive_by_game": False}, "10.15", accs[0]).endswith("企鹅号软件发布" + os.sep + "10.15")
+          and apisrc.archive_dir({}, "10.15", accs[0]).endswith(os.path.join("企鹅号软件发布", "10.15", "CSGO")),
+          "日期下面再分游戏;不勾「按游戏分」就只到日期")
     check(len([r for r in rec.rows("10.15") if r["employee"] == "接口" and r["status"] == "已发"]) == 3, "记进记录(员工 = 接口)")
     for f in ("c3.mp4", "c4.mp4"):
         (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15" / f).write_bytes(b"x")

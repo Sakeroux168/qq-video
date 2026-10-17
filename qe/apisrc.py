@@ -123,10 +123,23 @@ def _videos_in(d: str, nick: str, date: str) -> list[ApiVideo]:
     return out
 
 
-def archive_dir(st, date: str, acc: dict | None = None) -> str:
-    """发完挪到哪。设置里勾了「按游戏分子文件夹」(默认勾)且给了号:再进一层游戏名文件夹。"""
-    month = date.split(".")[0] if date else "?"
-    d = str(st.get("api_archive") or DEFAULT_ARCHIVE).replace("{month}", month).replace("{date}", date)
+def pub_day() -> str:
+    """今天(北京时间)= 发出去的那天,「10.17」这样。"""
+    from .config import bj_now
+    n = bj_now()
+    return f"{n.month}.{n.day}"
+
+
+def archive_dir(st, date: str = "", acc: dict | None = None) -> str:
+    """发完挪到哪:企鹅号软件发布 \ 发出去的日期(北京时间,用户 2026-10-17:「…/企鹅号软件发布/日期/各个账号/视频和封面」)
+    \ 游戏名(设置里勾了「按游戏分子文件夹」,默认勾)。{month} 也按发出去的那天算。
+    date = 按哪天算(不给就是今天);设置里自己写了 {date} 的,就不再多加一层日期。"""
+    day = date or pub_day()
+    month = day.split(".")[0] if day else "?"
+    tpl = str(st.get("api_archive") or DEFAULT_ARCHIVE)
+    d = tpl.replace("{month}", month).replace("{date}", day)
+    if "{date}" not in tpl:
+        d = os.path.join(d, day)
     if acc is not None and st.get("api_archive_by_game", True):
         d = os.path.join(d, game_folder(acc))
     return d
@@ -140,8 +153,18 @@ def game_folder(acc: dict) -> str:
 
 
 def move_published(path: str, dest_dir: str) -> str:
-    """发完把视频挪到「X月发布视频 / 企鹅号 / 企鹅号软件发布 / 游戏名」(平铺,和旧软件一样只挪视频)。重名加 (2)。返回新位置。
-    走 fsops.safe_move_file:被占着就报错留在原处,不会原处和归档各一份。"""
+    """发完把视频挪到「X月发布视频 / 企鹅号 / 企鹅号软件发布 / 日期 / 游戏名」,同名封面跟着挪(用户 2026-10-17:「视频和封面」)。
+    重名加 (2)(封面跟视频用同一个新名字)。返回视频的新位置。
+    走 fsops.safe_move_file:被占着就报错留在原处,不会原处和归档各一份;封面挪不动不算失败(视频已经挪了)。"""
+    from .apicover import find
     from .fsops import safe_move_file, unique
     os.makedirs(dest_dir, exist_ok=True)
-    return safe_move_file(path, unique(os.path.join(dest_dir, os.path.basename(path))))
+    cover = find(path)
+    new = safe_move_file(path, unique(os.path.join(dest_dir, os.path.basename(path))))
+    if cover:
+        stem = os.path.splitext(os.path.basename(new))[0]
+        try:
+            safe_move_file(cover, unique(os.path.join(dest_dir, stem + os.path.splitext(cover)[1])))
+        except Exception:
+            pass
+    return new

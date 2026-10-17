@@ -1512,7 +1512,7 @@ class ApiTab(QWidget):
         par = max(1, _num(self.st.get("api_threads"), 1))
         gap = max(0.0, float(_num(self.st.get("api_interval"), 5)))
         by_game = bool(self.st.get("api_archive_by_game", True))
-        dest = apisrc.archive_dir(self.st, d)
+        dest = apisrc.archive_dir(self.st)                 # 按发出去的那天(北京时间)分
         per = "\n".join(f"  · {n}:{len(idx)} 条 · {apiacc.CATEGORIES.get(accs[n].get('category'), accs[n].get('category'))}" +
                         (f" → {apisrc.game_folder(accs[n])}" if by_game else "") for n, idx in by_acc.items())
         mins = max(1, round(len(rows) * (gap + 25) / 60 / par))          # 一条大概传 + 发 25 秒,加上间隔
@@ -1537,7 +1537,7 @@ class ApiTab(QWidget):
         msg = msg.replace("\n\n发吗?", f"\n{cov_line}\n\n发吗?")
         detail = (f"每个号:\n{per}\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;{cov_line}。\n"
                   f"{'一条一条发' if par == 1 else f'{par} 个号一起发'},上一条发完歇 {gap:g} 秒再发下一条。\n"
-                  f"发成了挪到:{dest}" + ("\\游戏名" if by_game else ""))
+                  f"发成了挪到:{dest}" + ("\\游戏名" if by_game else "") + "(同名封面跟着挪)")
         if not ask(self, "发布", msg, "发", "先不发", detail=detail, default_no=bool(warn_day)):
             return
         vs = self.videos
@@ -1678,7 +1678,7 @@ class ApiTab(QWidget):
                     continue
                 try:
                     old = v.path
-                    v.path = apisrc.move_published(v.path, apisrc.archive_dir(self.st, d, a))
+                    v.path = apisrc.move_published(v.path, apisrc.archive_dir(self.st, "", a))
                     if "id" in rid:                       # 记下新位置:之后在归档里再看到它也认得出发过
                         _retry(lambda: self.rec.mark_moved(rid["id"], v.path))
                 except OSError as e:
