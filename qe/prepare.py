@@ -648,9 +648,24 @@ class Runner:
             self._cancel_sched()
             raise PrepError("定时发布的框里找不到「确定」")
         self.log(f"点了「{'全部定时发布' if menu else '定时发布'}」的确定({len(titles)} 条,{want})")
-        end = time.time() + 180
+        t0 = time.time()
+        end, back = t0 + 180, False
         while time.time() < end:
             self.sleep(1.5)
+            # 用户 2026-10-17:点完确定「定时发布」按钮会一直转圈,其实等 10 秒点左上角「返回」就定上了 → 等 12 秒还在发布页就点「返回」
+            if not back and time.time() - t0 > 12:
+                try:
+                    xy = self.ev("""(() => { const e = [...document.querySelectorAll('*')].find(e => window.__qe.vis(e) && e.children.length <= 1
+                        && (e.innerText || '').trim() === '返回' && e.getBoundingClientRect().top < 150);
+                        if (!e) return null; const b = e.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()""")
+                    on_create = "/creation/video" in (self.page.ev("location.pathname") or "")
+                except CdpError:
+                    xy, on_create = None, False
+                if xy and on_create:
+                    self.log("定时发布一直在转圈,等了 12 秒,点左上角「返回」")
+                    self.page.click_xy(*xy)
+                    back = True
+                    continue
             try:
                 left = self.pending_videos()
                 path = self.page.ev("location.pathname")
