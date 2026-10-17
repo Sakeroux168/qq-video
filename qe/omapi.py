@@ -212,14 +212,17 @@ class Client:
                           files={"media": ("cover" + (ext if ext in (".jpg", ".jpeg", ".png") else ".jpg"), data, mime)})
 
     def publish(self, vid: str, title: str, cat: int, desc: str = "", aigc: str = "2", tags: str = "",
-                self_declare: int | None = 0) -> dict:
-        """aigc "2" = AI 声明「非 AI 生成」;self_declare 0 = 自主声明「无需标注」(网页上选无需标注提交的就是 id 0)。
+                self_declare: int | None = 0, cover_pic: str = "") -> dict:
+        """cover_pic = 封面图地址(omcover.upload 传到企鹅号图库拿到的;文档没写,平台收)。
+        aigc "2" = AI 声明「非 AI 生成」;self_declare 0 = 自主声明「无需标注」(网页上选无需标注提交的就是 id 0)。
         旧软件值是 0 时干脆不带,后台显示「添加内容自主声明」(空的),用户要的是无需标注(2026-10-15 真发验证过)。"""
         body = {"title": title, "tags": tags, "vid": vid, "cat": int(cat), "desc": (desc or title)[:200],
                 "aigc_userstatement": aigc}
         if self_declare is not None:
             # ext_info 必须是 JSON(写成文档里的 "self_declare=0" 平台报 40002 must be a valid JSON encoding)
             body["ext_info"] = json.dumps({"self_declare": int(self_declare)})
+        if cover_pic:
+            body["cover_pic"] = cover_pic
         return self._call("POST", "/articlev2/clientpubvideo", "发布", json=body)
 
     def wait_done(self, tid: str, timeout: float = 600, stop=None) -> str:
@@ -238,10 +241,12 @@ class Client:
         return "处理中"
 
     def send(self, path: str, title: str, cat: int, on_progress=None, stop=None, log=None,
-             self_declare: int | None = 0, aigc: str = "2", before_publish=None, cover: str = "") -> dict:
+             self_declare: int | None = 0, aigc: str = "2", before_publish=None, cover: str = "",
+             cover_upload=None) -> dict:
         """整条:传 → vid → 发 → 等结果。返回 {"vid","article_id","transaction_id","status"}。
         status:「成功」/「处理中」(平台已收下,还在处理)。
-        cover:要传的封面图(空 = 不传,平台自己截);传不上不耽误发,原因放在返回的 "cover" 里。
+        cover:要传的封面图(空 = 不传,平台自己截);cover_upload(图) → 图片地址(omcover.upload)。
+        传不上 / 平台不收不耽误发,原因放在返回的 "cover" 里。
         before_publish(vid):真正调发布接口前调一下(界面先记一笔「发布中」,程序中途关掉也不会再发)。
         发布请求发出去后没收到回话 → 抛 Unknown;平台已收下、之后查进度出错 → 不算失败,返回「处理中」。"""
         say = log or self.log
@@ -250,16 +255,14 @@ class Client:
         vid = self.wait_vid(tid, stop=stop)
         if stop and stop():
             raise Stopped("停下了")
-        cov = ""
-        if cover:
+        cov, pic = "", ""
+        if cover and cover_upload:
             say("传封面")
             try:
-                self.cover(vid, cover)
+                pic = cover_upload(cover)                # 传到企鹅号图库,拿地址(omcover.upload)
                 cov = "传了"
-            except ApiError as e:                        # 封面传不上:照样发视频,平台自己截一帧
-                cov = f"没传上:{e}"
-            except OSError as e:
-                cov = f"没传上:图片读不出来({type(e).__name__})"
+            except Exception as e:                       # 封面传不上:照样发视频,平台自己截一帧
+                cov = f"没传上:{redact(str(e))[:80]}"
         if stop and stop():
             raise Stopped("停下了")
         self.token()                                     # 换 token 出错 = 明确没发,不算结果不明
@@ -267,7 +270,15 @@ class Client:
             before_publish(vid)
         say("发布中")
         try:
-            d = self.publish(vid, title, cat, aigc=aigc, self_declare=self_declare)
+            try:
+                d = self.publish(vid, title, cat, aigc=aigc, self_declare=self_declare, cover_pic=pic)
+            except ApiError as e:
+                # 平台因为封面不收(回了错误码 = 明确没发):不带封面再发一次,封面让平台自己截
+                if not (pic and e.code and ("cover" in str(e).lower() or "封面" in str(e))):
+                    raise
+                cov = f"平台不收这张封面({str(e)[:60]}),用了平台截的"
+                say("封面平台不收,不带封面再发")
+                d = self.publish(vid, title, cat, aigc=aigc, self_declare=self_declare)
         except ApiError as e:
             if e.code:                                   # 平台回了错误码 = 明确没发
                 raise

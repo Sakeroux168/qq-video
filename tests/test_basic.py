@@ -1816,6 +1816,61 @@ def test_api_direct(tmp: Path):
     check(c.token() == "T" and s.tries == [False, True] and s.trust_env is True, "直连不通:换 token 时改走代理再试一次")
 
 
+def test_api_cover_pic(tmp: Path):
+    print("[接口发带封面:先传图拿地址、发布带 cover_pic;平台不收封面就不带封面再发一次]")
+    from qe import omapi
+
+    class R:
+        def __init__(self, j):
+            self.j, self.status_code = j, 200
+
+        def json(self):
+            return self.j
+
+    class S:
+        def __init__(self, reject_cover=False):
+            self.bodies, self.reject = [], reject_cover
+
+        def post(self, url, **kw):
+            return R({"code": "0", "data": {"access_token": "T", "expires_in": 7200}})
+
+        def request(self, method, url, **kw):
+            path = url.split("api.om.qq.com")[1]
+            if path == "/video/clientuploadready":
+                self.size = kw["json"]["size"]
+                return R({"code": "0", "data": {"transaction_id": "U1"}})
+            if path == "/video/clientuploadtrunk":
+                return R({"code": "0", "data": {"start_offset": self.size - 1, "end_offset": self.size - 1}})
+            if path == "/transaction/infoclient":
+                return R({"code": "0", "data": {"vid": "V7", "transaction_status": "成功"}})
+            if path == "/articlev2/clientpubvideo":
+                self.bodies.append(kw["json"])
+                if self.reject and "cover_pic" in kw["json"]:
+                    return R({"code": "40002", "msg": "invalid ClientPubVideoReq.CoverPic: value must be absolute"})
+                return R({"code": "0", "data": {"transaction_id": "P1", "article_id": "A9"}})
+            return R({"code": "-1"})
+    f = tmp / "cv.mp4"
+    f.write_bytes(b"0123456789")
+    real_sleep = omapi.time.sleep
+    omapi.time.sleep = lambda x: None
+    try:
+        s1 = S()
+        r = omapi.Client("a", "b", session=s1).send(str(f), "t", 1604, cover="x.jpg", cover_upload=lambda img: "https://inews.gtimg.com/om_bt/abc")
+        check(s1.bodies[0].get("cover_pic") == "https://inews.gtimg.com/om_bt/abc" and r["cover"] == "传了", "发布带上 cover_pic(传图拿到的地址)")
+        s2 = S(reject_cover=True)
+        r = omapi.Client("a", "b", session=s2).send(str(f), "t", 1604, cover="x.jpg", cover_upload=lambda img: "https://x/y")
+        check(len(s2.bodies) == 2 and "cover_pic" not in s2.bodies[1] and r["article_id"] == "A9" and r["cover"].startswith("平台不收"),
+              "平台不收封面:不带封面再发一次(视频照样发出去)")
+        s3 = S()
+
+        def boom(img):
+            raise RuntimeError("没登录")
+        r = omapi.Client("a", "b", session=s3).send(str(f), "t", 1604, cover="x.jpg", cover_upload=boom)
+        check("cover_pic" not in s3.bodies[0] and r["cover"].startswith("没传上"), "封面传不上:照样发,平台自己截")
+    finally:
+        omapi.time.sleep = real_sleep
+
+
 def test_bj_time():
     print("[北京时间]")
     import datetime as dt
@@ -2197,6 +2252,7 @@ if __name__ == "__main__":
     test_cover_cache_unique(tmp)
     test_cover_dialog_src(tmp)
     test_api_direct(tmp)
+    test_api_cover_pic(tmp)
     test_api_cover(tmp)
     test_wm_detect_unit(tmp)
     shutil.rmtree(tmp, ignore_errors=True)

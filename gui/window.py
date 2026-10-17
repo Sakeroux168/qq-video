@@ -1212,6 +1212,13 @@ class MainWindow(QMainWindow):
         k_game.setChecked(bool(self.st.get("api_archive_by_game", True)))
         f2.addRow("发成了挪到", w_api)
         f2.addRow("", k_game)
+        from qe import apicover
+        c_cov = QComboBox()
+        for m in apicover.CHOICES:
+            c_cov.addItem({"原样": "原样(文件夹里什么样就传什么样)", "不传": "不传(平台自己截一帧)"}.get(m, f"裁成 {m}"), m)
+        c_cov.setCurrentIndex(max(0, c_cov.findData(self.st.get("api_cover", "原样"))))
+        f2.addRow("封面(视频旁边的同名图)", c_cov)
+        f2.addRow("", QLabel("传封面要开着创作罐头(用它登录着的企鹅号传图);没有同名图的、传不上的,平台自己截一帧"))
         f2.addRow("几个号一起发", sp_thr)
         f2.addRow("每条间隔", sp_gap)
         f2.addRow("", QLabel("1 = 一个号一个号地发,最稳;间隔 = 上一条发完歇几秒再发下一条"))
@@ -1268,7 +1275,7 @@ class MainWindow(QMainWindow):
         self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
                        archive_root=e_arc.text().strip() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
-                       api_threads=sp_thr.value(), api_interval=sp_gap.value(),
+                       api_threads=sp_thr.value(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
                        api_archive=e_api_arc.text().strip() or self.st.get("api_archive", ""),
                        api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or "")
         C.AI_KEY = self.st.ai_key()

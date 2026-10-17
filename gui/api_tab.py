@@ -1529,7 +1529,13 @@ class ApiTab(QWidget):
         msg = (warn_day + f"发 {d} 的 {len(rows)} 条 · {len(by_acc)} 个号 · 大概 {mins} 分钟\n\n{brief}\n{cat_line}\n\n" +
                (f"其中 {retry} 条是上次没发成的,再试一次。\n" if retry else "") +
                (f"有问题的 {held} 条这次不发。\n" if held else "") + "\n发吗?")
-        detail = (f"每个号:\n{per}\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;封面平台自己截。\n"
+        from qe import apicover
+        cmode = str(self.st.get("api_cover") or "原样")
+        ncov = 0 if cmode == "不传" else sum(1 for i in rows if apicover.find(self.videos[i].path))
+        cov_line = ("封面:不传,平台自己截" if cmode == "不传" else
+                    f"封面:{ncov} 条有同名封面会传上去({cmode})" + (f",{len(rows) - ncov} 条没有,平台自己截" if ncov < len(rows) else ""))
+        msg = msg.replace("\n\n发吗?", f"\n{cov_line}\n\n发吗?")
+        detail = (f"每个号:\n{per}\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;{cov_line}。\n"
                   f"{'一条一条发' if par == 1 else f'{par} 个号一起发'},上一条发完歇 {gap:g} 秒再发下一条。\n"
                   f"发成了挪到:{dest}" + ("\\游戏名" if by_game else ""))
         if not ask(self, "发布", msg, "发", "先不发", detail=detail, default_no=bool(warn_day)):
@@ -1597,8 +1603,16 @@ class ApiTab(QWidget):
                     if got is None:
                         raise _Taken()
                     rid["id"] = got
+                from qe import apicover, omcover
+                src = apicover.find(v.path) if cmode != "不传" else ""
                 try:
-                    r = cl.send(v.path, v.title, cat, stop=stopped, before_publish=begin,
+                    cimg = apicover.prepare(src, cmode) if src else ""
+                except Exception as e:
+                    cimg = ""
+                    emit(-1, f"「{v.title}」封面图读不出来({type(e).__name__}),这条用平台截的")
+                try:
+                    r = cl.send(v.path, v.title, cat, stop=stopped, before_publish=begin, cover=cimg,
+                                cover_upload=omcover.upload,
                                 on_progress=lambda o, s, i=i: emit(i, f"上传 {o * 100 // max(1, s)}%({o >> 20}/{s >> 20}MB)"),
                                 log=lambda m, i=i: emit(i, m + "…"))
                 except Stopped:
@@ -1646,7 +1660,11 @@ class ApiTab(QWidget):
                             stats["bad_acc"].append(nick)
                         return
                     continue
-                note = f"article_id={r['article_id']} vid={r['vid']}" + ("" if r["status"] == "成功" else "(平台还在处理)")
+                apicover.cleanup(cimg, src)
+                note = f"article_id={r['article_id']} vid={r['vid']}" + ("" if r["status"] == "成功" else "(平台还在处理)") + \
+                    (f";封面{r.get('cover')}" if r.get("cover") else "")
+                if str(r.get("cover") or "").startswith(("没传上", "平台不收")):
+                    emit(-1, f"「{v.title}」发了,但封面{r['cover']}")
                 bump("ok")
                 try:
                     if "id" in rid:
