@@ -651,21 +651,18 @@ class Runner:
         t0 = time.time()
         end, back = t0 + 180, False
         while time.time() < end:
-            self.sleep(1.5)
-            # 用户 2026-10-17:点完确定「定时发布」按钮会一直转圈,其实等 10 秒点左上角「返回」就定上了 → 等 12 秒还在发布页就点「返回」
+            time.sleep(1.5)                             # 已经点了确定:这时候点「停」也等它定完(不然定上了却没记,下次会再摆一遍)
+            # 用户 2026-10-17:点完确定「定时发布」按钮会一直转圈,其实等 10 秒点罐头左上角的 ← 回退就定上了 →
+            # 等 12 秒还在发布页就回退(history.back() = 点 ←;页面里那个「返回」链接页面滚下去就看不见了,不靠它)
             if not back and time.time() - t0 > 12:
                 try:
-                    xy = self.ev("""(() => { const e = [...document.querySelectorAll('*')].find(e => window.__qe.vis(e) && e.children.length <= 1
-                        && (e.innerText || '').trim() === '返回' && e.getBoundingClientRect().top < 150);
-                        if (!e) return null; const b = e.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()""")
-                    on_create = "/creation/video" in (self.page.ev("location.pathname") or "")
+                    if "/creation/video" in (self.page.ev("location.pathname") or ""):
+                        self.log("定时发布一直在转圈,等了 12 秒,点 ← 回退")
+                        self.page.ev("history.back()")
+                        back = True
+                        continue
                 except CdpError:
-                    xy, on_create = None, False
-                if xy and on_create:
-                    self.log("定时发布一直在转圈,等了 12 秒,点左上角「返回」")
-                    self.page.click_xy(*xy)
-                    back = True
-                    continue
+                    pass
             try:
                 left = self.pending_videos()
                 path = self.page.ev("location.pathname")
