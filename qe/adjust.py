@@ -77,8 +77,20 @@ class Adjustments:
                 self.d[video] = {"own_cover": own}
             self._save()
 
+    def set_ok(self, video: str, cover: str):
+        """人点了「全部调好了」:这张封面现在这样就行,不再标黄(换了封面图就不算了,又会标黄)。"""
+        self.d.setdefault(video, {})["ok"] = cover
+        self._save()
+
+    def is_ok(self, video: str, cover: str) -> bool:
+        return bool(cover) and (self.d.get(video) or {}).get("ok") == cover
+
     def apply(self, v) -> None:
         """自动定完封面以后,把人调过的套上去。"""
+        if v.warn and self.is_ok(v.path, v.cover):
+            v.warn = False
+            if "人看过" not in v.cover_why:
+                v.cover_why += "(人看过了)"
         ai = self.ai235(v.path)
         if ai is not None and v.plan is not None:
             v.plan = dict(v.plan, ai235=bool(ai), no_ai=not ai)

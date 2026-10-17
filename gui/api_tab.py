@@ -106,6 +106,18 @@ def ask(parent, title: str, text: str, yes: str = "好", no: str = "先不", det
     return box.clickedButton() is b_yes
 
 
+class _SayBox:
+    """定时发布没人看着:代替 QMessageBox,要弹的话写进日志。"""
+
+    def __init__(self, say):
+        self._say = say
+
+    def information(self, _parent, title, text):
+        self._say(f"⚠ {title}:" + str(text).replace("\n", " "))
+
+    warning = information
+
+
 class ApiTab(QWidget):
     def __init__(self, st, rec, say, parent=None):
         super().__init__(parent)
@@ -119,7 +131,11 @@ class ApiTab(QWidget):
         self.cache: dict[str, tuple] = {}         # 检查结果:pkey(路径) → ((大小, 修改时间), checks);刷新 / 撤销后不用重新检查
         self.job: Job | None = None
         self.ledger = topic.Ledger(data_dir() / "话题改名台账.json")
+        self._auto = ""                           # 定时发布:"" / "等检查"(到点了,等自动检查做完)/ "发"(正在发)
         self._build()
+        from gui.schedule import Scheduler
+        self.sched = Scheduler(self.st, "api", self.say, self._sched_fire, self._sched_changed, self)
+        self._sched_changed()
         self.reload_dates()
 
     # ---------------- 界面 ----------------
@@ -260,6 +276,14 @@ class ApiTab(QWidget):
         for b in (self.b_check, self.b_vert, self.b_blur, self.b_topic, self.b_settopic, self.b_undo):
             bar.addWidget(b)
         bar.addStretch(1)
+        self.lab_sched = QLabel("")
+        self.lab_sched.setStyleSheet("color:#fe2c55")
+        bar.addWidget(self.lab_sched)
+        self.b_sched = QPushButton("定时发布…")
+        self.b_sched.setToolTip("选哪天的素材、几点开始:到点软件自己点「发布」(全部,不管选中),发到完为止。\n"
+                                "话题、标准竖屏先处理好;到点还有问题的不发。电脑别关机,软件和创作罐头开着(传封面要用罐头)。")
+        self.b_sched.clicked.connect(self.schedule_clicked)
+        bar.addWidget(self.b_sched)
         bar.addWidget(self.b_pub)
         bar.addWidget(self.b_stop)
         v.addLayout(bar)
@@ -969,6 +993,8 @@ class ApiTab(QWidget):
         self._busy(False)
         if msg:
             self.say(msg)
+        if self._auto == "发":                            # 定时发布发完了 / 停下了
+            self._sched_end("⏰ 定时发布结束:" + (msg or ""))
         if getattr(self, "_show_bad_after", False):
             self._show_bad_after = False
             self.k_bad.setChecked(True)                   # 发完有失败的:直接只看有问题的
@@ -1466,17 +1492,24 @@ class ApiTab(QWidget):
         self.load()
 
     # ---------------- 发布 ----------------
-    def run_publish(self, only: list[int] | None = None):
-        """only = 只发这几行(右键「只发这个号的」);None = 选中的,没选就是看得见的全部。发之前一定弹框让人点「发」。"""
+    def run_publish(self, only: list[int] | None = None, auto: bool = False):
+        """only = 只发这几行(右键「只发这个号的」);None = 选中的,没选就是看得见的全部。发之前一定弹框让人点「发」。
+        auto = 定时发布到点了(人定时的时候已经确认过):不弹框,有问题的 / 没检查出来的跳过,能发的都发。"""
         d = self.c_date.currentText()
         if not d or self.busy():
             return
+        if auto:
+            QMessageBox = _SayBox(self.say)            # noqa: N806 定时发布没人看着:要弹的框改成写日志
+        else:
+            from PySide6.QtWidgets import QMessageBox
         picked = only is not None or bool(self.selected_rows())
         scope = self.target_rows(only)
         if not scope:
             return
         unchecked = [i for i in scope if not self.videos[i].checks and not self._sent(i)]
-        if unchecked:
+        if unchecked and auto:
+            self.say(f"⚠ 有 {len(unchecked)} 条没检查出来(文件打不开?),这次不发")
+        elif unchecked:
             QMessageBox.information(self, "发布", f"还有 {len(unchecked)} 条没检查完,等检查完(或点「检查」)再发。")
             return
         rows = [i for i in scope if self._can_send(i) and not self.rec.blocked(self.videos[i].path)]
@@ -1538,7 +1571,9 @@ class ApiTab(QWidget):
         detail = (f"每个号:\n{per}\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;{cov_line}。\n"
                   f"{'一条一条发' if par == 1 else f'{par} 个号一起发'},上一条发完歇 {gap:g} 秒再发下一条。\n"
                   f"发成了挪到:{dest}" + ("\\游戏名" if by_game else "") + "(同名封面跟着挪)")
-        if not ask(self, "发布", msg, "发", "先不发", detail=detail, default_no=bool(warn_day)):
+        if auto:
+            self.say("⏰ 定时发布:" + msg.replace("\n", " ").replace("发吗?", "").strip())
+        elif not ask(self, "发布", msg, "发", "先不发", detail=detail, default_no=bool(warn_day)):
             return
         vs = self.videos
         gate = {"last": 0.0}
@@ -1709,6 +1744,89 @@ class ApiTab(QWidget):
             return summary
         self._start(fn, f"开始发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
                     f",间隔 {gap:g} 秒")
+
+    # ---------------- 定时发布(到点自己点「发布」,发到完为止) ----------------
+    def _sched_changed(self):
+        t = self.sched.label() if hasattr(self, "sched") else ""
+        self.lab_sched.setText(t or ("⏰ 定时发布正在自己发…" if self._auto else ""))
+        self.b_sched.setText("取消定时" if t else "停下定时发布" if self._auto else "定时发布…")
+
+    def schedule_clicked(self):
+        if self._auto:
+            if ask(self, "定时发布", "定时发布正在自己发。停下来吗?(手上这条做完就停,已经发的记着)", "停下", "接着发"):
+                if self._auto == "发":
+                    self.stop()
+                else:
+                    self._sched_end("定时发布停下了(还没开始发)")
+            return
+        if self.sched.pending():
+            if ask(self, "定时发布", self.sched.label() + "\n\n取消这个定时吗?", "取消定时", "留着"):
+                self.sched.cancel()
+            return
+        from gui.schedule import ask_schedule
+        dates = [self.c_date.itemText(i) for i in range(self.c_date.count()) if self.c_date.itemText(i)]
+        if not dates:
+            QMessageBox.information(self, "定时发布", "还没有能选的日期。")
+            return
+        r = ask_schedule(self, "定时发布 · 16 个号", dates, self.c_date.currentText(),
+                         "到点会发这天所有号能发的(不管选中;「只看有问题的」/ 搜索会清掉),按设置里「几个号一起发」。\n"
+                         "话题、标准竖屏先处理好;到点还有问题的不发。")
+        if r:
+            self.sched.set(*r)
+
+    def _sched_fire(self, date: str):
+        if self.busy() and not getattr(self, "_quiet", False):
+            self.say("⚠ 到点了,但这页还在发布 / 处理别的,定时发布没开始")
+            return
+        from gui.schedule import keep_awake
+        self._auto = "等检查"
+        keep_awake("定时-api-发", True)
+        self._sched_changed()
+        self.k_bad.setChecked(False)
+        self.e_find.clear()
+        self.tree.clearSelection()
+        if self.c_date.findText(date) < 0:
+            self.reload_dates()
+        if self.c_date.findText(date) < 0:
+            self._sched_end(f"⚠ 到点了,但没有「{date}」这天的素材,定时发布没开始")
+            return
+        if self.c_date.currentText() == date:
+            self.reload_dates()                           # 同一天也重读(员工可能加了视频);会自动检查新的
+        else:
+            self.c_date.setCurrentText(date)              # 换日期会自己重读 + 自动检查
+        self._sched_wait = 0
+        self._auto_poll()
+
+    def _auto_poll(self):
+        """到点以后:等自动检查做完再发(最多等 30 分钟)。"""
+        from PySide6.QtCore import QTimer
+        if self._auto != "等检查":
+            return
+        if self.busy():
+            self._sched_wait += 1
+            if self._sched_wait > 360:
+                self.stop()
+                self._sched_end("⚠ 等检查等了 30 分钟还没做完,定时发布没开始")
+                return
+            QTimer.singleShot(5000, self._auto_poll)
+            return
+        self.k_bad.setChecked(False)                      # 发全部:不管「只看有问题的」/ 搜索 / 选中
+        self.e_find.clear()
+        self.tree.clearSelection()
+        self.run_publish(auto=True)
+        if self.busy():
+            self._auto = "发"
+            self._sched_changed()
+        else:
+            self._sched_end("⏰ 定时发布:没有能发的(都发过了 / 有问题的不发)")
+
+    def _sched_end(self, msg: str):
+        from gui.schedule import keep_awake
+        self._auto = ""
+        keep_awake("定时-api-发", False)
+        self._sched_changed()
+        if msg:
+            self.say(msg)
 
     def relogin_key(self, parent=None):
         """登录取钥匙:开一个这个号专用的浏览器,人扫码登录企鹅号,软件读出这个号的接口钥匙换上(不用再开旧软件)。"""

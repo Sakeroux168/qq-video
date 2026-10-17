@@ -122,10 +122,11 @@ class BatchWorker(QThread):
     one = Signal(object, bool, str)
     finished_batch = Signal(object, str, str)      # (结果列表 or None, 出错说明, 自动发布:""没发 / "ok"发了 / 其它 = 为什么没发)
 
-    def __init__(self, account, videos, shot_dir, parent=None, auto_publish: bool = False):
+    def __init__(self, account, videos, shot_dir, parent=None, auto_publish: bool = False, unattended: bool = False):
         super().__init__(parent)
         self.account, self.videos, self.shot_dir = account, videos, shot_dir
-        self.auto_publish = auto_publish
+        self.auto_publish = auto_publish or unattended
+        self.unattended = unattended              # 定时发布(没人看着):没摆好的再试一次,还不行关掉不发,其它照发
         self._stop = False
 
     def stop(self):
@@ -136,9 +137,19 @@ class BatchWorker(QThread):
         r = None
         try:
             r = Runner(log=self.log.emit, stopped=lambda: self._stop, shot_dir=self.shot_dir)
-            res = r.prepare_batch(self.account, self.videos, on_one=lambda v, ok, why: self.one.emit(v, ok, why))
+            res = r.prepare_batch(self.account, self.videos, on_one=lambda v, ok, why: self.one.emit(v, ok, why),
+                                  retry=self.unattended)
             pub = ""
-            if self.auto_publish:
+            if self.unattended:
+                bad = [v for v, ok, _w in res if not ok]
+                good = [v for v, ok, _w in res if ok]
+                try:
+                    if bad:
+                        r.discard([v.title for v in bad])
+                    pub = r.publish_all([v.title for v in good]) if good else "none"
+                except PrepError as e:
+                    pub = f"自动发布停下了:{e}"
+            elif self.auto_publish:
                 bad = [v for v, ok, _w in res if not ok]
                 yellow = [v for v, ok, _w in res if ok and v.warn]
                 if bad:
@@ -173,10 +184,16 @@ class MainWindow(QMainWindow):
         self.batch_videos: list = []
         self.worker: BatchWorker | None = None
         self.cover_worker: CoverWorker | None = None
+        self._unattended = False          # 定时发布正在自己发(没人看着)
+        self._sched_skip: set[str] = set()  # 定时发布这一轮跳过的(没摆好 / 文件没了):不再拿来摆
+        self._sched_tries = 0             # 一整批出错(罐头没开 / 掉登录 …)连着重试了几次
         C.AI_KEY = st.ai_key() if hasattr(st, "ai_key") else ""
         self.setWindowTitle(f"企鹅号发布助手(第{APP_VERSION}版)")
         self.resize(1280, 820)
         self._build()
+        from gui.schedule import Scheduler
+        self.sched = Scheduler(self.st, "edu", self.say, self._sched_fire, self._sched_changed, self)
+        self._sched_changed()
         self._load_dates()
         ob = self.rec.open_batches()
         if ob:
@@ -299,10 +316,23 @@ class MainWindow(QMainWindow):
         self.b_blur.setToolTip("查到水印的(标黄的),把水印那块糊掉(只糊水印出现的那几段);原片挪进同文件夹的「水印原片」,不删。")
         self.b_blur.clicked.connect(self.run_blur)
         self.blur_worker = None
+        self.b_allok = QPushButton("全部调好了")
+        self.b_allok.setToolTip("封面都在「预览封面」里看过、调好了:点这个,勾上的员工里标黄的封面都算没问题,不再停下来等你。\n"
+                                "(换了封面图的又会标黄;定时发布时还标黄的不发,留给你)")
+        self.b_allok.clicked.connect(self.all_covers_ok)
+        self.b_sched = QPushButton("定时发布…")
+        self.b_sched.setToolTip("选哪天的素材、几点开始:到点软件自己一批一批摆、点「全部发布」,发到完为止。\n"
+                                "没摆好的再试一次,还不行就关掉不发,接着发别的。电脑别关机,软件和创作罐头开着。")
+        self.b_sched.clicked.connect(self.schedule_clicked)
         for b in (self.b_wm, self.b_blur, self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addWidget(self.k_auto)
         bar.addStretch(1)
+        self.lab_sched = QLabel("")
+        self.lab_sched.setStyleSheet("color:#fe2c55")
+        bar.addWidget(self.lab_sched)
+        bar.addWidget(self.b_allok)
+        bar.addWidget(self.b_sched)
         for b in (self.b_open, self.b_move):          # 次要的放上面一行右边;「标成已发」「预览封面」在列表右键里
             self._top.addWidget(b)
         self.b_manual.hide()
@@ -796,6 +826,8 @@ class MainWindow(QMainWindow):
         todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and v.cover
                 and not v.skip                        # 同号同名 / 0 字节 / 发过同名的不摆(表里写着为什么)
                 and not wmstore.blocks(v.wm)]         # 查到水印、人还没说没问题的不摆
+        if self._unattended:                          # 定时发布:还标黄的(人没看过)、这一轮跳过的不摆
+            todo = [v for v in todo if not v.warn and v.path not in self._sched_skip]
         if not todo:
             return "", []
         acc = todo[0].account
@@ -827,21 +859,32 @@ class MainWindow(QMainWindow):
             self.say("已勾上:摆好后软件自己点「全部发布」,接着摆下一批(有问题会停下来叫你)")
 
     def start_batch(self, chained: bool = False):
-        if self.wm_worker and self.wm_worker.isRunning():
-            QMessageBox.information(self, "企鹅号发布助手", "还在查水印,查完再摆(或者点「停查水印」)。")
-            return
-        if getattr(self, "blur_worker", None) and self.blur_worker.isRunning():
-            QMessageBox.information(self, "企鹅号发布助手", "还在糊水印,糊完再摆。")
-            return
-        if self.cover_worker and self.cover_worker.isRunning():
-            QMessageBox.information(self, "企鹅号发布助手", "封面还在认人,等几秒再点。")
+        busy = ("还在查水印,查完再摆(或者点「停查水印」)。" if self.wm_worker and self.wm_worker.isRunning() else
+                "还在糊水印,糊完再摆。" if getattr(self, "blur_worker", None) and self.blur_worker.isRunning() else
+                "封面还在认人,等几秒再点。" if self.cover_worker and self.cover_worker.isRunning() else "")
+        if busy:
+            if self._unattended:                       # 定时发布:等一会儿再来,不弹框
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(5000, lambda: self._unattended and self.start_batch(chained=True))
+            else:
+                QMessageBox.information(self, "企鹅号发布助手", busy)
             return
         acc, vids = self.next_batch()
         if not vids:
-            QMessageBox.information(self, "企鹅号发布助手", self._nothing_left())
+            if self._unattended:
+                self._sched_finish()
+            else:
+                QMessageBox.information(self, "企鹅号发布助手", self._nothing_left())
             return
         # 列表是打开 / 刷新时翻的(缓存):员工后来改了名 / 挪走了,罐头里会传个不存在的文件 → 先挡下来叫人刷新
         gone = [v for v in vids if not os.path.isfile(v.path)]
+        if gone and self._unattended:                 # 定时发布:找不到的跳过,接着摆别的
+            for v in gone:
+                self._sched_skip.add(v.path)
+                self.say(f"⚠ 视频文件找不到了(员工改名 / 挪走了?),跳过:「{v.title[:30]}」")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._unattended and self.start_batch(chained=True))
+            return
         if gone:
             QMessageBox.information(self, "企鹅号发布助手",
                                     f"这批里有 {len(gone)} 条视频文件找不到了(员工改名 / 挪走了?),比如「{gone[0].title[:24]}」。\n\n"
@@ -874,7 +917,7 @@ class MainWindow(QMainWindow):
         self.batch_id = f"{acc}-{bj_str().replace(' ', '_').replace(':', '')}"
         self.batch_videos = vids
         shots = str(data_dir() / "截图" / bj_str()[:10])
-        self.worker = BatchWorker(acc, vids, shots, self, auto_publish=self.k_auto.isChecked())
+        self.worker = BatchWorker(acc, vids, shots, self, auto_publish=self.k_auto.isChecked(), unattended=self._unattended)
         self.worker.log.connect(self.say)
         self.worker.one.connect(self._one_done)
         self.worker.finished_batch.connect(self._batch_done)
@@ -914,6 +957,8 @@ class MainWindow(QMainWindow):
         ready = self.rec.ready_in_batch(self.batch_id) if self.batch_id else 0
         if not ok and not ready:
             self.batch_id = ""                         # 一条都没摆上:不用等人确认
+        if self._unattended and self._sched_batch_done(ok, bad, ready, err, pub):
+            return
         if pub == "ok":
             n = self.rec.mark_batch_published(self.batch_id)
             self.say(f"软件点了「全部发布」:这批 {n} 条发出去了({bj_str()})")
@@ -949,6 +994,141 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "摆好了", text)
         self._refresh_buttons()
         self._update_sum()
+
+    # ---------------- 定时发布(没人看着,发到完为止) ----------------
+    def _sched_changed(self):
+        t = self.sched.label() if hasattr(self, "sched") else ""
+        self.lab_sched.setText(t or ("⏰ 定时发布正在自己发…" if self._unattended else ""))
+        self.b_sched.setText("取消定时" if t else "停下定时发布" if self._unattended else "定时发布…")
+
+    def schedule_clicked(self):
+        if self._unattended:
+            if self._ask("定时发布", "定时发布正在自己发。停下来吗?(手上这条做完就停,已经发的记着)", "停下", "接着发"):
+                self._chain_stop = True
+                if self.worker and self.worker.isRunning():
+                    self.worker.stop()
+                    self.say("正在停…")
+                else:
+                    self._sched_finish("你让定时发布停下了")
+            return
+        if self.sched.pending():
+            if self._ask("定时发布", self.sched.label() + "\n\n取消这个定时吗?", "取消定时", "留着"):
+                self.sched.cancel()
+            return
+        from gui.schedule import ask_schedule
+        dates = [self.c_date.itemData(i) for i in range(1, self.c_date.count())]
+        if not dates:
+            QMessageBox.information(self, "定时发布", "素材文件夹里没有日期文件夹。")
+            return
+        r = ask_schedule(self, "定时发布 · 教育号", dates, self.c_date.currentData() or "",
+                         "到点会勾上这天所有员工,一批一批摆好、自己点「全部发布」。\n"
+                         "还标黄的封面不发(先在「预览封面」里看好,点「全部调好了」);没摆好的再试一次,还不行关掉不发。")
+        if r:
+            self.sched.set(*r)
+
+    def all_covers_ok(self):
+        vs = [v for v in self.videos if v.warn and v.cover and not self.rec.status_of(v.path)]
+        if not vs:
+            QMessageBox.information(self, "全部调好了", "勾上的员工里现在没有标黄的封面。" if self.videos else "左边先勾上员工。")
+            return
+        if not self._ask("全部调好了", f"勾上的员工里有 {len(vs)} 条封面标黄。\n\n都在「预览封面」里看过、调好了?点了以后它们不再标黄,"
+                                       "自动发布 / 定时发布不会再为它们停下来。", "都调好了", "还没看完"):
+            return
+        for v in vs:
+            self.adj.set_ok(v.path, v.cover)
+            v.warn = False
+            if "人看过" not in v.cover_why:
+                v.cover_why += "(人看过了)"
+            self._fill_row(self.videos.index(v))
+        self.say(f"{len(vs)} 条标黄的封面记成「人看过了」,不再标黄")
+
+    def _sched_fire(self, date: str):
+        """到点了:选这天、勾上所有员工、开始一批一批摆 + 自己点「全部发布」。"""
+        if self.worker and self.worker.isRunning() or self.batch_id:
+            self.say("⚠ 到点了,但上一批还在摆 / 摆好了没确认,定时发布没开始(弄完那批再点「摆下一批」)")
+            return
+        i = self.c_date.findData(date)
+        if i < 0:
+            self._load_dates()
+            i = self.c_date.findData(date)
+        if i < 0:
+            self.say(f"⚠ 到点了,但素材里没有「{date}」这天的文件夹,定时发布没开始")
+            return
+        self.c_date.setCurrentIndex(i)                 # 换日期会重读;同一天也重读一遍(员工可能加了视频)
+        self._load_tree()
+        self.tree.blockSignals(True)
+        for k in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(k)
+            for j in range(top.childCount()):
+                top.child(j).setCheckState(0, Qt.CheckState.Checked)
+        self.tree.blockSignals(False)
+        self._load_videos()
+        self._unattended, self._sched_skip, self._sched_tries = True, set(), 0
+        self._sched_n0 = sum(1 for v in self.videos if self.rec.status_of(v.path) == "已发")
+        from gui.schedule import keep_awake
+        keep_awake("定时-edu-发", True)
+        self._chain_key = (self.c_date.currentData(), sorted(self.checked_dirs()))
+        self._sched_changed()
+        warn = [v for v in self.videos if v.warn and not self.rec.status_of(v.path)]
+        self.say(f"⏰ 定时发布开始:{date},{len(self.videos)} 条" + (f"(其中 {len(warn)} 条封面还标黄,不发)" if warn else ""))
+        self.start_batch(chained=True)
+
+    def _sched_batch_done(self, ok, bad, ready, err, pub) -> bool:
+        """定时发布时一批弄完:接着下一批 / 等一会儿重试 / 停下。返回 True = 这里处理完了。"""
+        from PySide6.QtCore import QTimer
+        for v, _o, why in bad:                        # 没摆好、已经关掉没发的:这一轮不再拿
+            self._sched_skip.add(v.path)
+        if pub in ("ok", "none") and not err:
+            if pub == "ok":
+                n = self.rec.mark_batch_published(self.batch_id)
+                self.say(f"软件点了「全部发布」:这批 {n} 条发出去了({bj_str()})" + (f";{len(bad)} 条没摆好,关掉了没发" if bad else ""))
+            else:
+                self.say(f"这批 {len(bad)} 条都没摆好,关掉了没发,接着下一批")
+            self.batch_id = ""
+            self._sched_tries = 0
+            self._after_batch()
+            self.say("3 秒后摆下一批…(点「停」不再继续)")
+            self._chain_stop = False
+            QTimer.singleShot(3000, lambda: None if getattr(self, "_chain_stop", False) or not self._unattended
+                              else self.start_batch(chained=True))
+            return True
+        if err == "停下了":                            # 人点了停
+            self._sched_finish(f"你点了「停」,定时发布停下了" + (f"(罐头里还摆着 {max(len(ok), ready)} 条没发,看一眼)" if ok or ready else ""))
+            return True
+        if err and not ok and not ready and self._sched_tries < 2:     # 一条都没摆上(罐头没开 / 网断 …):歇 1 分钟再试
+            self._sched_tries += 1
+            self.say(f"⚠ 这批没摆成:{err}。1 分钟后再试(第 {self._sched_tries} 次)")
+            self._after_batch()
+            QTimer.singleShot(60000, lambda: None if getattr(self, "_chain_stop", False) or not self._unattended
+                              else self.start_batch(chained=True))
+            return True
+        self._refresh_buttons()
+        self._sched_finish(f"定时发布停下了:{pub or err}" + (f"\n\n罐头里还摆着 {max(len(ok), ready)} 条没发,看一眼:要发就点「发布 → 全部发布」"
+                                                             "再回来点「这批发好了」,不要就删掉点「这批不要了」。" if self.batch_id else ""))
+        return True
+
+    def _sched_finish(self, why: str = ""):
+        """定时发布结束(发完了 / 停下了):写总结,恢复让电脑睡。"""
+        from gui.schedule import keep_awake
+        self._unattended = False
+        keep_awake("定时-edu-发", False)
+        self._sched_changed()
+        n = sum(1 for v in self.videos if self.rec.status_of(v.path) == "已发") - getattr(self, "_sched_n0", 0)
+        left = [v for v in self.videos if not self.rec.status_of(v.path)]
+        skipped = [v for v in left if v.path in self._sched_skip]
+        warn = [v for v in left if v.warn and v.path not in self._sched_skip]
+        text = (why or "定时发布发完了") + f"\n\n这次发了 {n} 条。"
+        if skipped:
+            text += f"\n没摆好、跳过没发的 {len(skipped)} 条:" + "".join(f"\n · {v.title[:26]}" for v in skipped[:8]) + ("\n · …" if len(skipped) > 8 else "")
+        if warn:
+            text += f"\n封面标黄没发的 {len(warn)} 条(先在「预览封面」里看一眼):" + "".join(f"\n · {v.title[:26]}" for v in warn[:5])
+        other = [v for v in left if v not in skipped and v not in warn]
+        if other:
+            text += f"\n\n另外 {len(other)} 条本来就不发(没无字封面 / 同名 / 查到水印 …)。"
+        self.say("⏰ " + text.replace("\n", " "))
+        self._sched_skip = set()
+        self._refresh_buttons()
+        QMessageBox.information(self, "定时发布", text)
 
     def batch_sent(self):
         if not self.batch_id:
@@ -1289,6 +1469,12 @@ class MainWindow(QMainWindow):
         self._load_dates()
 
     def closeEvent(self, e):
+        pend = [s.label() for s in (self.sched, self.api_tab.sched) if s.pending()]
+        if (pend or self._unattended or self.api_tab._auto) and not self._ask(
+                "企鹅号发布助手", ("定着时间还没到:\n" + "\n".join(pend) if pend else "定时发布正在自己发。") +
+                "\n\n关了软件就不会自己发了。真要关吗?", "关掉", "不关", default_no=True):
+            e.ignore()
+            return
         for wk in (self.wm_worker, self.blur_worker):
             if wk and wk.isRunning():
                 wk.stop = True

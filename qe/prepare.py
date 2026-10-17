@@ -451,8 +451,42 @@ class Runner:
         return bool(self.ev("""((s) => [...document.querySelectorAll('*')].some(e => window.__qe.vis(e) && e.children.length === 0 && (e.innerText||'').includes(s)))(%r)""" % s))
 
     # ---------------- 一批 ----------------
-    def prepare_batch(self, account: str, videos, on_one=lambda v, ok, why: None) -> list[tuple]:
-        """把这批摆到「account」的发布页上。每条做完调 on_one(视频, 成没成, 说明)。返回 [(视频, 成没成, 说明)]。"""
+    def _prepare_one(self, v) -> tuple[bool, str]:
+        """这条:切过去、等传完、封面、自主声明、AI 声明。返回 (成没成, 说明)。"""
+        self._chk()
+        self.ensure_visible()
+        self.log(f"「{v.title[:24]}」")
+        try:
+            self.select_tab(v.title)
+            self.wait_uploaded(v.title)
+        except Stop:
+            raise
+        except (PrepError, CdpError) as e:
+            self.shot(f"出错_{v.title[:8]}")
+            self._close_dialog()
+            self.log(f"  ✘ {e}")
+            return False, str(e)
+        # 用户:封面没传上去时以前把后面的自主声明、AI 补充也跳过了 —— 每一步各管各的,前面不成后面照样做
+        errs = []
+        for what, step in (("封面", lambda: self.set_cover(v)), ("自主声明", self.set_declaration),
+                           ("AI生成声明", self.set_ai_declaration)):
+            try:
+                step()
+            except Stop:
+                raise
+            except (PrepError, CdpError) as e:
+                self.shot(f"出错_{what}_{v.title[:8]}")
+                self._close_dialog()
+                errs.append(f"{what}:{e}")
+                self.log(f"  ✘ {what}:{e}")
+        if errs:
+            return False, ";".join(errs) + "。没弄好的那几步在罐头里手动补一下"
+        self.log("  摆好了")
+        return True, ""
+
+    def prepare_batch(self, account: str, videos, on_one=lambda v, ok, why: None, retry: bool = False) -> list[tuple]:
+        """把这批摆到「account」的发布页上。每条做完调 on_one(视频, 成没成, 说明)。返回 [(视频, 成没成, 说明)]。
+        retry = 没摆好的整批弄完以后原地再弄一次(定时发布没人看着,2026-10-17 用户定:再试一次,还不行就跳过)。"""
         self.open_account(account)
         pend = self.pending_videos()
         if pend and sorted(pend) == sorted(v.title for v in videos):
@@ -460,45 +494,46 @@ class Runner:
         else:
             self.go_create()
             self.upload(videos)
-        out = []
+        res = {}
         for v in videos:
+            ok, why = self._prepare_one(v)
+            res[id(v)] = (ok, why)
+            if ok or not retry:
+                on_one(v, ok, why)
+        if retry:
+            for v in videos:
+                if not res[id(v)][0]:
+                    self.log(f"「{v.title[:24]}」没摆好,再试一次…")
+                    res[id(v)] = self._prepare_one(v)
+                    on_one(v, *res[id(v)])
+        return [(v, *res[id(v)]) for v in videos]
+
+    # ---------------- 定时发布:没摆好的关掉(页签 × →「放弃编辑」),不发它 ----------------
+    def discard(self, titles: list[str]) -> None:
+        """这几条的小页签关掉、在罐头弹的框里点「放弃编辑」:不发、视频文件不动(下次还能再摆)。
+        页签上的 × 要真鼠标点(JS click 不认)。关不掉就抛 PrepError(这时候不能点「全部发布」,不然会把半成品发出去)。"""
+        for t in titles:
             self._chk()
             self.ensure_visible()
-            self.log(f"「{v.title[:24]}」")
-            try:
-                self.select_tab(v.title)
-                self.wait_uploaded(v.title)
-            except Stop:
-                raise
-            except (PrepError, CdpError) as e:
-                self.shot(f"出错_{v.title[:8]}")
-                self._close_dialog()
-                out.append((v, False, str(e)))
-                on_one(v, False, str(e))
-                self.log(f"  ✘ {e}")
+            if t not in self.pending_videos():
                 continue
-            # 用户:封面没传上去时以前把后面的自主声明、AI 补充也跳过了 —— 每一步各管各的,前面不成后面照样做
-            errs = []
-            for what, step in (("封面", lambda: self.set_cover(v)), ("自主声明", self.set_declaration),
-                               ("AI生成声明", self.set_ai_declaration)):
-                try:
-                    step()
-                except Stop:
-                    raise
-                except (PrepError, CdpError) as e:
-                    self.shot(f"出错_{what}_{v.title[:8]}")
-                    self._close_dialog()
-                    errs.append(f"{what}:{e}")
-                    self.log(f"  ✘ {what}:{e}")
-            if errs:
-                why = ";".join(errs) + "。没弄好的那几步在罐头里手动补一下"
-                out.append((v, False, why))
-                on_one(v, False, why)
-            else:
-                out.append((v, True, ""))
-                on_one(v, True, "")
-                self.log("  摆好了")
-        return out
+            xy = self.ev("""((w) => { const e = window.__qe.tabs().find(e => (e.innerText||'').trim() === w); if (!e) return null;
+                const it = e.parentElement; it.scrollIntoView({block: 'nearest', inline: 'nearest'});
+                const x = it.querySelector('[class^="icon-"]'); if (!x) return null;
+                const r = x.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })(%r)""" % t)
+            if not xy:
+                raise PrepError(f"「{t[:20]}」的小页签上找不到关掉的 ×")
+            self.page.cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": xy[0], "y": xy[1]})
+            self.sleep(0.3)
+            self.page.click_xy(xy[0], xy[1])
+            self.wait("(() => { const d = window.__qe.dlg(); return d && (d.innerText || '').includes('放弃'); })()", 10, "「放弃编辑」的框")
+            r = self.ev("""(() => { const d = window.__qe.dlg(); const b = [...d.querySelectorAll('button')].find(b => window.__qe.vis(b) && (b.innerText||'').trim().startsWith('放弃'));
+                if (!b) return 'no'; if (window.__qe.bad(b.innerText)) return 'forbidden'; b.click(); return 'ok'; })()""")
+            if r != "ok":
+                self._close_dialog()
+                raise PrepError(f"关「{t[:20]}」的框里找不到「放弃编辑」")
+            self.wait("((w) => !window.__qe.tabs().some(e => (e.innerText||'').trim() === w))(%r)" % t, 15, f"「{t[:20]}」的页签关掉")
+            self.log(f"  没摆好的「{t[:20]}」关掉了(放弃编辑,没发)")
 
     # ---------------- 软件自己点「全部发布」(用户 2026-10-15 同意,要在界面上勾选才会做) ----------------
     def publish_all(self, titles: list[str]) -> str:

@@ -1570,6 +1570,208 @@ def test_window_renamed(tmp: Path):
     w.close()
 
 
+def test_schedule(tmp: Path):
+    print("[定时发布:定好 / 到点 / 软件没开着错过了 / 别让电脑睡]")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from gui import schedule as S
+    from qe.config import Settings
+    st = Settings(tmp / "s_sched.json")
+    said, fired = [], []
+    s = S.Scheduler(st, "edu", said.append, fired.append)
+    check(s.pending() is None and s.label() == "", "没定的时候什么都没有")
+    import datetime as dt
+    soon = (dt.datetime.strptime(S.now_str(), "%Y-%m-%d %H:%M") + dt.timedelta(hours=13, minutes=5)).strftime("%Y-%m-%d %H:%M")
+    s.set(soon, "10.18")
+    check(s.pending() == {"at": soon, "date": "10.18"} and "定时-edu" in S.awake_reasons() and "13 小时 5 分" in s.label(),
+          f"定好了:存进设置、叫电脑别睡、写着还有多久 -> {s.label()}")
+    check(Settings(tmp / "s_sched.json").get("schedules", {}).get("edu", {}).get("date") == "10.18", "重开软件还在(存在设置文件里)")
+    s.tick()
+    check(not fired, "没到点不发")
+    sc = dict(st["schedules"])
+    sc["edu"] = {"at": "2000-01-01 09:00", "date": "10.18"}
+    st["schedules"] = sc
+    s.tick()
+    check(fired == ["10.18"] and s.pending() is None and "定时-edu" not in S.awake_reasons(), "到点了:开始发这天的,定时清掉")
+    st["schedules"] = {"api": {"at": "2000-01-01 09:00", "date": "10.17"}}
+    said.clear()
+    s2 = S.Scheduler(st, "api", said.append, fired.append)
+    check(s2.pending() is None and fired == ["10.18"] and any("没开着" in m for m in said), "到点时软件没开着:不补发,说一声、清掉")
+    s.set(soon, "10.19")
+    s.cancel()
+    check(s.pending() is None and "定时-edu" not in S.awake_reasons(), "取消定时:清掉,电脑能睡了")
+
+
+def test_prepare_retry(tmp: Path):
+    print("[定时发布:没摆好的再试一次,还不行就算没摆好]")
+    from types import SimpleNamespace as NS
+    from qe.prepare import Runner
+    r = object.__new__(Runner)
+    r.log, r.stopped = (lambda m: None), (lambda: False)
+    r.open_account = r.go_create = lambda *a: None
+    r.upload = lambda vs: None
+    r.pending_videos = lambda: []
+    tries: dict[str, int] = {}
+
+    def one(v):
+        tries[v.title] = tries.get(v.title, 0) + 1
+        ok = v.title == "好" or (v.title == "第二次好" and tries[v.title] == 2)
+        return ok, "" if ok else "封面:尺寸过小"
+    r._prepare_one = one
+    vs = [NS(title=t) for t in ("好", "坏", "第二次好")]
+    got = []
+    res = r.prepare_batch("号", vs, on_one=lambda v, ok, why: got.append((v.title, ok)), retry=True)
+    check(tries == {"好": 1, "坏": 2, "第二次好": 2}, f"没摆好的原地再试一次 -> {tries}")
+    check([(v.title, ok) for v, ok, _w in res] == [("好", True), ("坏", False), ("第二次好", True)]
+          and sorted(got) == sorted([("好", True), ("坏", False), ("第二次好", True)]), "每条只报一次最后的结果")
+    tries.clear()
+    r.prepare_batch("号", vs, retry=False)
+    check(tries == {"好": 1, "坏": 1, "第二次好": 1}, "平时(人看着)不重试")
+    from qe.prepare import FORBID
+    check(not FORBID.search("放弃编辑"), "「放弃编辑」能点(不是发布)")
+
+
+def test_sched_edu(tmp: Path):
+    print("[定时发布 · 教育号:到点勾上所有员工、一批一批发到完;没摆好的跳过;标黄没看过的不发;「全部调好了」]")
+    from PySide6.QtCore import QObject, QTimer, Signal
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    import gui.window as GW
+    from qe import folders as F
+    from qe.adjust import Adjustments
+    from qe.config import Settings
+    from qe.records import Records
+    root = tmp / "素材sched"
+    d = root / "10.18" / "小天地" / "张"
+    d.mkdir(parents=True)
+    for t in ("好的一条视频", "好的二条视频", "坏的一条视频", "黄的一条视频", "黄的二条视频"):
+        (d / f"{t}.mp4").write_bytes(b"x")
+        _img(d / f"{t}.png", 640, 360)
+    calls = []
+
+    class FakeBW(QObject):
+        log = Signal(str)
+        one = Signal(object, bool, str)
+        finished_batch = Signal(object, str, str)
+
+        def __init__(self, acc, vids, shots, parent=None, auto_publish=False, unattended=False):
+            super().__init__(parent)
+            self.vids, self.unattended = vids, unattended
+            calls.append(([v.title for v in vids], unattended))
+
+        def isRunning(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def start(self):
+            def go():
+                res = []
+                for v in self.vids:
+                    ok = "坏" not in v.title
+                    self.one.emit(v, ok, "" if ok else "封面:尺寸过小")
+                    res.append((v, ok, "" if ok else "封面:尺寸过小"))
+                self.finished_batch.emit(res, "", "ok" if any(o for _v, o, _w in res) else "none")
+            QTimer.singleShot(0, go)
+
+    def fake_decide(v):
+        v.cover, v.cover_kind, v.cover_why, v.plan = v.png, "png", "测试", {}
+        v.warn = "黄" in v.title
+    real = (GW.BatchWorker, GW.C.decide, GW.C.note_wide, QMessageBox.information)
+    boxes = []
+    GW.BatchWorker, GW.C.decide, GW.C.note_wide = FakeBW, fake_decide, (lambda v: None)
+    QMessageBox.information = staticmethod(lambda _p, t, x, *a, **k: boxes.append(x))
+    try:
+        rec = Records(tmp / "r_sched.sqlite")
+        Adjustments(tmp / "封面调整.json").set_ok(str(d / "黄的一条视频.mp4"), str(d / "黄的一条视频.png"))
+        st = Settings(tmp / "s_sched_edu.json")
+        st["material_root"] = str(root)
+        st["api_roots"] = [str(tmp / "api_none")]
+        st["ai_key"] = "test"
+        st["batch_size"] = 2
+        w = GW.MainWindow(st, rec)
+        w._sched_fire("10.18")
+        t0 = time.time()
+        while (w._unattended or not boxes) and time.time() - t0 < 60:
+            app.processEvents()
+            time.sleep(0.05)
+        sent = sorted(v.title for v in w.videos if rec.status_of(v.path) == "已发")
+        check(all(u for _t, u in calls) and len(calls) >= 2, f"到点后自己一批一批摆(没人看着的模式)-> {calls}")
+        check(sent == ["好的一条视频", "好的二条视频", "黄的一条视频"],
+              f"能发的都发了(标黄但点过「全部调好了」的也发)-> {sent}")
+        check(not any("黄的二条" in t for ts, _u in calls for t in ts), "还标黄、人没看过的不摆")
+        check(sum(1 for ts, _u in calls for t in ts if "坏" in t) == 1, "没摆好的跳过,不反复摆")
+        check(not w._unattended and boxes and "这次发了 3 条" in boxes[-1] and "坏的一条视频" in boxes[-1] and "黄的二条视频" in boxes[-1],
+              f"发完写总结:发了几条、哪几条没发 -> {boxes[-1][:120] if boxes else ''}")
+        from gui.schedule import awake_reasons
+        check(not any(x.startswith("定时-edu") for x in awake_reasons()), "发完了电脑能睡了")
+        y2 = next(v for v in w.videos if v.title == "黄的二条视频")
+        w._ask = lambda *a, **k: True
+        w.all_covers_ok()
+        check(not y2.warn and Adjustments(tmp / "封面调整.json").is_ok(y2.path, y2.cover), "「全部调好了」:标黄的不再标黄,记在硬盘上")
+        w.close()
+    finally:
+        GW.BatchWorker, GW.C.decide, GW.C.note_wide, QMessageBox.information = real
+
+
+def test_sched_api(tmp: Path):
+    print("[定时发布 · 16 个号:到点不弹框直接发;没有能发的就结束]")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    root = tmp / "api_sched"
+    (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18").mkdir(parents=True)
+    for f in ("s1.mp4", "s2.mp4"):
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18" / f).write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_api_sched.json")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "发布sched" / "{date}")
+    st["api_interval"] = 0
+    rec = Records(tmp / "rec_api_sched.sqlite")
+    logs = []
+    tab = T.ApiTab(st, rec, logs.append)
+    sent = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, **k):
+            if before_publish:
+                before_publish("V")
+            sent.append(title)
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+
+    def nope(*a, **k):
+        raise AssertionError("定时发布不该弹框问")
+    real = (omapi.Client, T.ask, QMessageBox.question, QMessageBox.information, QMessageBox.warning)
+    omapi.Client, T.ask, QMessageBox.question = FakeClient, nope, staticmethod(nope)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: None)
+    try:
+        tab._sched_fire("10.18")                    # 假视频读不出来 → 检查有问题 → 没有能发的
+        t0 = time.time()
+        while tab._auto and time.time() - t0 < 60:
+            app.processEvents()
+            time.sleep(0.05)
+        check(not tab._auto and not sent and "没有能发的" in tab.logbox.toPlainText(), "到点了:先等自动检查,没有能发的就结束")
+        for v in tab.videos:
+            v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+        tab.k_bad.setChecked(True)                  # 定时发布不管「只看有问题的」/ 选中
+        tab._auto = "等检查"
+        tab._auto_poll()
+        if tab.job:
+            tab.job.wait()
+        app.processEvents()
+        check(sorted(sent) == ["s1", "s2"] and not tab._auto, f"到点不弹框直接发全部 -> {sent}")
+    finally:
+        omapi.Client, T.ask, QMessageBox.question, QMessageBox.information, QMessageBox.warning = real
+
+
 def test_api_wm(tmp: Path):
     print("[高级检查:查水印(记在硬盘上)/ 普通检查过的只查水印 / 右键「没水印」能发]")
     from PySide6.QtWidgets import QApplication
@@ -2300,6 +2502,10 @@ if __name__ == "__main__":
     test_daily_plan(tmp)
     test_login_key(tmp)
     test_window_renamed(tmp)
+    test_schedule(tmp)
+    test_prepare_retry(tmp)
+    test_sched_edu(tmp)
+    test_sched_api(tmp)
     test_api_wm(tmp)
     test_edu_wm(tmp)
     test_blur(tmp)
