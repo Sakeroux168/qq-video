@@ -43,7 +43,7 @@ def friendly(e) -> tuple[str, str]:
     if code == "40023" or "invalid_file_upload" in s:
         return "没发成:平台不收这个文件", "平台不收这个视频文件(可能坏了 / 格式不对)—— 先双击打开看能不能播,重新导出再发"
     if "网络连不上" in s or "超时" in s:
-        return "没发成:网断了", "网络有问题 —— 网好了再点「发布」,会接着发没发的(发过的不会重发)"
+        return "没发成:网断了", "网络有问题 —— 网好了再点「现在发布」,会接着发没发的(发过的不会重发)"
     if "标题" in s and ("长" in s or "字" in s):
         return "没发成:标题不合格", f"平台说标题不行({s})—— 右键「改标题」改短一点再发"
     return "没发成", s
@@ -94,26 +94,40 @@ def _retry(fn, n: int = 3):
             time.sleep(2)
 
 
-def ask(parent, title: str, text: str, yes: str = "好", no: str = "先不", detail: str = "", default_no: bool = False) -> bool:
-    """中文按钮的确认框(审查:Yes / No 是英文)。detail = 点「显示详细信息」才看得到的细节(确认框别太长)。"""
+def ask(parent, title: str, text: str, yes: str = "好", no: str = "先不", detail: str = "", default_no: bool = False,
+        head: str = "", extra: str = "", on_extra=None) -> bool:
+    """中文按钮的确认框(审查:Yes / No 是英文)。detail = 点「显示详细信息」才看得到的细节(确认框别太长)。
+    head = 第一行红字加粗(要人一眼看到的:「现在马上发出去」「这次会自动点发布」);
+    extra = 第三个按钮(比如「改成定时…」),点了调 on_extra(),返回 False。"""
     box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.NoButton, parent)
+    if head:
+        import html
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(f'<p style="color:#fe2c55;font-weight:bold">{html.escape(head)}</p>'
+                    + html.escape(text).replace("\n", "<br>"))
     b_yes = box.addButton(yes, QMessageBox.ButtonRole.YesRole)
+    b_extra = box.addButton(extra, QMessageBox.ButtonRole.ActionRole) if extra else None
     b_no = box.addButton(no, QMessageBox.ButtonRole.NoRole)
     if detail:
         box.setDetailedText(detail)
     box.setDefaultButton(b_no if default_no else b_yes)
+    box.setEscapeButton(b_no)
     box.exec()
+    if b_extra is not None and box.clickedButton() is b_extra and on_extra:
+        on_extra()
     return box.clickedButton() is b_yes
 
 
 class _SayBox:
-    """定时发布没人看着:代替 QMessageBox,要弹的话写进日志。"""
+    """定时发布没人看着:代替 QMessageBox,要弹的话写进日志(最后一句记在 last,定时没发成时说清楚为什么)。"""
 
     def __init__(self, say):
         self._say = say
+        self.last = ""
 
     def information(self, _parent, title, text):
-        self._say(f"⚠ {title}:" + str(text).replace("\n", " "))
+        self.last = f"{title}:" + str(text).replace("\n", " ")
+        self._say("⚠ " + self.last)
 
     warning = information
 
@@ -134,9 +148,12 @@ class ApiTab(QWidget):
         self._auto = ""                           # 定时发布:"" / "等检查"(到点了,等自动检查做完)/ "发"(正在发)
         self._build()
         from gui.schedule import Scheduler
-        self.sched = Scheduler(self.st, "api", self.say, self._sched_fire, self._sched_changed, self)
+        self.sched = Scheduler(self.st, "api", self.say, self._sched_fire, self._sched_changed, self, problem=self._sched_note)
+        self._notice0 = bool(((self.st.get("sched_notice") or {}).get("api") or {}).get("msg"))   # 打开时就有的才弹(含刚错过的)
         self._sched_changed()
         self.reload_dates()
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1500, self._pop_notice)     # 上次定时没开始 / 没发成:打开软件弹一次
 
     # ---------------- 界面 ----------------
     def _build(self):
@@ -264,7 +281,7 @@ class ApiTab(QWidget):
         self.b_settopic.clicked.connect(lambda: self.set_topic())
         self.b_undo = QPushButton("撤销上次改名")
         self.b_undo.clicked.connect(self.undo_topic)
-        self.b_pub = QPushButton("发布")
+        self.b_pub = QPushButton("现在发布")
         self.b_pub.setMinimumHeight(34)
         self.b_pub.setObjectName("primary")          # 主题里给它主色(gui/theme.py)
         self.b_pub.setToolTip("没有问题的(竖屏、标题里没别的平台、话题对、没发过的)用接口发出去;有问题的不发。点了会先弹框确认。\n"
@@ -275,15 +292,17 @@ class ApiTab(QWidget):
         self.b_stop.clicked.connect(self.stop)
         for b in (self.b_check, self.b_vert, self.b_blur, self.b_topic, self.b_settopic, self.b_undo):
             bar.addWidget(b)
-        bar.addStretch(1)
-        self.lab_sched = QLabel("")
-        self.lab_sched.setStyleSheet("color:#fe2c55")
-        bar.addWidget(self.lab_sched)
-        self.b_sched = QPushButton("定时发布…")
+        # 定时按钮离「现在发布」远一点(用户 2026-10-17 想定时点成了发布,10 条提前发出去只能去后台删)
+        bar.addSpacing(24)
+        self.b_sched = QPushButton("到点自动发…")
         self.b_sched.setToolTip("选哪天的素材、几点开始:到点软件自己点「发布」(全部,不管选中),发到完为止。\n"
                                 "话题、标准竖屏先处理好;到点还有问题的不发。电脑别关机,软件和创作罐头开着(传封面要用罐头)。")
         self.b_sched.clicked.connect(self.schedule_clicked)
         bar.addWidget(self.b_sched)
+        self.lab_sched = QLabel("")
+        self.lab_sched.setStyleSheet("color:#fe2c55")
+        bar.addWidget(self.lab_sched)
+        bar.addStretch(1)
         bar.addWidget(self.b_pub)
         bar.addWidget(self.b_stop)
         v.addLayout(bar)
@@ -355,7 +374,7 @@ class ApiTab(QWidget):
         if not self.c_date.currentText():
             self.lab_scope.setText("先在左上角选「要发哪天的」")
             self.b_clear.setVisible(False)
-            self.b_pub.setText("发布")
+            self.b_pub.setText("现在发布")
             return
         sel = self.selected_rows()
         rows = self.target_rows()
@@ -375,7 +394,7 @@ class ApiTab(QWidget):
         # 重试:号的密钥坏了的不算(再点也必然失败,体验报告)
         retry = sum(1 for i in rows if self._can_send(i) and self.state.get(i, "").startswith(FAILED)
                     and "密钥" not in self.state.get(i, ""))
-        self.b_pub.setText(f"发布 {n} 条" + (f" + 再发一次没发成的 {retry} 条" if retry else "") if n else
+        self.b_pub.setText(f"现在发布 {n} 条" + (f" + 再发一次没发成的 {retry} 条" if retry else "") if n else
                            (f"再发一次没发成的 {retry} 条" if retry else "没有能发的"))
         self.b_pub.setEnabled(bool(n or retry) and not self.busy())
         self.b_settopic.setText("批量改话题…" if sel else "批量改话题…(先选)")
@@ -713,7 +732,7 @@ class ApiTab(QWidget):
         self.cards.set(all=n + gone, ok=(ok, "good" if ok else ""), bad=(bad + fail + unsure, "warn" if bad + fail + unsure else ""),
                        sent=sent + gone, accs=self._quota_card(),
                        bad_sub=" · ".join(subs),
-                       ok_sub="点「发布」发这些" if ok else "",
+                       ok_sub="点「现在发布」发这些" if ok else "",
                        sent_sub=f"其中 {gone} 条已挪走" if gone else "", all_sub="", accs_sub=self._quota_sub())
 
     def _hidden(self, i: int) -> bool:
@@ -999,7 +1018,9 @@ class ApiTab(QWidget):
         if msg:
             self.say(msg)
         if self._auto == "发":                            # 定时发布发完了 / 停下了
-            self._sched_end("⏰ 定时发布结束:" + (msg or ""))
+            pop = getattr(self, "_popup", None)
+            bad = bool(pop and pop[2]) or "停下了没发" in (msg or "")
+            self._sched_end("⏰ 定时发布结束:" + (msg or ""), problem=bad)
         if getattr(self, "_show_bad_after", False):
             self._show_bad_after = False
             self.k_bad.setChecked(True)                   # 发完有失败的:直接只看有问题的
@@ -1525,7 +1546,7 @@ class ApiTab(QWidget):
         if not d or self.busy():
             return
         if auto:
-            QMessageBox = _SayBox(self.say)            # noqa: N806 定时发布没人看着:要弹的框改成写日志
+            QMessageBox = self._auto_box = _SayBox(self.say)   # noqa: N806 定时发布没人看着:要弹的框改成写日志
         else:
             from PySide6.QtWidgets import QMessageBox
         picked = only is not None or bool(self.selected_rows())
@@ -1599,7 +1620,9 @@ class ApiTab(QWidget):
                   f"发成了挪到:{dest}" + ("\\游戏名" if by_game else "") + "(同名封面跟着挪)")
         if auto:
             self.say("⏰ 定时发布:" + msg.replace("\n", " ").replace("发吗?", "").strip())
-        elif not ask(self, "发布", msg, "发", "先不发", detail=detail, default_no=bool(warn_day)):
+        elif not ask(self, "现在发布", msg, "现在发出去", "先不发", detail=detail, default_no=True,   # 默认永远「先不发」
+                     head="现在马上发出去(不是定时),发了只能去后台删",
+                     extra="改成定时…", on_extra=self.schedule_clicked):
             return
         vs = self.videos
         gate = {"last": 0.0}
@@ -1764,7 +1787,7 @@ class ApiTab(QWidget):
             lst = "".join(f"\n · {t[:26]}:{why}" for t, why in stats["fails"][:6]) + \
                 ("\n · …" if len(stats["fails"]) > 6 else "")
             self._popup = ("发完了", summary + (f"\n\n这几条要你看一下:{lst}\n\n列表已经切到「只看有问题的」。"
-                                               "结果不明的去后台看一眼,再右键标「发了 / 没发」;网络问题的网好了再点「发布」,"
+                                               "结果不明的去后台看一眼,再右键标「发了 / 没发」;网络问题的网好了再点「现在发布」,"
                                                "会接着发没发的(发过的不会重发)。" if bad else ""), bool(bad))
             self._show_bad_after = bool(bad)
             return summary
@@ -1774,8 +1797,39 @@ class ApiTab(QWidget):
     # ---------------- 定时发布(到点自己点「发布」,发到完为止) ----------------
     def _sched_changed(self):
         t = self.sched.label() if hasattr(self, "sched") else ""
-        self.lab_sched.setText(t or ("⏰ 定时发布正在自己发…" if self._auto else ""))
-        self.b_sched.setText("取消定时" if t else "停下定时发布" if self._auto else "定时发布…")
+        note = (self.st.get("sched_notice") or {}).get("api") or {}
+        bad = f"⏰ 上次定时({note.get('at', '')[5:]})没发成 / 没开始,鼠标放这看为什么" if note.get("msg") else ""
+        self.lab_sched.setText(t or ("⏰ 定时发布正在自己发…" if self._auto else bad))
+        self.lab_sched.setToolTip(note.get("msg", "") if bad and not t and not self._auto else "")
+        self.b_sched.setText("取消定时" if t else "停下定时发布" if self._auto else "到点自动发…")
+
+    def _sched_note(self, msg: str):
+        """定时没开始 / 没发成(用户 2026-10-18 审查:只写在小日志里看不到):⏰ 那行红字常驻,下次打开软件弹一次。
+        重新定时以后才清掉。"""
+        self.say(msg)
+        s = dict(self.st.get("sched_notice") or {})
+        s["api"] = {"at": bj_str()[:16], "msg": msg.lstrip("⚠⏰ "), "popped": False}
+        self.st["sched_notice"] = s
+        self.st.save()
+        self._sched_changed()
+
+    def _pop_notice(self):
+        s = dict(self.st.get("sched_notice") or {})
+        note = dict(s.get("api") or {})
+        if not self._notice0 or not note.get("msg") or note.get("popped"):
+            return
+        note["popped"] = True
+        s["api"] = note
+        self.st["sched_notice"] = s
+        self.st.save()
+        QMessageBox.warning(self, "上次定时没发成", f"16 个号上次的定时({note.get('at', '')})没发成 / 没开始:\n\n{note['msg']}\n\n"
+                                                 "去列表里看看还有哪些没发,要发就点「现在发布」或重新定时。")
+
+    def _clear_notice(self):
+        s = dict(self.st.get("sched_notice") or {})
+        if s.pop("api", None):
+            self.st["sched_notice"] = s
+            self.st.save()
 
     def schedule_clicked(self):
         if self._auto:
@@ -1798,11 +1852,12 @@ class ApiTab(QWidget):
                          "到点会发这天所有号能发的(不管选中;「只看有问题的」/ 搜索会清掉),按设置里「几个号一起发」。\n"
                          "话题、标准竖屏先处理好;到点还有问题的不发。")
         if r:
+            self._clear_notice()
             self.sched.set(*r)
 
     def _sched_fire(self, date: str):
         if self.busy() and not getattr(self, "_quiet", False):
-            self.say("⚠ 到点了,但这页还在发布 / 处理别的,定时发布没开始")
+            self._sched_note("⚠ 到点了,但这页还在发布 / 处理别的,定时发布没开始")
             return
         from gui.schedule import keep_awake
         self._auto = "等检查"
@@ -1814,7 +1869,7 @@ class ApiTab(QWidget):
         if self.c_date.findText(date) < 0:
             self.reload_dates()
         if self.c_date.findText(date) < 0:
-            self._sched_end(f"⚠ 到点了,但没有「{date}」这天的素材,定时发布没开始")
+            self._sched_end(f"⚠ 到点了,但没有「{date}」这天的素材,定时发布没开始", problem=True)
             return
         if self.c_date.currentText() == date:
             self.reload_dates()                           # 同一天也重读(员工可能加了视频);会自动检查新的
@@ -1832,27 +1887,31 @@ class ApiTab(QWidget):
             self._sched_wait += 1
             if self._sched_wait > 360:
                 self.stop()
-                self._sched_end("⚠ 等检查等了 30 分钟还没做完,定时发布没开始")
+                self._sched_end("⚠ 等检查等了 30 分钟还没做完,定时发布没开始", problem=True)
                 return
             QTimer.singleShot(5000, self._auto_poll)
             return
         self.k_bad.setChecked(False)                      # 发全部:不管「只看有问题的」/ 搜索 / 选中
         self.e_find.clear()
         self.tree.clearSelection()
+        self._auto_box = None
         self.run_publish(auto=True)
         if self.busy():
             self._auto = "发"
             self._sched_changed()
         else:
-            self._sched_end("⏰ 定时发布:没有能发的(都发过了 / 有问题的不发)")
+            why = getattr(self._auto_box, "last", "") if self._auto_box else ""
+            self._sched_end("⚠ 定时发布没发:" + (why or "没有能发的(都发过了 / 有问题的不发)"), problem=True)
 
-    def _sched_end(self, msg: str):
+    def _sched_end(self, msg: str, problem: bool = False):
         from gui.schedule import keep_awake
         self._auto = ""
         keep_awake("定时-api-发", False)
-        self._sched_changed()
-        if msg:
+        if problem and msg:
+            self._sched_note(msg)                         # 红字常驻 + 下次打开弹一次(里面会写日志)
+        elif msg:
             self.say(msg)
+        self._sched_changed()
 
     def relogin_key(self, parent=None):
         """登录取钥匙:开一个这个号专用的浏览器,人扫码登录企鹅号,软件读出这个号的接口钥匙换上(不用再开旧软件)。"""
@@ -1927,7 +1986,7 @@ class ApiTab(QWidget):
             return
         apiacc.set_key(nick, k["client_id"], k["secret"])
         self.say(f"登录取钥匙「{nick}」:换上新钥匙了")
-        QMessageBox.information(parent, "登录取钥匙", f"「{nick}」换上新钥匙了。之前「密钥不对」没发成的,再点「发布」就行。")
+        QMessageBox.information(parent, "登录取钥匙", f"「{nick}」换上新钥匙了。之前「密钥不对」没发成的,再点「现在发布」就行。")
 
     def migrate(self):
         db = apiacc.OLD_DB if os.path.isfile(apiacc.OLD_DB) else ""

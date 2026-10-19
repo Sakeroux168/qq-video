@@ -2545,11 +2545,300 @@ def test_wm_detect_unit(tmp: Path):
             check(res["shot"] and os.path.isfile(res["shot"]), "存了截图")
 
 
+def _wait(app, cond, secs=60):
+    t0 = time.time()
+    while not cond() and time.time() - t0 < secs:
+        app.processEvents()
+        time.sleep(0.05)
+    return cond()
+
+
+def test_misfire_api(tmp: Path):
+    print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
+    from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    import gui.schedule as S
+    root = tmp / "api_misfire"
+    (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18").mkdir(parents=True)
+    for f in ("m1.mp4", "m2.mp4"):
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18" / f).write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_misfire.json")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "发布misfire" / "{date}")
+    tab = T.ApiTab(st, Records(tmp / "rec_misfire.sqlite"), lambda m: None)
+    tab.c_date.setCurrentText("10.18")
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+    tab._update_scope()
+    check(tab.b_pub.text() == "现在发布 2 条" and tab.b_sched.text() == "到点自动发…",
+          f"按钮名字:「{tab.b_pub.text()}」「{tab.b_sched.text()}」")
+    bar = next(lay for lay in tab.findChildren(QHBoxLayout) if lay.indexOf(tab.b_pub) >= 0)
+    check(bar.indexOf(tab.b_sched) >= 0 and bar.indexOf(tab.b_pub) - bar.indexOf(tab.b_sched) >= 3,
+          "定时按钮挪开了,不和「现在发布」挨着(中间隔着红字和空白)")
+    seen, opened = [], []
+    real = (T.ask, S.ask_schedule)
+
+    def rec_ask(*a, **k):
+        seen.append(k)
+        if k.get("on_extra"):
+            k["on_extra"]()                         # 人点了「改成定时…」
+        return False
+    T.ask = rec_ask
+    S.ask_schedule = lambda _p, title, *a, **k: opened.append(title)
+    try:
+        tab.run_publish()
+    finally:
+        T.ask, S.ask_schedule = real
+    k = seen[-1] if seen else {}
+    check(k.get("default_no") is True and "现在马上发出去" in k.get("head", "") and "后台删" in k.get("head", ""),
+          f"发布确认框:默认「先不发」,第一行写现在马上发、发了只能去后台删 -> {k.get('head')}")
+    check(k.get("extra") == "改成定时…" and opened and "16 个号" in opened[0], "确认框里点「改成定时…」打开定时对话框")
+    check(not tab.busy(), "点了「改成定时…」不会发")
+    # 真的确认框:回车 = 默认按钮 =「先不发」
+    clicks, hit = [], []
+    real_exec = QMessageBox.exec
+
+    def fake_exec(box):
+        want = clicks.pop(0) if clicks else box.defaultButton().text()
+        seen.append(("box", box.defaultButton().text(), box.text()))
+        next(b for b in box.buttons() if b.text() == want).click()
+        return 0
+    QMessageBox.exec = fake_exec
+    try:
+        r1 = T._real_ask(tab, "现在发布", "发 2 条", "现在发出去", "先不发", default_no=True,
+                         head="现在马上发出去(不是定时),发了只能去后台删", extra="改成定时…", on_extra=lambda: hit.append(1))
+        b1 = seen[-1]
+        clicks.append("改成定时…")
+        r2 = T._real_ask(tab, "现在发布", "发 2 条", "现在发出去", "先不发", default_no=True, extra="改成定时…",
+                         on_extra=lambda: hit.append(1))
+        clicks.append("现在发出去")
+        r3 = T._real_ask(tab, "现在发布", "发 2 条", "现在发出去", "先不发", default_no=True)
+    finally:
+        QMessageBox.exec = real_exec
+    check(r1 is False and b1[1] == "先不发" and "#fe2c55" in b1[2] and "现在马上发出去" in b1[2],
+          f"确认框直接回车 = 先不发,第一行红字 -> {b1[1]}")
+    check(r2 is False and hit == [1] and r3 is True, "点「改成定时…」不发、去定时;点「现在发出去」才发")
+    tab.deleteLater()
+
+
+def test_misfire_edu(tmp: Path):
+    print("[防误发 + 定时可靠性 · 教育号(改进清单 A1 A3 A4 B5~B8)]")
+    from PySide6.QtCore import QObject, QTimer, Signal
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    import datetime as dt
+    import gui.schedule as S
+    import gui.window as GW
+    from qe.config import Settings
+    from qe.records import Records
+    root = tmp / "素材misfire"
+    d = root / "10.20" / "小天地" / "王"
+    d.mkdir(parents=True)
+    for k in range(5):
+        (d / f"误发测试第{k}条.mp4").write_bytes(b"x")
+        _img(d / f"误发测试第{k}条.png", 640, 360)
+    H = {"w": None, "mode": "ok"}
+    calls = []
+
+    class FakeBW(QObject):
+        log = Signal(str)
+        one = Signal(object, bool, str)
+        finished_batch = Signal(object, str, str)
+
+        def __init__(self, acc, vids, shots, parent=None, auto_publish=False, unattended=False, sched_at=""):
+            super().__init__(parent)
+            self.vids = vids
+            calls.append([v.title for v in vids])
+
+        def isRunning(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def start(self):
+            def go():
+                w, mode = H["w"], H["mode"]
+                if mode == "fail":                  # 一条都没摆上(罐头没开)
+                    self.finished_batch.emit([], "罐头没开", "")
+                    return
+                if mode == "stopmid":               # 摆的时候人点了「停」,但这批照样定好了
+                    w._chain_stop = True
+                res = []
+                for v in self.vids:
+                    self.one.emit(v, True, "")
+                    res.append((v, True, ""))
+                self.finished_batch.emit(res, "", "ok")
+                if mode == "tamper":                # 摆完这批,有人改了勾选
+                    w._chain_key = ("别的日期", [])
+            QTimer.singleShot(0, go)
+
+    def fake_decide(v):
+        v.cover, v.cover_kind, v.cover_why, v.plan = v.png, "png", "测试", {}
+        v.warn = False
+    real = (GW.BatchWorker, GW.C.decide, GW.C.note_wide, QMessageBox.information, S.ask_schedule)
+    boxes = []
+    GW.BatchWorker, GW.C.decide, GW.C.note_wide = FakeBW, fake_decide, (lambda v: None)
+    QMessageBox.information = staticmethod(lambda _p, t, x, *a, **k: boxes.append(x))
+    try:
+        rec = Records(tmp / "r_misfire.sqlite")
+        st = Settings(tmp / "s_misfire.json")
+        st["material_root"] = str(root)
+        st["api_roots"] = [str(tmp / "api_none")]
+        st["ai_key"] = "test"
+        st["batch_size"] = 1
+        st["auto_publish"] = True                   # 老版本记住过「勾着」
+        st.save()
+        w = GW.MainWindow(st, rec)
+        H["w"] = w
+        check(not w.k_auto.isChecked(), "「摆好后自动点发布」每次打开都不勾(以前记住的也不算)")
+        w.k_auto.setChecked(True)
+        w.k_auto.setChecked(False)
+        check(Settings(tmp / "s_misfire.json").get("auto_publish") is True, "勾 / 不勾都不再存进设置")
+        w.k_auto.setChecked(True)
+        check(w.b_sched.text() == "摆好并定时发出…", f"教育号定时按钮叫「摆好并定时发出…」-> {w.b_sched.text()}")
+        # A3:勾着时「摆下一批」确认框第一行红字
+        w.c_date.setCurrentIndex(w.c_date.findData("10.20"))
+        w._load_tree()
+        for k in range(w.tree.topLevelItemCount()):
+            top = w.tree.topLevelItem(k)
+            for j in range(top.childCount()):
+                top.child(j).setCheckState(0, GW.Qt.CheckState.Checked)
+        w._load_videos()
+        _wait(app, lambda: not (w.cover_worker and w.cover_worker.isRunning()))
+        asks = []
+
+        def rec_ask(title, text, yes, no, default_no=False, head=""):
+            asks.append({"title": title, "text": text, "yes": yes, "default_no": default_no, "head": head})
+            return False
+        w._ask = rec_ask
+        w.start_batch()
+        check(asks and "这次会自动点发布" in asks[-1]["head"] and not calls, f"勾着自动发布:确认框第一行红字写「这次会自动点发布」-> {asks[-1]['head'] if asks else ''}")
+        w.k_auto.setChecked(False)
+        w.start_batch()
+        check(asks[-1]["head"] == "", "没勾:没有那行红字")
+        # A4:「这批发好了」默认「还没」
+        w.batch_id = "假的一批"
+        w.batch_sent()
+        check(asks[-1]["title"] == "这批发好了" and asks[-1]["default_no"] is True and "不会再摆" in asks[-1]["text"]
+              and w.batch_id == "假的一批", "「这批发好了」默认按钮是「还没」,写清楚点了这批不会再摆")
+        w.batch_id = ""
+        w._refresh_buttons()
+        # B7:估时间够不够
+        check(w._sched_estimate("10.20") == (5, 5), f"估算:5 条、一批 1 条 = 5 批 -> {w._sched_estimate('10.20')}")
+        now = dt.datetime.strptime(S.now_str(), "%Y-%m-%d %H:%M")
+
+        def slot(mins):
+            t = now + dt.timedelta(minutes=mins)
+            t += dt.timedelta(minutes=(5 - t.minute % 5) % 5)
+            return t.strftime("%Y-%m-%d %H:%M")
+        at_near, at_far = slot(45), slot(180)
+        answers = [(at_near, "10.20"), None]
+        S.ask_schedule = lambda *a, **k: answers.pop(0) if answers else None
+        asks.clear()
+        w.schedule_clicked()
+        check(asks and asks[0]["title"] == "时间可能不够" and "5 批" in asks[0]["text"] and asks[0]["default_no"] is True
+              and not w._unattended, f"5 批只给 45 分钟:先提示时间可能不够(默认「改时间」)-> {[a['title'] for a in asks]}")
+        answers[:] = [(at_far, "10.20")]
+        asks.clear()
+        w.schedule_clicked()
+        check([a["title"] for a in asks] == ["定时发布"], f"时间够:不提示 -> {[a['title'] for a in asks]}")
+        # B5:摆的时候点了「停」,这批照样定好了 → 停下,不再接着摆;总结不写「电脑可以关了」
+        H["mode"] = "stopmid"
+        calls.clear()
+        boxes.clear()
+        w._sched_fire("10.20", at_far)
+        _wait(app, lambda: not w._unattended, 20)
+        check(not w._unattended and len(calls) == 1, f"点了「停」就停,不再接着摆(以前会被成功那批吃掉)-> {len(calls)} 批")
+        check(boxes and "停在这里" in boxes[-1] and "还有 4 条没定" in boxes[-1] and "电脑可以关" not in boxes[-1],
+              f"停下的总结:停在哪、还剩几条,不说电脑可以关 -> {boxes[-1][:120] if boxes else ''}")
+        # B8:连发中途有人改了勾选 → 不弹「自动发布停下了」卡住,写日志收尾
+        H["mode"] = "tamper"
+        calls.clear()
+        boxes.clear()
+        w._sched_fire("10.20", at_far)
+        _wait(app, lambda: not w._unattended, 20)
+        check(not w._unattended and len(calls) == 1 and boxes and "换了日期" in boxes[-1] and "停在这里" in boxes[-1],
+              f"没人看着时改了勾选:收尾写总结,不卡住 -> {boxes[-1][:60] if boxes else ''}")
+        # B6:之前点过「停」(_chain_stop 还是 True),再开定时、第一批整批出错 → 1 分钟后照样重试,发到完
+        w._chain_stop = True
+        H["mode"] = "fail"
+        calls.clear()
+        boxes.clear()
+        w._sched_fire("10.20", at_far)
+        _wait(app, lambda: "1 分钟后再试" in w.logbox.toPlainText(), 10)
+        check(w._unattended and not w._chain_stop and len(calls) == 1, "再开定时:以前点过的「停」清掉了,整批出错等着重试")
+        H["mode"] = "ok"
+        w._sched_next()                             # 当它 1 分钟到了
+        _wait(app, lambda: not w._unattended, 30)
+        check(not w._unattended and len(calls) == 4 and boxes and "都定好了" in boxes[-1] and "电脑可以关" in boxes[-1],
+              f"重试成功,剩下的都定好了,写「电脑可以关了」-> {len(calls)} 批 {boxes[-1][:40] if boxes else ''}")
+        # 重试等着的时候点了「停」:到点收尾,不会一直「正在自己发」
+        w._unattended, w._chain_stop = True, True
+        boxes.clear()
+        w._sched_next()
+        check(not w._unattended and boxes and "停" in boxes[-1], "等重试的时候点了停:收尾")
+        w.close()
+    finally:
+        GW.BatchWorker, GW.C.decide, GW.C.note_wide, QMessageBox.information, S.ask_schedule = real
+
+
+def test_sched_notice(tmp: Path):
+    print("[16 个号定时没开始 / 没发成(改进清单 B9):⏰ 那行红字常驻,下次打开弹一次]")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    st = Settings(tmp / "st_notice.json")
+    st["api_roots"] = [str(tmp / "api_notice_none")]
+    rec = Records(tmp / "rec_notice.sqlite")
+    warns = []
+    real_w = QMessageBox.warning
+    QMessageBox.warning = staticmethod(lambda _p, t, x, *a, **k: warns.append(x))
+    try:
+        tab = T.ApiTab(st, rec, lambda m: None)
+        tab._sched_fire("9.99")
+        note = (st.get("sched_notice") or {}).get("api") or {}
+        check("没发成" in tab.lab_sched.text() and "9.99" in tab.lab_sched.toolTip() and note.get("popped") is False,
+              f"到点没开始:红字常驻,鼠标放上去看为什么 -> {tab.lab_sched.text()}")
+        _wait(app, lambda: False, 2)
+        check(not warns, "当时不弹框(已经有红字了),等下次打开再弹")
+        tab2 = T.ApiTab(Settings(tmp / "st_notice.json"), rec, lambda m: None)
+        _wait(app, lambda: bool(warns), 5)
+        check(len(warns) == 1 and "9.99" in warns[0], "下次打开软件弹一次框")
+        tab3 = T.ApiTab(Settings(tmp / "st_notice.json"), rec, lambda m: None)
+        _wait(app, lambda: len(warns) > 1, 3)
+        check(len(warns) == 1 and "没发成" in tab3.lab_sched.text(), "只弹一次;红字还在(重新定时才清掉)")
+        tab3._clear_notice()
+        tab3._sched_changed()
+        check(tab3.lab_sched.text() == "", "重新定时以后红字清掉")
+        st4 = Settings(tmp / "st_notice.json")
+        st4["schedules"] = {"api": {"at": "2000-01-01 09:00", "date": "10.17"}}
+        st4.save()
+        tab4 = T.ApiTab(st4, rec, lambda m: None)
+        check("软件没开着" in ((st4.get("sched_notice") or {}).get("api") or {}).get("msg", "") and "没发成" in tab4.lab_sched.text(),
+              "到点时软件没开着:也红字常驻")
+        _wait(app, lambda: len(warns) > 1, 5)
+        check(len(warns) == 2 and "软件没开着" in warns[-1], "到点时软件没开着:这次打开就弹一次")
+        for t in (tab, tab2, tab3, tab4):
+            t.deleteLater()
+    finally:
+        QMessageBox.warning = real_w
+
+
 def _no_dialogs():
     """测试里不弹框:中文确认框(gui.api_tab.ask)一律点「是」,提示框一律关掉(不然 offscreen 下会一直等人点)。"""
     from PySide6.QtWidgets import QApplication, QMessageBox
     QApplication.instance() or QApplication([])
     import gui.api_tab as T
+    T._real_ask = T.ask                            # test_misfire 要测真的确认框
     T.ask = lambda *a, **k: True
     QMessageBox.information = staticmethod(lambda *a, **k: None)
     QMessageBox.warning = staticmethod(lambda *a, **k: None)
@@ -2590,6 +2879,9 @@ if __name__ == "__main__":
     test_prepare_retry(tmp)
     test_sched_edu(tmp)
     test_sched_api(tmp)
+    test_misfire_api(tmp)
+    test_misfire_edu(tmp)
+    test_sched_notice(tmp)
     test_api_wm(tmp)
     test_edu_wm(tmp)
     test_blur(tmp)

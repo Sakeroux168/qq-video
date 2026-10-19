@@ -60,16 +60,17 @@ def short_at(at: str) -> str:
 class Scheduler(QObject):
     """一页一个。fire(date) = 到点了,开始发 date 那天的。changed() = 定了 / 取消了 / 到点了(界面刷新提示)。"""
 
-    def __init__(self, st, key: str, say, fire, changed=lambda: None, parent=None):
+    def __init__(self, st, key: str, say, fire, changed=lambda: None, parent=None, problem=None):
         super().__init__(parent)
         self.st, self.key, self.say, self.fire, self.changed = st, key, say, fire, changed
+        self.problem = problem or say                  # 没发成 / 没开始:要人一定看到的(16 个号页:红字常驻 + 下次打开弹框)
         self.timer = QTimer(self)
         self.timer.setInterval(15000)
         self.timer.timeout.connect(self.tick)
         p = self.pending()
         if p:
             if p["at"] <= now_str():
-                self.say(f"⚠ 定时发布({p['date']},{p['at']})到点的时候软件没开着,没发;定时已经取消,要发就重新定")
+                self.problem(f"⚠ 定时发布({p['date']},{p['at']})到点的时候软件没开着,没发;定时已经取消,要发就重新定")
                 self._drop()
             else:
                 self._arm()
