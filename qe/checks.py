@@ -33,12 +33,10 @@ def platform_hits(title: str, words=None) -> list[str]:
     return hits
 
 
-_AT = __import__("re").compile(r"[@＠]\s*[^\s@＠#＃，,。.！!？?、；;：:）)】」]*")
-
-
 def at_hits(title: str) -> list[str]:
-    """标题里的「@某某 / @某平台」(用户 2026-10-18:这种坚决不能发)。半角 @、全角 ＠ 都算。"""
-    return [m.group(0).strip() for m in _AT.finditer(str(title or ""))]
+    """标题里的「@某某 / @某平台」(用户 2026-10-18:删掉再发,见 titleclean)。"""
+    from .titleclean import at_runs
+    return at_runs(title)
 
 
 def check_one(v, words=None, ffmpeg: str = "") -> dict:
@@ -68,9 +66,13 @@ def problems(v) -> list[str]:
         out.append("偏方要转竖屏")
     if c.get("platform"):
         out.append("标题有「" + "、".join(c["platform"]) + "」")
-    ats = at_hits(v.title)                           # 不放进 checks(缓存):改了标题马上重算
-    if ats:
-        out.append("标题有「" + "、".join(ats[:2]) + "」(带 @ 的不能发)")
+    from . import titleclean                         # 下面两样不放进 checks(缓存):改了标题马上重算
+    junk = titleclean.dirty(v.title)
+    if junk:
+        out.append("标题有「" + "、".join(x[:12] for x in junk[:2]) + "」要删(点「整理标题」)")
+    ad = titleclean.ad_problem(getattr(v, "account", ""), v.title)
+    if ad:
+        out.append(ad)
     if len(c.get("tags") or []) > 1:
         out.append(f"{len(c['tags'])} 个话题")
     elif topic.bad_format(v.title):                  # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题

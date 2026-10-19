@@ -484,11 +484,10 @@ class MainWindow(QMainWindow):
         ③ 同一天的(文件夹被改了名:10.17 有人把「10.14」改成「10.14（101）」)就是发过的那条 → 记下新位置,
         直接算「已发」(不然显示没发,人会再标一遍手动发过,每日汇总就多算了)。"""
         F.mark_dups(vs, prefer=lambda v: bool(self.rec.status_of(v.path)))
-        from qe.checks import at_hits
-        for v in vs:                                  # 标题带 @某某 / @某平台 的坚决不发(用户 2026-10-18)
-            ats = at_hits(v.title)
-            if ats and not v.skip and not self.rec.status_of(v.path):
-                v.skip = f"标题里有「{'、'.join(ats[:2])}」,带 @ 的不能发(让员工把 @ 那段删掉再发)"
+        from qe import titleclean
+        for v in vs:                                  # 标题的乱码尾巴 / @ 那段:摆的时候在罐头里删掉再发(用户 2026-10-18);删完没字了的不发
+            if titleclean.dirty(v.title) and not titleclean.clean(v.title) and not titleclean.ad_words(v.title)                     and not v.skip and not self.rec.status_of(v.path):
+                v.skip = "标题去掉乱码 / @ 那段以后就没字了,让员工改个正常的名字"
         sent = {}
         for r in self.rec.rows():
             if r["status"] == "已发":
@@ -584,9 +583,13 @@ class MainWindow(QMainWindow):
         note = "" if stt else self.row_note.get(v.path, "")
         cov = v.cover_why if (v.cover_kind or v.warn) else "认人中…"
         skip = "" if stt or note else v.skip               # 不摆的(同号同名 / 0 字节 / 发过同名的)写清楚为什么
-        from qe import checks, wmstore
+        from qe import checks, titleclean, wmstore
+        tad = "" if stt or note or skip else titleclean.ad_problem(v.account, v.title)   # 标题有广告词:不摆
+        if tad:
+            skip = tad
         wmb = not (stt or note or skip) and wmstore.blocks(v.wm)       # 查到水印、人还没说没问题:不摆
         wtxt = f"有水印:{checks.wm_text(v.wm)}" if wmb else ""
+        newt = "" if stt else titleclean.clean(v.title)
         for c, t in enumerate([v.title, v.account, v.employee, cov, stt or note or (f"不发:{skip}" if skip else wtxt or "没发")]):
             it = QTableWidgetItem(t)
             if c == 4 and (note or skip):
@@ -608,6 +611,9 @@ class MainWindow(QMainWindow):
                 it.setBackground(YELLOW)
             if c == 0 and len(v.title) > 64:
                 it.setToolTip("标题超过 64 个字,企鹅号放不下")
+            if c == 0 and newt:
+                it.setToolTip(f"摆的时候标题会改成:{newt}(去掉乱码 / @ 那段;文件名不动)")
+                it.setText(f"{v.title}  → {newt}")
             self.table.setItem(i, c, it)
 
     def _update_sum(self):
@@ -666,6 +672,14 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("预览 / 调封面…", lambda: self.preview_cover(row))
         m.addAction("标成已发(我手动发了)", self.mark_manual)
+        from qe import titleclean
+        v0 = self.videos[row] if row < len(self.videos) else None
+        if v0 is not None and titleclean.ad_words(v0.title) and not self.rec.status_of(v0.path):
+            m.addSeparator()
+            if titleclean.store().ok(v0.account, v0.title):
+                m.addAction("标题广告:其实还没剪(先不摆)", lambda: self.set_title_ad_ok(False))
+            else:
+                m.addAction("标题有广告词:视频里的广告剪好了 / 不是广告,能摆", lambda: self.set_title_ad_ok(True))
         wm = self.videos[row].wm if row < len(self.videos) else None
         if wm and wm.get("hits"):
             m.addSeparator()
@@ -747,6 +761,19 @@ class MainWindow(QMainWindow):
         v = self.videos[i]
         self.say(f"「{v.title}」模糊水印失败:{err}" if err else f"「{v.title}」水印糊掉了")
         self._fill_row(i)
+
+    def set_title_ad_ok(self, ok: bool):
+        """标题有广告词的:人剪好了 / 看过不是广告 → 能摆(按 号 + 标题 记,剪完视频文件变了也认得)。"""
+        from qe import titleclean
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
+        rows = [r for r in rows if r < len(self.videos) and titleclean.ad_words(self.videos[r].title)]
+        for r in rows:
+            v = self.videos[r]
+            titleclean.store().set(v.account, v.title, ok)
+            self._fill_row(r)
+        if rows:
+            self.say(f"{len(rows)} 条标题有广告词的标成" + ("「剪好了,能摆」" if ok else "「还没剪,先不摆」"))
+        self._update_sum()
 
     def set_wm_ok(self, ok: bool):
         from qe import wmstore
@@ -837,6 +864,8 @@ class MainWindow(QMainWindow):
         todo = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and v.cover
                 and not v.skip                        # 同号同名 / 0 字节 / 发过同名的不摆(表里写着为什么)
                 and not wmstore.blocks(v.wm)]         # 查到水印、人还没说没问题的不摆
+        from qe import titleclean                     # 标题有广告词的(视频里八成有广告):人右键「剪好了」才摆
+        todo = [v for v in todo if not titleclean.ad_problem(v.account, v.title)]
         if self._unattended:                          # 定时发布:还标黄的(人没看过)、这一轮跳过的不摆
             todo = [v for v in todo if not v.warn and v.path not in self._sched_skip]
         if not todo:

@@ -233,7 +233,9 @@ class Runner:
         r = self.ev("""((w) => { const e = window.__qe.tabs().find(e => (e.innerText||'').trim() === w); if (!e) return false; e.click(); return true; })(%r)""" % title)
         if not r:
             raise PrepError("顶上找不到这条的小页签")
-        self.wait("((w) => { const t = [...document.querySelectorAll('.omui-inputautogrowing__inner')].find(e => window.__qe.vis(e)); return t && t.innerText.trim() === w; })(%r)" % title,
+        # 页签上一直是原来的文件名;标题框可能被 set_title 改干净了(2026-10-18 实测),两个都认
+        want = [title] + ([self._shown[title]] if title in getattr(self, "_shown", {}) else [])
+        self.wait("((ws) => { const t = [...document.querySelectorAll('.omui-inputautogrowing__inner')].find(e => window.__qe.vis(e)); return t && ws.includes(t.innerText.trim()); })(%s)" % _js_list(want),
                   15, "切到这条")
 
     def wait_uploaded(self, title: str):
@@ -451,6 +453,29 @@ class Runner:
         return bool(self.ev("""((s) => [...document.querySelectorAll('*')].some(e => window.__qe.vis(e) && e.children.length === 0 && (e.innerText||'').includes(s)))(%r)""" % s))
 
     # ---------------- 一批 ----------------
+    def set_title(self, new: str, orig: str = "") -> None:
+        """把当前这条的标题改成 new(标题框是 contenteditable 的 span:真鼠标点进去、Ctrl+A、打字)。
+        用户 2026-10-18:标题里的乱码尾巴 / @ 那段删掉再发(教育号不改员工的文件名,在罐头里改)。"""
+        xy = self.ev("""(() => { const t = [...document.querySelectorAll('.omui-inputautogrowing__inner')].find(e => window.__qe.vis(e));
+            if (!t || !t.isContentEditable) return null; t.scrollIntoView({block: 'center'}); const b = t.getBoundingClientRect();
+            return [b.left + Math.min(20, b.width / 2), b.top + b.height / 2]; })()""")
+        if not xy:
+            raise PrepError("找不到标题框")
+        self.page.click_xy(*xy)
+        self.sleep(0.3)
+        for typ in ("keyDown", "keyUp"):
+            self.page.cmd("Input.dispatchKeyEvent", {"type": typ, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2})
+        self.page.cmd("Input.insertText", {"text": new})
+        self.sleep(0.5)
+        self.page.key("Tab", 9)                          # 离开标题框,让页面记下来
+        self.sleep(0.5)
+        got = self.ev("""(() => { const t = [...document.querySelectorAll('.omui-inputautogrowing__inner')].find(e => window.__qe.vis(e));
+            return t ? t.innerText.trim() : ''; })()""")
+        if got != new:
+            raise PrepError(f"标题没改上(要「{new}」,框里是「{got}」)")
+        if orig:
+            self.__dict__.setdefault("_shown", {})[orig] = new     # 页签上还是原名,select_tab 要认新标题
+
     def _prepare_one(self, v) -> tuple[bool, str]:
         """这条:切过去、等传完、封面、自主声明、AI 声明。返回 (成没成, 说明)。"""
         self._chk()
@@ -468,8 +493,11 @@ class Runner:
             return False, str(e)
         # 用户:封面没传上去时以前把后面的自主声明、AI 补充也跳过了 —— 每一步各管各的,前面不成后面照样做
         errs = []
-        for what, step in (("封面", lambda: self.set_cover(v)), ("自主声明", self.set_declaration),
-                           ("AI生成声明", self.set_ai_declaration)):
+        from .titleclean import clean
+        new = clean(v.title)                            # 乱码尾巴 / @ 那段:罐头里删掉(文件名不动)
+        steps = ([("标题", lambda: self.set_title(new, v.title))] if new else []) + [
+            ("封面", lambda: self.set_cover(v)), ("自主声明", self.set_declaration), ("AI生成声明", self.set_ai_declaration)]
+        for what, step in steps:
             try:
                 step()
             except Stop:

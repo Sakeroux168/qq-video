@@ -1576,8 +1576,17 @@ def test_at_titles(tmp: Path):
     from qe import checks
     check(checks.at_hits("好看的视频@腾讯游戏 #英雄联盟") == ["@腾讯游戏"] and checks.at_hits("联系＠小王 有惊喜") == ["＠小王"]
           and checks.at_hits("没有艾特的标题#英雄联盟") == [], "认得出半角 @ 和全角 ＠,没有的不乱报")
-    v = NS(title="五杀集锦 @抖音小助手 #英雄联盟", checks={"w": 1080, "h": 1920, "tags": ["英雄联盟"], "platform": []})
-    check(any("@抖音小助手" in p for p in checks.problems(v)), f"16 个号:带 @ 的算有问题(不让发)-> {checks.problems(v)}")
+    v = NS(title="五杀集锦 @抖音小助手 #英雄联盟", checks={"w": 1080, "h": 1920, "tags": ["英雄联盟"], "platform": []}, account="CSGO战神君")
+    check(any("@抖音小助手" in p and "整理标题" in p for p in checks.problems(v)), f"16 个号:带 @ 的算要处理,点「整理标题」删掉 -> {checks.problems(v)}")
+    from qe import titleclean as TC
+    for t, want in (("今天三角洲打大坝#443241gfsdfq123@!#!%$#fa", "今天三角洲打大坝"), ("五杀集锦 @抖音小助手 #英雄联盟", "五杀集锦 #英雄联盟"),
+                    ("iPhone16ProMax评测 #数码", None), ("AK-12突击步枪改枪 #三角洲行动", None), ("S14总决赛 #LOL", None),
+                    ("联系 a@b.com 吧", None), ("@某平台官方", None)):
+        check(TC.clean(t) == want, f"整理标题:「{t}」→ {want!r}(实际 {TC.clean(t)!r})")
+    ad = NS(title="点击下方小黄车领取同款 #好物", checks={"w": 1080, "h": 1920, "tags": ["好物"], "platform": []}, account="CSGO战神君")
+    check(any("广告" in p for p in checks.problems(ad)), "标题有广告词:算有问题(视频里八成也有广告,要人工剪)")
+    TC.store().set("CSGO战神君", ad.title, True)
+    check(not any("广告" in p for p in checks.problems(ad)), "人点了「剪好了」就能发(按 号 + 标题 记)")
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
     from gui.window import MainWindow
@@ -1598,7 +1607,12 @@ def test_at_titles(tmp: Path):
     vs = [v for vv in w._scan.values() for v in vv]
     bad = next(v for v in vs if "艾特" in v.title)
     ok = next(v for v in vs if "正常" in v.title)
-    check("@" in (bad.skip or "") and not ok.skip, f"教育号:带 @ 的跳过、写清楚原因 -> {bad.skip}")
+    check(not bad.skip and not ok.skip, f"教育号:带 @ 的不跳过(摆的时候在罐头里删掉 @ 那段)-> {bad.skip}")
+    top = next(w.tree.topLevelItem(k) for k in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(k).text(0) == "家长小天地")
+    from PySide6.QtCore import Qt
+    top.child(0).setCheckState(0, Qt.CheckState.Checked)
+    row = next(k for k, v in enumerate(w.videos) if "艾特" in v.title)
+    check("→ 带艾特的视频" in w.table.item(row, 0).text(), f"表里写着摆的时候标题会改成什么 -> {w.table.item(row, 0).text()}")
     w.close()
 
 

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from qe import apiacc, apisrc, checks, plan, topic, vertical, wmstore
+from qe import apiacc, apisrc, checks, plan, titleclean, topic, vertical, wmstore
 from qe.config import bj_now, bj_str, data_dir
 from qe.records import pkey
 
@@ -202,7 +202,7 @@ class ApiTab(QWidget):
         self.tree.setHeaderLabels(COLS)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setToolTip("点号前面的小三角(或双击号)展开 / 收起;按住 Ctrl / Shift 多选;选中号 = 选中这个号的全部视频。\n"
-                             "双击一条视频:打开它所在的文件夹。右键:检查 / 整理话题 / 改标题 / 发布 / 换文件夹。")
+                             "双击一条视频:打开它所在的文件夹。右键:检查 / 整理标题 / 改标题 / 发布 / 换文件夹。")
         self.tree.itemDoubleClicked.connect(self._double)
         self.tree.itemExpanded.connect(lambda it: self._remember(it, True))
         self.tree.itemCollapsed.connect(lambda it: self._remember(it, False))
@@ -254,8 +254,8 @@ class ApiTab(QWidget):
                         "高级检查查到水印的,把水印那块糊掉(只糊水印出现的那几段)。原片挪进同文件夹的「水印原片」")
         self.b_blur.add("剪掉口播广告", lambda: self.run_cut(),
                         "查口播广告查到的那几句剪掉(前后各多剪 0.3 秒)。原片挪进同文件夹的「广告原片」")
-        self.b_topic = QPushButton("整理话题")
-        self.b_topic.setToolTip("一键把话题弄对:\n· 写法不对的(结尾空格、「# 话题」「##话题」、话题前粘的 n、重复的)按固定规矩改,不用 AI;\n"
+        self.b_topic = QPushButton("整理标题")
+        self.b_topic.setToolTip("一键把标题弄干净:\n· 莫名其妙的乱码尾巴(一长串数字英文符号)、「@某某 / @某平台」那段删掉,不用 AI;\n· 话题写法不对的(结尾空格、「# 话题」「##话题」、话题前粘的 n、重复的)按固定规矩改,不用 AI;\n"
                                 "· 挂了好几个话题的,AI 挑最好搜的留一个(游戏 / 剧 / 电影 / 动漫名优先)。\n改文件名,同名封面跟着改。能撤销。")
         self.b_topic.clicked.connect(lambda: self.run_topic())
         self.b_settopic = QPushButton("批量改话题…")
@@ -857,7 +857,7 @@ class ApiTab(QWidget):
             if sel:
                 for text, fn in ((f"检查选中的 {len(sel)} 条", lambda: self.run_check(sel)),
                                  (f"转标准竖屏(选中的 {len(sel)} 条)", lambda: self.run_vertical(sel)),
-                                 (f"整理话题(选中的 {len(sel)} 条)", lambda: self.run_topic(sel)),
+                                 (f"整理标题(选中的 {len(sel)} 条)", lambda: self.run_topic(sel)),
                                  (f"只整理写法、不用 AI(选中的 {len(sel)} 条)", lambda: self.tidy_titles(sel)),
                                  (f"批量改话题(选中的 {len(sel)} 条)…", lambda: self.set_topic(sel)),
                                  (f"发布选中的 {len(sel)} 条…", lambda: self.run_publish(sel)),
@@ -873,6 +873,12 @@ class ApiTab(QWidget):
                 m.addAction(f"模糊水印(选中的 {len(sel)} 条)", lambda: self.run_blur(sel)).setEnabled(not busy)
                 m.addAction(f"查口播广告(选中的 {len(sel)} 条)", lambda: self.run_ads(sel)).setEnabled(not busy)
                 m.addAction(f"剪掉口播广告(选中的 {len(sel)} 条)", lambda: self.run_cut(sel)).setEnabled(not busy)
+            if i != -1 and not self._sent(i) and titleclean.ad_words(self.videos[i].title):
+                m.addSeparator()
+                if titleclean.store().ok(self.videos[i].account, self.videos[i].title):
+                    m.addAction("标题广告:其实还没剪(先不发)", lambda: self.set_title_ad_ok(i, False)).setEnabled(not busy)
+                else:
+                    m.addAction("标题有广告词:视频里的广告剪好了 / 不是广告,能发", lambda: self.set_title_ad_ok(i, True)).setEnabled(not busy)
             ad = (self.videos[i].checks or {}).get("ads") if i != -1 else None
             if ad and ad.get("hits") and not self._sent(i):
                 m.addSeparator()
@@ -1059,7 +1065,7 @@ class ApiTab(QWidget):
             return (("高级检查完" if deep else "检查完") + f":{len(got)} 条,能发 {ok};横屏 / 偏方 {land} · 标题有别的平台 {plat}(要你自己改)· "
                     f"多个话题 {many} · 话题写法 / 结尾空格 {fmt}" + (f" · 视频读不出来 {unread}" if unread else "") +
                     (f" · 有水印 {wm}(鼠标放在「要处理的」上看截图;不是水印就右键「没水印,能发」)" if deep else "") +
-                    ("" if ok == len(got) or deep else "。话题问题点「整理话题」一键改"))
+                    ("" if ok == len(got) or deep else "。标题乱码 / @ / 话题问题点「整理标题」一键改"))
         self._start(fn, "" if quiet else (f"高级检查中…({self._who(rows)})" if deep else f"检查中…({self._who(rows)})"),
                     quiet=quiet)
 
@@ -1288,6 +1294,16 @@ class ApiTab(QWidget):
             return "剪口播广告做完了(原片在各自文件夹的「广告原片」里)"
         self._start(fn, f"剪掉口播广告:{len(rows)} 条")
 
+    def set_title_ad_ok(self, i: int, ok: bool):
+        """标题有广告词的(视频里八成有广告):人剪好了 / 看过不是广告 → 能发。选了好几条就一起标。"""
+        rows = [r for r in (self.selected_rows() or [i]) if titleclean.ad_words(self.videos[r].title)] or [i]
+        for r in rows:
+            v = self.videos[r]
+            titleclean.store().set(v.account, v.title, ok)
+            self._fill(r)
+        self.say(f"{len(rows)} 条标题有广告词的标成" + ("「剪好了,能发」" if ok else "「还没剪,先不发」"))
+        self._update_scope()
+
     def set_ad_ok(self, i: int, ok: bool):
         rows = [r for r in (self.selected_rows() or [i]) if (self.videos[r].checks or {}).get("ads", {}).get("hits")]
         for r in rows or [i]:
@@ -1410,19 +1426,24 @@ class ApiTab(QWidget):
         self._rename_rows([i], lambda _old: t, "改标题")
 
     def run_topic(self, only: list[int] | None = None):
-        """整理话题:写法不对的按固定规矩改(不用 AI);挂了好几个话题的 AI 留一个。"""
+        """整理标题:先删乱码尾巴 / @ 那段(titleclean,不用 AI);话题写法不对的按固定规矩改;挂了好几个话题的 AI 留一个。"""
         if self.busy():
             return
         only = self.target_rows(only)
 
+        def base(v):                                 # 先删乱码尾巴 / @ 那段(titleclean),再看话题
+            return titleclean.clean(v.title) or v.title
+
         def multi(v):
-            return len(topic.split_topics(v.title)["tags"]) > 1
-        rows = [i for i in only if (multi(self.videos[i]) or topic.bad_format(self.videos[i].title)) and not self._sent(i)]
+            return len(topic.split_topics(base(v))["tags"]) > 1
+        rows = [i for i in only if (multi(self.videos[i]) or topic.bad_format(base(self.videos[i]))
+                                    or base(self.videos[i]) != self.videos[i].title) and not self._sent(i)]
         if not rows:
-            QMessageBox.information(self, "整理话题", "这些里话题都没问题。")
+            QMessageBox.information(self, "整理标题", "这些里标题都没问题(没有乱码、@、话题问题)。")
             return
         n_ai = sum(1 for i in rows if multi(self.videos[i]))
-        n_fmt = len(rows) - n_ai
+        n_junk = sum(1 for i in rows if base(self.videos[i]) != self.videos[i].title)
+        n_fmt = sum(1 for i in rows if not multi(self.videos[i]) and topic.bad_format(base(self.videos[i])))
         key = self.st.ai_key() if hasattr(self.st, "ai_key") else ""
         if n_ai and not key:
             QMessageBox.warning(self, "整理话题", "有挂好几个话题的要用 AI 挑,先在「设置」里填阿里百炼 Key。\n\n"
@@ -1430,15 +1451,18 @@ class ApiTab(QWidget):
             return
         model = str(self.st.get("topic_model") or "qwen-plus")
         lines = []
+        if n_junk:
+            ex = next(self.videos[i] for i in rows if base(self.videos[i]) != self.videos[i].title)
+            lines.append(f"· {n_junk} 条标题有乱码 / @ 那段:删掉(比如「{ex.title[:30]}」→「{base(ex)[:30]}」)")
         if n_fmt:
             lines.append(f"· {n_fmt} 条话题写法不对 / 结尾多空格:按固定规矩改(不用 AI)")
         if n_ai:
             lines.append(f"· {n_ai} 条挂了好几个话题:AI 各留一个最好搜的(游戏 / 电视剧 / 电影 / 动漫名优先)")
-        if not ask(self, "整理话题", f"{self._who(only)}里面:\n" + "\n".join(lines) +
+        if not ask(self, "整理标题", f"{self._who(only)}里面:\n" + "\n".join(lines) +
                    "\n\n改文件名,同名的封面图跟着改。改错了可以点「撤销上次改名」。", "整理", "先不"):
             return
         vs = self.videos
-        at = self._op("整理话题")
+        at = self._op("整理标题")
         lock = threading.Lock()
 
         def one(i, emit, stopped):
@@ -1447,16 +1471,19 @@ class ApiTab(QWidget):
                 return
             try:
                 name = None
+                b0 = base(v)
                 if not multi(v):
-                    name = topic.tidy(v.title)           # 只是写法不对:固定规矩改,不问 AI
+                    name = topic.tidy(b0)                # 只是写法不对:固定规矩改,不问 AI
                 else:
                     for k in range(2):                   # 读不出顺序再问一次
                         try:
-                            name = topic.new_name(v.title, lambda b, t: topic.ask_ai(b, t, key, model))
+                            name = topic.new_name(b0, lambda b, t: topic.ask_ai(b, t, key, model))
                             break
                         except RuntimeError:
                             if k:
                                 raise
+                if not name and b0 != v.title:          # 只删了乱码 / @
+                    name = b0
                 if not name:
                     emit(i, "")
                     return
@@ -1466,15 +1493,15 @@ class ApiTab(QWidget):
                 old = v.title
                 self._after_rename(v, moves)
                 emit(i, "")
-                emit(-1, f"整理话题:{old} → {v.title}" + (f"({note})" if note else ""))
+                emit(-1, f"整理标题:{old} → {v.title}" + (f"({note})" if note else ""))
             except Exception as e:
-                emit(-1, f"「{v.title}」整理话题失败:{e}")
+                emit(-1, f"「{v.title}」整理标题失败:{e}")
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(4) as ex:
                 list(ex.map(lambda i: one(i, emit, stopped), rows))
-            return "整理话题做完了"
-        self._start(fn, f"整理话题:{len(rows)} 条" + (f"(其中 {n_ai} 条问 AI)" if n_ai else ""))
+            return "整理标题做完了"
+        self._start(fn, f"整理标题:{len(rows)} 条" + (f"(其中 {n_ai} 条问 AI)" if n_ai else ""))
 
     def undo_topic(self):
         b = self.ledger.last()
