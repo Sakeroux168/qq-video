@@ -2553,6 +2553,78 @@ def _wait(app, cond, secs=60):
     return cond()
 
 
+def test_ui_g(tmp: Path):
+    print("[新界面(用户 2026-10-18 选的 G 一键驾驶舱):大字 + 大按钮、问题卡片、明细展开收起、能发 / 已发筛选、「今天」页]")
+    from PySide6.QtWidgets import QApplication, QHBoxLayout
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    root = tmp / "api_g"
+    (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18").mkdir(parents=True)
+    for f in ("g1.mp4", "g2.mp4", "g3.mp4"):
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18" / f).write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_g.json")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "发布g" / "{date}")
+    tab = T.ApiTab(st, Records(tmp / "rec_g.sqlite"), lambda m: None)
+    tab.c_date.setCurrentText("10.18")
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 3)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+    tab.videos[0].checks["landscape"] = True
+    tab._update_scope()
+    tab._update_sum()
+    check(tab.hero.big.text() == "2 条可以发了" and "1 条有点小问题" in tab.hero.sub.text(),
+          f"大字写能发几条、下面写有几条小问题 -> {tab.hero.big.text()} / {tab.hero.sub.text()}")
+    check(tab.card_v.title.text() == "1 条横屏 / 偏方" and tab.card_t.title.text() == "标题 / 话题都没问题",
+          f"问题卡片按种类数 -> {tab.card_v.title.text()} / {tab.card_t.title.text()}")
+    check(tab.b_vert in tab.card_v.buttons and tab.b_topic in tab.card_t.buttons, "卡片里就是原来的「转标准竖屏 / 整理标题」按钮")
+    check(tab.b_pub.text() == "现在发布 2 条" and tab.b_pub.objectName() == "primary", "大按钮还是「现在发布 N 条」")
+    bar = next(lay for lay in tab.findChildren(QHBoxLayout) if lay.indexOf(tab.b_pub) >= 0)
+    check(bar.indexOf(tab.b_sched) >= 0 and bar.indexOf(tab.b_pub) - bar.indexOf(tab.b_sched) >= 3, "定时按钮还是离「现在发布」远一点")
+    tab.set_detail(False, animate_=False)
+    check(tab.detail.isHidden() and "看每个号的明细" in tab.b_detail.text() and tab.hero.property("open") == "false",
+          "收起明细:列表藏起来、大字变大居中")
+    tab.set_detail(True, animate_=False)
+    check(not tab.detail.isHidden() and "收起明细" in tab.b_detail.text() and tab.hero.property("open") == "true",
+          "看明细:列表出来、大字缩成一条")
+    tab._seg_changed("ok")
+    vis = [tab.videos[i].title for i, it in tab.items.items() if not it.isHidden()]
+    check(sorted(vis) == ["g2", "g3"] and "过滤中" in tab.lab_scope.text(), f"点「能发」:只看能发的 -> {vis}")
+    tab._seg_changed("bad")
+    vis = [tab.videos[i].title for i, it in tab.items.items() if not it.isHidden()]
+    check(vis == ["g1"] and tab.k_bad.isChecked(), f"点「要处理」= 原来的「只看有问题的」 -> {vis}")
+    tab.k_bad.setChecked(False)
+    check(tab.seg.key() == "all" and len([1 for it in tab.items.values() if not it.isHidden()]) == 3, "取消「只看有问题的」:回到全部")
+    from gui.widgets import tone_of
+    check([tone_of(x) for x in ("能发", "要处理", "没发成:平台不收", "已发", "结果不明", "")] == ["ok", "warn", "bad", "done", "warn", ""],
+          "状态胶囊的颜色:能发绿 / 要处理橙 / 没发成红 / 已发灰")
+    # 主窗口:「今天」页在最前面,下一步能跳过去
+    import gui.window as GW
+    st2 = Settings(tmp / "st_g2.json")
+    st2["material_root"] = str(tmp / "edu_none")
+    st2["api_roots"] = [str(tmp / "api_none")]
+    w = GW.MainWindow(st2, Records(tmp / "rec_g2.sqlite"))
+    check(w.stack.currentWidget() is w.today and w.nav.button(0).text() == "今天", "打开先看「今天」页")
+    w.today.refresh(animate_=False)
+    check("今天还差" in w.today.big.text() and "686" in w.today.lab_sent.text(), f"今天页写还差多少 -> {w.today.big.text()}")
+    check(w.today.next_v.count() >= 1, "「下一步」至少有一条")
+    w.goto("api")
+    check(w.stack.currentWidget() is w.api_tab, "跳到 16 个号页")
+    w.goto("edu")
+    check(w.hero.big.text() == "先选要发哪天的", f"教育号页大字:先选日期 -> {w.hero.big.text()}")
+    w.play_splash()
+    _wait(app, lambda: False, 0.3)
+    from gui.widgets import Splash
+    sp = w.centralWidget().findChild(Splash)
+    check(sp is not None and "欢迎使用本工作台" in sp.hi.text(), "开场动画:Hi,欢迎使用本工作台")
+    sp.finish()
+    w.close()
+
+
 def test_misfire_api(tmp: Path):
     print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
@@ -2621,7 +2693,8 @@ def test_misfire_api(tmp: Path):
         r3 = T._real_ask(tab, "现在发布", "发 2 条", "现在发出去", "先不发", default_no=True)
     finally:
         QMessageBox.exec = real_exec
-    check(r1 is False and b1[1] == "先不发" and "#fe2c55" in b1[2] and "现在马上发出去" in b1[2],
+    from gui.theme import cur as _theme_cur              # 红字 = 主题里的「危险」红(2026-10-18 换了新界面)
+    check(r1 is False and b1[1] == "先不发" and _theme_cur()["danger"] in b1[2] and "现在马上发出去" in b1[2],
           f"确认框直接回车 = 先不发,第一行红字 -> {b1[1]}")
     check(r2 is False and hit == [1] and r3 is True, "点「改成定时…」不发、去定时;点「现在发出去」才发")
     tab.deleteLater()
@@ -3096,6 +3169,7 @@ if __name__ == "__main__":
     test_prepare_retry(tmp)
     test_sched_edu(tmp)
     test_sched_api(tmp)
+    test_ui_g(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

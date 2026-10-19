@@ -104,7 +104,7 @@ class CoverDialog(QDialog):
         self.lab_title.setStyleSheet("font-size:15px;font-weight:bold")
         v.addWidget(self.lab_title)
         self.lab_why = QLabel()
-        self.lab_why.setStyleSheet("color:#666")
+        self.lab_why.setObjectName("muted")
         v.addWidget(self.lab_why)
         self.lab_src = QLabel()                          # 这张封面是哪个视频的、在哪(用户:好对一下有没有配错)
         self.lab_src.setWordWrap(True)

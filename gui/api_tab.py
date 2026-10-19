@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -103,7 +103,8 @@ def ask(parent, title: str, text: str, yes: str = "好", no: str = "先不", det
     if head:
         import html
         box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText(f'<p style="color:#fe2c55;font-weight:bold">{html.escape(head)}</p>'
+        from gui.theme import cur
+        box.setText(f'<p style="color:{cur()["danger"]};font-weight:bold">{html.escape(head)}</p>'
                     + html.escape(text).replace("\n", "<br>"))
     b_yes = box.addButton(yes, QMessageBox.ButtonRole.YesRole)
     b_extra = box.addButton(extra, QMessageBox.ButtonRole.ActionRole) if extra else None
@@ -157,102 +158,70 @@ class ApiTab(QWidget):
 
     # ---------------- 界面 ----------------
     def _build(self):
-        from gui.widgets import StatCards
+        """用户 2026-10-18 选的「G 一键驾驶舱」:最上面一句大字(37 条可以发了)+ 大按钮;问题做成卡片,点了就处理;
+        「看每个号的明细」点开才出列表(展开 / 收起有动画,记住上次)。按钮还是原来那些按钮,只是换了地方。"""
+        from gui.widgets import Hero, MenuButton, PillDelegate, ProbCard, Segmented, StatCards
         v = QVBoxLayout(self)
-        v.setContentsMargins(20, 16, 20, 12)
-        v.setSpacing(10)
-        title = QLabel("16 个号 · 游戏 / 动漫,用官方接口发")
-        title.setObjectName("pageTitle")
-        v.addWidget(title)
-        top = QHBoxLayout()
-        top.addWidget(QLabel("要发哪天的:"))
+        v.setContentsMargins(24, 18, 24, 14)
+        v.setSpacing(12)
+        self._gap = QWidget()                            # 明细收起时大字往下放一点(居中好看)
+        self._gap.setFixedHeight(0)
+        v.addWidget(self._gap)
+        self.hero = Hero(open_=False)
+        m = self.hero.meta
+        m.addWidget(QLabel("要发哪天的:"))
         self.c_date = QComboBox()
-        self.c_date.setMinimumWidth(110)
+        self.c_date.setMinimumWidth(130)
         self.c_date.currentIndexChanged.connect(self.load)
-        top.addWidget(self.c_date)
+        m.addWidget(self.c_date)
         self.b_reload = b = QPushButton("刷新")
+        b.setObjectName("link")
         b.setToolTip("重新读一遍素材文件夹(F5)")
         b.clicked.connect(self.reload_dates)
-        top.addWidget(b)
-        top.addSpacing(12)
+        m.addWidget(b)
         self.lab = QLabel("")
-        self.lab.setStyleSheet("color:#777")
-        self.lab.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)   # 太长就截,不把窗口撑宽
-        top.addWidget(self.lab, 1)
+        self.lab.setObjectName("heroMeta")
+        self.lab.setMaximumWidth(380)
+        m.addWidget(self.lab)
         self.b_pick = b = QPushButton("给号选文件夹…")
+        b.setObjectName("link")
         b.setToolTip("像旧软件的「选择」:手动给一个号挑这天要发的文件夹(比如电竞情报馆的「2电竞赛事」)。\n"
                      "选了以后这个号这天只发那个文件夹里的视频,不再自动找。右键列表里的号 / 视频也能选 / 取消。")
         b.clicked.connect(lambda: self.pick_folder())
-        top.addWidget(b)
-        v.addLayout(top)
+        m.addWidget(b)
+        # 大按钮那一排:定时离「现在发布」远一点(用户 2026-10-17 想定时点成了发布,10 条提前发出去只能去后台删)
+        a = self.hero.acts
+        self.b_sched = QPushButton("到点自动发…")
+        self.b_sched.setObjectName("pill")
+        self.b_sched.setMinimumHeight(36)
+        self.b_sched.setToolTip("选哪天的素材、几点开始:到点软件自己点「发布」(全部,不管选中),发到完为止。\n"
+                                "话题、标准竖屏先处理好;到点还有问题的不发。电脑别关机,软件和创作罐头开着(传封面要用罐头)。")
+        self.b_sched.clicked.connect(self.schedule_clicked)
+        a.addWidget(self.b_sched)
+        self.lab_sched = QLabel("")
+        self.lab_sched.setObjectName("warnText")
+        a.addWidget(self.lab_sched)
+        a.addSpacing(28)
+        self.b_pub = QPushButton("现在发布")
+        self.b_pub.setMinimumHeight(40)
+        self.b_pub.setObjectName("primary")          # 主题里给它主色(gui/theme.py)
+        self.b_pub.setToolTip("没有问题的(竖屏、标题里没别的平台、话题对、没发过的)用接口发出去;有问题的不发。点了会先弹框确认。\n"
+                              "发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布\\游戏名」(设置里能改)。")
+        self.b_pub.clicked.connect(lambda: self.run_publish())
+        a.addWidget(self.b_pub)
+        self.b_stop = QPushButton("停")
+        self.b_stop.setObjectName("danger")
+        self.b_stop.setMinimumHeight(34)
+        self.b_stop.clicked.connect(self.stop)
+        a.addWidget(self.b_stop)
+        self._head = QWidget()                           # 大字 + 卡片 + 「看明细」:收起时收在中间一栏(用户 2026-10-18:铺满太散,高级感没了)
+        hv = QVBoxLayout(self._head)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.setSpacing(14)
+        hv.addWidget(self.hero)
+        v.addWidget(self._head)
 
-        self.cards = StatCards([("all", "这天的视频"), ("ok", "能发"), ("bad", "要处理"), ("sent", "已发"), ("accs", "今天达标")],
-                               clickable=("bad", "ok"))
-        self.cards.clicked.connect(self._card_clicked)
-        v.addWidget(self.cards)
-        view = QHBoxLayout()
-        b = QPushButton("全部展开")
-        b.clicked.connect(lambda: self.expand_all(True))
-        view.addWidget(b)
-        b = QPushButton("全部收起")
-        b.clicked.connect(lambda: self.expand_all(False))
-        view.addWidget(b)
-        self.k_bad = QCheckBox("只看有问题的")
-        self.k_bad.setToolTip("只显示要处理的(横屏 / 标题有别的平台 / 话题问题 / 没发成 / 结果不明)")
-        self.k_bad.toggled.connect(lambda _on: self._apply_filter())
-        view.addWidget(self.k_bad)
-        self.e_find = QLineEdit()
-        self.e_find.setPlaceholderText("搜标题…(Ctrl+F)")
-        self.e_find.setClearButtonEnabled(True)
-        self.e_find.setMaximumWidth(200)
-        self.e_find.textChanged.connect(lambda _t: self._apply_filter())
-        view.addWidget(self.e_find)
-        view.addStretch(1)
-        self.lab_sum = QLabel("")
-        self.lab_sum.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.lab_sum.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        view.addWidget(self.lab_sum, 2)
-        v.addLayout(view)
-
-        self.tree = QTreeWidget()
-        self.tree.setColumnCount(len(COLS))
-        self.tree.setHeaderLabels(COLS)
-        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.tree.setToolTip("点号前面的小三角(或双击号)展开 / 收起;按住 Ctrl / Shift 多选;选中号 = 选中这个号的全部视频。\n"
-                             "双击一条视频:打开它所在的文件夹。右键:检查 / 整理标题 / 改标题 / 发布 / 换文件夹。")
-        self.tree.itemDoubleClicked.connect(self._double)
-        self.tree.itemExpanded.connect(lambda it: self._remember(it, True))
-        self.tree.itemCollapsed.connect(lambda it: self._remember(it, False))
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._menu)
-        self.tree.setUniformRowHeights(True)
-        hh = self.tree.header()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hh.setStretchLastSection(False)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        for i, wd in ((1, 90), (2, 220), (3, 200)):
-            self.tree.setColumnWidth(i, wd)
-        v.addWidget(self.tree, 1)
-
-        # 第一行:这次管哪些(绿字)+ 取消选择
-        scope = QHBoxLayout()
-        self.lab_scope = QLabel("")
-        self.lab_scope.setObjectName("scope")
-        self.lab_scope.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        scope.addWidget(self.lab_scope, 1)
-        self.b_clear = QPushButton("取消选择")
-        self.b_clear.setToolTip("不选了:下面的按钮回到管全部(Esc)")
-        self.b_clear.clicked.connect(self.tree.clearSelection)
-        scope.addWidget(self.b_clear)
-        self.b_log = QPushButton("展开日志")
-        self.b_log.setObjectName("link")
-        self.b_log.clicked.connect(self._toggle_log)
-        scope.addWidget(self.b_log)
-        v.addLayout(scope)
-
-        # 第二行:处理 + 发布(按钮上不再每个都带条数,条数只在上面绿字写一次;窗口能缩到 1000 以内)
-        bar = QHBoxLayout()
-        from gui.widgets import MenuButton
+        # 问题卡片:问题和处理它的按钮放一起(原来一排 8 个按钮一样大,不知道点哪个)
         self.b_check = MenuButton("检查")              # 鼠标挪上去弹出:普通检查 / 高级检查(用户 2026-10-16)
         self.b_check.setToolTip("普通检查:是不是竖屏、标题里有没有别的平台的名字、话题对不对(换日期 / 刷新会自动做)。\n"
                                 "高级检查:再查一遍有没有别的平台的水印 / 广告图标(B站、抖音、快手、得物、转转 …),慢一些。")
@@ -281,56 +250,269 @@ class ApiTab(QWidget):
         self.b_settopic.clicked.connect(lambda: self.set_topic())
         self.b_undo = QPushButton("撤销上次改名")
         self.b_undo.clicked.connect(self.undo_topic)
-        self.b_pub = QPushButton("现在发布")
-        self.b_pub.setMinimumHeight(34)
-        self.b_pub.setObjectName("primary")          # 主题里给它主色(gui/theme.py)
-        self.b_pub.setToolTip("没有问题的(竖屏、标题里没别的平台、话题对、没发过的)用接口发出去;有问题的不发。点了会先弹框确认。\n"
-                              "发成了挪到「X月发布视频\\企鹅号\\企鹅号软件发布\\游戏名」(设置里能改)。")
-        self.b_pub.clicked.connect(lambda: self.run_publish())
-        self.b_stop = QPushButton("停")
-        self.b_stop.setMinimumHeight(34)
-        self.b_stop.clicked.connect(self.stop)
-        for b in (self.b_check, self.b_vert, self.b_blur, self.b_topic, self.b_settopic, self.b_undo):
-            bar.addWidget(b)
-        # 定时按钮离「现在发布」远一点(用户 2026-10-17 想定时点成了发布,10 条提前发出去只能去后台删)
-        bar.addSpacing(24)
-        self.b_sched = QPushButton("到点自动发…")
-        self.b_sched.setToolTip("选哪天的素材、几点开始:到点软件自己点「发布」(全部,不管选中),发到完为止。\n"
-                                "话题、标准竖屏先处理好;到点还有问题的不发。电脑别关机,软件和创作罐头开着(传封面要用罐头)。")
-        self.b_sched.clicked.connect(self.schedule_clicked)
-        bar.addWidget(self.b_sched)
-        self.lab_sched = QLabel("")
-        self.lab_sched.setStyleSheet("color:#fe2c55")
-        bar.addWidget(self.lab_sched)
-        bar.addStretch(1)
-        bar.addWidget(self.b_pub)
-        bar.addWidget(self.b_stop)
-        v.addLayout(bar)
+        cards = QHBoxLayout()
+        cards.setSpacing(10)
+        self.card_v = ProbCard("rotate", "横屏 / 偏方", [self.b_vert])
+        self.card_t = ProbCard("tag", "标题 / 话题", [self.b_topic])
+        self.card_w = ProbCard("scan", "水印 / 口播广告", [self.b_check, self.b_blur])
+        for c in (self.card_v, self.card_t, self.card_w):
+            cards.addWidget(c, 1)
+        hv.addLayout(cards)
+
+        self.b_detail = QPushButton("")
+        self.b_detail.setObjectName("toggle")
+        self.b_detail.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_detail.clicked.connect(lambda: self.set_detail(self.detail.isHidden()))
+        hv.addWidget(self.b_detail, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # ---------- 明细(点「看每个号的明细」才出来) ----------
+        self.detail = QWidget()
+        dv = QVBoxLayout(self.detail)
+        dv.setContentsMargins(0, 0, 0, 0)
+        dv.setSpacing(8)
+        self.cards = StatCards([("all", "这天的视频"), ("ok", "能发"), ("bad", "要处理"), ("sent", "已发"), ("accs", "今天达标")],
+                               clickable=("bad", "ok"))
+        self.cards.clicked.connect(self._card_clicked)
+        self.cards.hide()                                # 数字都在大字和「全部 / 要处理 / 能发 / 已发」上了
+        dv.addWidget(self.cards)
+        view = QHBoxLayout()
+        view.setSpacing(8)
+        self.seg = Segmented([("all", "全部"), ("bad", "要处理"), ("ok", "能发"), ("sent", "已发")])
+        self.seg.changed.connect(self._seg_changed)
+        view.addWidget(self.seg)
+        self.k_bad = QCheckBox("只看有问题的")
+        self.k_bad.setToolTip("只显示要处理的(横屏 / 标题有别的平台 / 话题问题 / 没发成 / 结果不明)")
+        self.k_bad.toggled.connect(self._kbad_toggled)
+        self.k_bad.hide()                                # 就是「要处理」那一格
+        view.addWidget(self.k_bad)
+        view.addStretch(1)
+        self.lab_sum = QLabel("")
+        self.lab_sum.setObjectName("muted")
+        view.addWidget(self.lab_sum)
+        self.e_find = QLineEdit()
+        self.e_find.setObjectName("search")
+        self.e_find.setPlaceholderText("搜标题…(Ctrl+F)")
+        self.e_find.setClearButtonEnabled(True)
+        self.e_find.setMaximumWidth(220)
+        self.e_find.textChanged.connect(lambda _t: self._apply_filter())
+        view.addWidget(self.e_find)
+        self.b_more = MenuButton("更多")
+        self.b_more.setToolTip("不常用的:全部展开 / 收起、批量改话题、撤销上次改名")
+        self.b_more.menu_.aboutToShow.connect(self._more_menu)
+        view.addWidget(self.b_more)
+        dv.addLayout(view)
+
+        panel = QFrame()
+        panel.setObjectName("panel")
+        pl = QVBoxLayout(panel)
+        pl.setContentsMargins(1, 1, 1, 1)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(COLS))
+        self.tree.setHeaderLabels(COLS)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setToolTip("点号前面的小三角(或双击号)展开 / 收起;按住 Ctrl / Shift 多选;选中号 = 选中这个号的全部视频。\n"
+                             "双击一条视频:打开它所在的文件夹。右键:检查 / 整理标题 / 改标题 / 发布 / 换文件夹。")
+        self.tree.itemDoubleClicked.connect(self._double)
+        self.tree.itemExpanded.connect(lambda it: self._remember(it, True))
+        self.tree.itemCollapsed.connect(lambda it: self._remember(it, False))
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._menu)
+        self.tree.setUniformRowHeights(False)          # 号那一行高一点(头像)、视频那一行矮一点
+        self.tree.setAnimated(True)
+        self.tree.setIndentation(20)
+        from gui.widgets import ApiTreeDelegate
+        self.tree.setItemDelegate(ApiTreeDelegate(self.tree))
+        hh = self.tree.header()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setStretchLastSection(False)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        for i, wd in ((1, 96), (2, 250), (3, 230)):
+            self.tree.setColumnWidth(i, wd)
+        pl.addWidget(self.tree)
+        dv.addWidget(panel, 1)
+
+        # 这次管哪些(绿字)+ 取消选择 + 最近一句日志
+        scope = QHBoxLayout()
+        self.lab_scope = QLabel("")
+        self.lab_scope.setObjectName("scope")
+        self.lab_scope.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        scope.addWidget(self.lab_scope, 3)
+        self.b_clear = QPushButton("取消选择")
+        self.b_clear.setToolTip("不选了:下面的按钮回到管全部(Esc)")
+        self.b_clear.clicked.connect(self.tree.clearSelection)
+        scope.addWidget(self.b_clear)
+        self.lab_last = QLabel("")
+        self.lab_last.setObjectName("muted")
+        self.lab_last.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        scope.addWidget(self.lab_last, 2)
+        self.b_log = QPushButton("展开日志")
+        self.b_log.setObjectName("link")
+        self.b_log.clicked.connect(self._toggle_log)
+        scope.addWidget(self.b_log)
+        dv.addLayout(scope)
         self.logbox = QPlainTextEdit()
         self.logbox.setObjectName("log")
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(3000)
-        self.logbox.setMaximumHeight(60)                 # 平时只露两三行(体验报告:日志太占地方),「展开日志」看全
-        v.addWidget(self.logbox)
+        self.logbox.setMaximumHeight(200)
+        self.logbox.hide()                               # 平时只露最近一句(体验报告:日志太占地方),「展开日志」看全
+        dv.addWidget(self.logbox)
+        v.addWidget(self.detail, 1)
+        self._filler = QWidget()                         # 明细收起时把上面的东西顶在上面
+        v.addWidget(self._filler, 1)
         self.tree.itemSelectionChanged.connect(self._update_scope)
+        self.on_badge = None                             # 主窗口给:左边导航「16 个号」后面的数字
+        self.set_detail(bool(self.st.get("api_detail_open", False)), animate_=False)
 
         # 快捷键
         for key, owner, fn in (("F5", self, self.reload_dates),
-                               ("Ctrl+F", self, lambda: (self.e_find.setFocus(), self.e_find.selectAll())),
+                               ("Ctrl+F", self, lambda: (self.set_detail(True), self.e_find.setFocus(), self.e_find.selectAll())),
                                ("Escape", self.tree, self.tree.clearSelection),
                                ("F2", self.tree, self._edit_current)):
             sc = QShortcut(QKeySequence(key), owner)
             sc.activated.connect(fn)
         self._busy(False)
 
+    def set_detail(self, on: bool, animate_: bool = True):
+        """看每个号的明细 / 收起:大字区跟着变大变小,列表从下面拉开(用户 2026-10-18 要丝滑)。"""
+        from gui.widgets import animate, slide
+        on = bool(on)
+        if self.st.get("api_detail_open", False) != on:
+            self.st["api_detail_open"] = on
+        self.hero.set_open(on, animate_=animate_)
+        self._filler.setVisible(not on)
+        self._head.layout().setSpacing(14 if on else 30)
+        self.lab.setVisible(on)                          # 收起时上面只留日期:一长串说明 / 给号选文件夹 展开才露(「更多」里也有)
+        self.b_pick.setVisible(on)
+        self.b_pub.setMinimumHeight(40 if on else 50)
+        self.b_sched.setMinimumHeight(36 if on else 46)
+        self._fit_head()
+        if animate_ and self.isVisible():
+            slide(self.detail, on)
+            animate(self._gap, "gap", self._gap.height(), 0 if on else self._gap_h(), 360, lambda h: self._gap.setFixedHeight(int(h)))
+        else:
+            self.detail.setVisible(on)
+            self._gap.setFixedHeight(0 if on else self._gap_h())
+        self._detail_text()
+
+    def _gap_h(self) -> int:
+        """明细收起时大字往下放多少:窗口高的一成多一点,看着在中间偏上。"""
+        content = (self.hero.sizeHint().height() + self.card_v.sizeHint().height() + self.b_detail.sizeHint().height() + 40)
+        return max(24, int((self.height() - content) * 0.42))
+
+    def _fit_head(self):
+        """收起时大字 + 卡片收在中间一栏(最宽 920);展开时铺满。"""
+        lay = self.layout()
+        if self._filler.isHidden():
+            self._head.setMinimumWidth(0)
+            self._head.setMaximumWidth(16777215)
+            lay.setAlignment(self._head, Qt.AlignmentFlag(0))
+        else:
+            self._head.setFixedWidth(min(920, max(560, self.width() - 48)))
+            lay.setAlignment(self._head, Qt.AlignmentFlag.AlignHCenter)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if hasattr(self, "_filler"):
+            self._fit_head()
+            if self._filler.isVisible():
+                self._gap.setFixedHeight(self._gap_h())
+
+    def _detail_text(self):
+        n = len(self.videos)
+        self.b_detail.setText("︿  收起明细" if not self.detail.isHidden() and self._filler.isHidden()
+                              else f"﹀  看每个号的明细({n} 条)" if n else "﹀  看每个号的明细")
+
+    def _more_menu(self):
+        mm = self.b_more.menu_
+        mm.clear()
+        for text, fn, ok, tip in ((self.b_pick.text(), self.b_pick.click, self.b_pick.isEnabled(), self.b_pick.toolTip()),
+                                  ("全部展开", lambda: self.expand_all(True), True, ""),
+                                  ("全部收起", lambda: self.expand_all(False), True, ""),
+                                  (self.b_settopic.text(), self.b_settopic.click, self.b_settopic.isEnabled(), self.b_settopic.toolTip()),
+                                  (self.b_undo.text(), self.b_undo.click, self.b_undo.isEnabled(), self.b_undo.toolTip())):
+            act = mm.addAction(text, fn)
+            act.setEnabled(ok)
+            if tip:
+                act.setToolTip(tip)
+
+    def _seg_changed(self, k: str):
+        """「全部 / 要处理 / 能发 / 已发」:要处理 = 原来的「只看有问题的」。"""
+        self._segk = k if k in ("ok", "sent") else "all"
+        self.k_bad.blockSignals(True)
+        self.k_bad.setChecked(k == "bad")
+        self.k_bad.blockSignals(False)
+        self._apply_filter()
+
+    def _kbad_toggled(self, on: bool):
+        if on:
+            self._segk = "all"
+            self.seg.select("bad")
+            if self.detail.isHidden():
+                self.set_detail(True)
+        elif self.seg.key() == "bad":
+            self.seg.select("all")
+        self._apply_filter()
+
+    def _hero_update(self, n, sent, checked, ok, bad, fail, unsure, gone, cats):
+        """大字:一句话说现在怎么样;下面一行说接下来干什么。按钮就在旁边。"""
+        if not hasattr(self, "hero"):
+            return
+        quota = self._quota_sub()
+        if not self.day():
+            big, sub, tone = "先选要发哪天的", "在上面「要发哪天的」里挑一天", ""
+        elif self.busy() and not getattr(self, "_quiet", False):
+            prog = self.lab_scope.text()
+            big = "正在发布…" if prog.startswith("正在发") else (getattr(self, "_job_title", "") or "正在处理…")
+            sub, tone = prog, ""
+        elif not n and not gone:
+            big, sub, tone = "这天没有视频", "换一天看看,或者点「给号选文件夹…」", ""
+        elif checked < n:
+            big, sub, tone = f"正在检查 {n} 条…", f"检查完 {checked} / {n} 条,马上就好", ""
+        elif fail:
+            big, tone = f"{fail} 条没发成", "bad"
+            sub = "点「再发一次没发成的」再试;为什么没发成:列表里鼠标放在状态上看"
+        elif unsure:
+            big, tone = f"{unsure} 条不确定发没发", "warn"
+            sub = "去企鹅号后台看一眼,回来在列表里双击它标「发了 / 没发」"
+        elif ok:
+            big, tone = f"{ok} 条可以发了", ""
+            sub = f"还有 {bad} 条有点小问题,处理好能多发 {bad} 条" if bad else "都检查过了,没有问题"
+        elif n + gone and sent + gone >= n + gone:
+            big, sub, tone = "这天的都发完了 √", "", "good"
+        elif bad:
+            big, tone = f"{bad} 条要先处理一下", "warn"
+            sub = "处理好就能发(用下面的卡片)"
+        else:
+            big, sub, tone = "没有能发的", "", ""
+        if cats.get("o") and not self.busy():
+            sub += ("\n" if sub else "") + f"其中 {cats['o']} 条标题里有别的平台的名字,要你自己改(列表里右键「改标题」)"
+        if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)):
+            sub = (sub + " · " if sub else "") + quota
+        self.hero.set(big, sub, tone)
+        self.card_v.set(f"{cats['v']} 条横屏 / 偏方" if cats["v"] else "没有横屏 / 偏方", "warn" if cats["v"] else "done")
+        self.card_t.set(f"{cats['t']} 条标题 / 话题要整理" if cats["t"] else "标题 / 话题都没问题", "warn" if cats["t"] else "done")
+        self.card_w.set(f"{cats['w']} 条有水印 / 广告" if cats["w"] else "查水印 / 口播广告", "warn" if cats["w"] else "")
+        for k, text in (("all", f"全部 {n}"), ("bad", f"要处理 {bad + fail + unsure}"), ("ok", f"能发 {ok}"), ("sent", f"已发 {sent}")):
+            self.seg.set_text(k, text)
+        self._detail_text()
+        if self.on_badge:
+            self.on_badge(bad + fail + unsure)
+
     def say(self, m: str):
         """日志写在这页下面(两页各记各的;体验报告:教育页日志里全是 [接口] 的)。"""
         self.logbox.appendPlainText(f"[{bj_str()[11:]}] {m}")
+        if hasattr(self, "lab_last"):
+            last = m.strip().splitlines()[0] if m.strip() else ""
+            self.lab_last.setText(f"最近 {bj_str()[11:16]}:{last}")
+            self.lab_last.setToolTip(m)
 
     def _toggle_log(self):
-        big = self.logbox.maximumHeight() < 100
-        self.logbox.setMaximumHeight(260 if big else 60)
+        big = self.logbox.isHidden()
+        self.logbox.setVisible(big)
         self.b_log.setText("收起日志" if big else "展开日志")
+        if big:
+            self.logbox.verticalScrollBar().setValue(self.logbox.verticalScrollBar().maximum())
 
     def _card_clicked(self, key: str):
         """点「要处理」卡片 = 只看有问题的;点「能发」= 取消过滤看全部。"""
@@ -349,11 +531,14 @@ class ApiTab(QWidget):
         for b in (self.c_date, self.b_pick, self.b_reload):
             b.setEnabled(not on or quiet)
         self.b_stop.setEnabled(on)
+        self.b_stop.setVisible(on and not quiet)        # 「停」只在干活的时候出来(大红按钮)
         if not on:
             self._update_scope()
+        if hasattr(self, "hero"):
+            self._update_sum()
 
     def filtering(self) -> bool:
-        return self.k_bad.isChecked() or bool(self.e_find.text().strip())
+        return self.k_bad.isChecked() or bool(self.e_find.text().strip()) or getattr(self, "_segk", "all") != "all"
 
     def target_rows(self, only: list[int] | None = None) -> list[int]:
         """这次要管哪些:给了就是给的;没给 → 选中的;没选 → 列表里看得见的全部(「只看有问题的」/ 搜索过滤掉的不算)。"""
@@ -752,11 +937,30 @@ class ApiTab(QWidget):
                        bad_sub=" · ".join(subs),
                        ok_sub="点「现在发布」发这些" if ok else "",
                        sent_sub=f"其中 {gone} 条已挪走" if gone else "", all_sub="", accs_sub=self._quota_sub())
+        cats = {"v": 0, "t": 0, "w": 0, "o": 0}
+        for i in checked:
+            if self._sent(i):
+                continue
+            ps = checks.problems(self.videos[i])
+            if any(p in ("横屏", "偏方要转竖屏") for p in ps):
+                cats["v"] += 1
+            if any("话题" in p or "空格" in p or "要删" in p for p in ps):
+                cats["t"] += 1
+            if any("水印" in p or "广告" in p for p in ps):
+                cats["w"] += 1
+            if any(p.startswith("标题有「") and "要删" not in p for p in ps):
+                cats["o"] += 1
+        self._hero_update(n, sent, len(checked), ok, bad, fail, unsure, gone, cats)
 
     def _hidden(self, i: int) -> bool:
         key = self.e_find.text().strip().lower()
         if key and key not in self.videos[i].title.lower():
             return True
+        seg = getattr(self, "_segk", "all")
+        if seg == "ok":
+            return not (self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
+        if seg == "sent":
+            return not self.state.get(i, "").startswith("已发")
         if self.k_bad.isChecked():
             st, probs = self._status_text(i)
             return not (probs or st.startswith(FAILED) or st == "结果不明") or st.startswith("已发")
@@ -995,6 +1199,7 @@ class ApiTab(QWidget):
         if self.busy():
             return False
         self._quiet = quiet
+        self._job_title = (title.split(":")[0].split("(")[0].split(":")[0].rstrip("…") + "…") if title else ""
         self._busy(True)
         if title:
             self.say(title)
@@ -1014,6 +1219,7 @@ class ApiTab(QWidget):
             return
         if i == PROGRESS:
             self.lab_scope.setText(t)
+            self._update_sum()
             return
         if i < 0:
             self.say(t)

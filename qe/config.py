@@ -64,7 +64,8 @@ DEFAULTS = {
     "api_archive_by_game": True,   # 发完挪走时按游戏分子文件夹(CSGO / DNF …,用户的习惯)         # 每条之间歇几秒(旧软件「间隔 5 秒」)
     "api_picked": {},          # 手动给号选的文件夹:{日期: {号: 文件夹}}(像旧软件的「选择」)
     "topic_model": "qwen-plus",
-    "theme": "抖音创作者",      # 界面风格(gui/theme.py 里的名字;用户 2026-10-15 选的);空 = 原来的样子
+    "theme": "浅色",            # 界面风格(gui/theme.py 里的名字:浅色 / 深色;用户 2026-10-18 选的「G 一键驾驶舱」)
+    "splash": True,             # 打开软件先放「Hi,欢迎使用本工作台」开场动画
 }
 
 

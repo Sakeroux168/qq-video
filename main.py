@@ -8,7 +8,6 @@ def main():
     from PySide6.QtWidgets import QApplication, QMessageBox
     app = QApplication(sys.argv)
     app.setApplicationName("企鹅号发布助手")
-    app.setStyleSheet("QWidget{font-family:'Microsoft YaHei';font-size:13px} QPushButton{padding:5px 12px}")
     from PySide6.QtCore import QLibraryInfo, QTranslator
     tr = QTranslator(app)                     # 对话框按钮用中文(审查:原来是 Yes / No / OK / Cancel)
     if tr.load("qtbase_zh_CN", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
@@ -25,11 +24,12 @@ def main():
                                     "(要是刚关掉:它还在收尾,过十几秒再开)")
             return 0
         st = Settings()
-        if st.get("theme"):                       # 界面风格(设置里选)
-            from gui import theme
-            theme.apply(app, st["theme"])
+        from gui import theme                     # 界面风格(设置里选;老版本存的名字认不出来就用浅色)
+        theme.apply(app, st.get("theme") or theme.DEFAULT)
         w = MainWindow(st)
         w.show()
+        if st.get("splash", True):                # 开场「Hi,欢迎使用本工作台」(设置里能关)
+            w.play_splash()
         if st.broken:
             QMessageBox.warning(w, "设置文件坏了", f"设置文件读不出来,已经用默认设置打开。\n坏的那份留着:\n{st.broken}\n\n"
                                 "去「设置…」里把素材文件夹、Key 等重新填一下。")

@@ -1,63 +1,43 @@
-"""界面风格(用户 2026-10-15:「前端风格也太丑了,给我几个风格样板看看选一下」)。
+"""界面风格(用户 2026-10-18 选的「G 一键驾驶舱」:大字 + 一个大按钮、问题做成卡片、明细能收起;
+「白色界面有些字看不见好淡」→ 说明字一律深灰、最小 12px)。
 
-每套 = Fusion 风格 + 调色板 + 一段 QSS + 列表里状态行的底色(深色主题要用深一点的底色,不然字看不清)。
-设置里 theme 存名字;main.py 启动时 apply()。"""
+两套:浅色(默认)/ 深色。每套 = 一组颜色(TOKENS)→ 调色板 + 一段 QSS + 列表里状态行的底色。
+自己画的小部件(圆环、状态胶囊、开场动画)用 cur() 拿当前这套颜色。设置里 theme 存名字;main.py 启动时 apply()。"""
 from PySide6.QtGui import QColor, QPalette
 
-BASE_FONT = "font-family:'Microsoft YaHei';font-size:13px;"
+FONT = "'Microsoft YaHei UI','Microsoft YaHei'"
 
 THEMES = {
-    "抖音创作者": {
-        "desc": "白卡片、浅灰底、红粉色强调、大数字",
-        "pal": {"window": "#f5f6f7", "base": "#ffffff", "alt": "#fafafb", "text": "#161823", "button": "#ffffff",
-                "highlight": "#ffe8ed", "htext": "#161823", "mid": "#e6e7ea", "muted": "#8a8b91", "side": "#ffffff"},
-        "accent": "#fe2c55", "accent_hover": "#e8173f", "soft": "#fff0f3", "select": "#e3ecff", "radius": 8,
-        "rows": {"yellow": "#fff7e0", "red": "#ffe7eb", "green": "#e6f7ec", "orange": "#ffeedd", "ready": "#eef4ff"},
+    "浅色": {
+        "desc": "白底、深色字、蓝色主按钮;白天用",
+        "bg": "#f6f7f9", "card": "#ffffff", "side": "#ffffff", "line": "#dfe2e8", "line2": "#eceef2",
+        "tx": "#111318", "tx2": "#2b303a", "mu": "#4b5260", "dim": "#6b7280",
+        "acc": "#0066d6", "acc_h": "#0057b8", "acc_bg": "#e3eeff",
+        "soft": "#eceef2", "soft_h": "#e2e5ea",
+        "ok": "#1a7a33", "ok_bg": "#e3f5e8", "warn": "#b42f00", "warn_bg": "#fff0e0",
+        "bad": "#c4231a", "bad_bg": "#fdeceb", "danger": "#d92d20", "danger_h": "#b42318",
+        "orange": "#e8590c", "green": "#1f9d4c", "sel": "#dce9ff", "alt": "#fafbfc",
+        "rows": {"yellow": "#fffaf0", "red": "#fff4f2", "green": "#f3faf5", "orange": "#fff5e8", "ready": "#eef4ff"},
     },
-    "清爽白": {
-        "desc": "白底浅灰,蓝色按钮,圆角;看着干净,适合白天长时间用",
-        "pal": {"window": "#f4f6f9", "base": "#ffffff", "alt": "#f7f9fc", "text": "#1f2329", "button": "#ffffff",
-                "highlight": "#2f6bff", "htext": "#ffffff", "mid": "#d9dde5"},
-        "accent": "#2f6bff", "accent_hover": "#1f57e0", "radius": 6,
-        "rows": {"yellow": "#fff6d6", "red": "#ffe1e1", "green": "#e1f5e6", "orange": "#ffe6c7"},
-    },
-    "暗夜": {
-        "desc": "深灰黑底,亮蓝按钮;晚上用不刺眼",
-        "pal": {"window": "#1f2125", "base": "#26282d", "alt": "#2b2e33", "text": "#e3e5e8", "button": "#2f3238",
-                "highlight": "#4e8cff", "htext": "#ffffff", "mid": "#3a3d44"},
-        "accent": "#4e8cff", "accent_hover": "#6a9fff", "radius": 6,
-        "rows": {"yellow": "#4a4222", "red": "#5a2a2c", "green": "#24442f", "orange": "#5a3c1e"},
-    },
-    "暖橙": {
-        "desc": "米白底,橙色按钮;暖色调,和企鹅号后台的感觉接近",
-        "pal": {"window": "#faf6f0", "base": "#fffdf9", "alt": "#fbf6ee", "text": "#2b2620", "button": "#fffdf9",
-                "highlight": "#ff8a1f", "htext": "#ffffff", "mid": "#e6dccd"},
-        "accent": "#ff8a1f", "accent_hover": "#f07400", "radius": 8,
-        "rows": {"yellow": "#fff3cf", "red": "#ffe0d9", "green": "#e3f3dc", "orange": "#ffdcb0"},
-    },
-    "护眼绿": {
-        "desc": "淡绿灰底,墨绿按钮;颜色柔和,看久了眼睛舒服",
-        "pal": {"window": "#eef3ef", "base": "#fbfdfb", "alt": "#f2f7f3", "text": "#1d2a22", "button": "#fbfdfb",
-                "highlight": "#1f8a64", "htext": "#ffffff", "mid": "#cfdcd3"},
-        "accent": "#1f8a64", "accent_hover": "#17704f", "radius": 6,
-        "rows": {"yellow": "#fbf2cf", "red": "#f8dcdc", "green": "#d6efe0", "orange": "#fbe1c4"},
+    "深色": {
+        "desc": "深灰底、亮字;晚上用不刺眼",
+        "bg": "#141418", "card": "#1d1e24", "side": "#1a1b20", "line": "#30323b", "line2": "#272830",
+        "tx": "#f2f3f5", "tx2": "#dfe1e6", "mu": "#b4b8c2", "dim": "#9095a1",
+        "acc": "#3b8cff", "acc_h": "#5c9fff", "acc_bg": "#1c2c47",
+        "soft": "#2a2b33", "soft_h": "#33353e",
+        "ok": "#4ade80", "ok_bg": "#16321f", "warn": "#ffa94d", "warn_bg": "#3a2a14",
+        "bad": "#ff7b72", "bad_bg": "#3d1c1c", "danger": "#e5484d", "danger_h": "#f2555a",
+        "orange": "#ff922b", "green": "#40c463", "sel": "#22385c", "alt": "#202128",
+        "rows": {"yellow": "#2c2717", "red": "#331d1d", "green": "#18291e", "orange": "#33261a", "ready": "#1c2a40"},
     },
 }
+DEFAULT = "浅色"
+_CUR = dict(THEMES[DEFAULT])
 
 
-def _get(t: dict) -> dict:
-    """补齐可选的颜色:muted(灰字)、side(导航栏底)、soft(强调色的浅底)。"""
-    p = dict(t["pal"])
-    p.setdefault("muted", "#8a8f99")
-    p.setdefault("side", p["base"])
-    return p
-
-
-def _blend(c1: str, c2: str, k: float) -> str:
-    """c1 和 c2 按 k 混(k=0.12 → 12% 的 c1)。用来从强调色调出浅底。"""
-    a, b = QColor(c1), QColor(c2)
-    return QColor(round(a.red() * k + b.red() * (1 - k)), round(a.green() * k + b.green() * (1 - k)),
-                  round(a.blue() * k + b.blue() * (1 - k))).name()
+def cur() -> dict:
+    """当前这套颜色(自己画的小部件用)。"""
+    return _CUR
 
 
 def _asset(name: str) -> str:
@@ -66,92 +46,173 @@ def _asset(name: str) -> str:
 
 
 def qss(t: dict) -> str:
-    p, a, r = _get(t), t["accent"], t["radius"]
-    # 选中项的浅底:没写 soft 的主题从强调色调淡(审查:原来用 highlight = 强调色,蓝底蓝字看不见)
-    soft = t.get("soft") or _blend(a, p["base"], 0.16)
-    down, up = _asset("down.svg"), _asset("up.svg")
+    down, up, chk = _asset("down.svg"), _asset("up.svg"), _asset("check.svg")
     return f"""
-QWidget {{ {BASE_FONT} color:{p['text']}; }}
-QMainWindow, QDialog, QWidget#page, QStackedWidget {{ background:{p['window']}; }}
-QFrame#sidebar {{ background:{p['side']}; border-right:1px solid {p['mid']}; }}
-QLabel#brand {{ font-size:18px; font-weight:bold; color:{a}; padding-left:6px; }}
-QLabel#brandSub {{ font-size:12px; color:{p['muted']}; padding-left:6px; }}
-QPushButton#nav {{ text-align:left; padding:9px 14px; border:none; border-radius:{r}px; background:transparent;
-    font-size:14px; color:{p['text']}; }}
-QPushButton#nav:hover {{ background:{p['window']}; color:{p['text']}; }}
-QPushButton#nav:checked {{ background:{soft}; color:{a}; font-weight:bold; }}
-QLabel#pageTitle {{ font-size:18px; font-weight:bold; padding:2px 0 4px 0; }}
-QFrame#stat {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r + 2}px; }}
-QLabel#statLbl {{ color:{p['muted']}; font-size:13px; }}
-QLabel#statVal {{ font-size:26px; font-weight:bold; color:{p['text']}; }}
-QLabel#statVal[tone="good"] {{ color:#1aa260; }}
-QLabel#statVal[tone="warn"] {{ color:{a}; }}
-QLabel#statSub {{ color:{p['muted']}; font-size:12px; }}
-QTabWidget::pane {{ border:1px solid {p['mid']}; border-radius:{r}px; background:{p['window']}; top:-1px; }}
-QTabBar::tab {{ background:transparent; padding:7px 16px; margin-right:2px; border:none; color:{p['text']}; }}
-QTabBar::tab:selected {{ color:{a}; border-bottom:2px solid {a}; font-weight:bold; }}
-QPushButton {{ background:{p['button']}; border:1px solid {p['mid']}; border-radius:{r}px; padding:6px 14px; }}
-QPushButton:hover {{ border-color:{a}; color:{a}; }}
-QPushButton:disabled {{ color:{p['muted']}; border-color:{p['mid']}; background:{p['window']}; }}
-QPushButton#primary {{ background:{a}; color:#ffffff; border:1px solid {a}; font-weight:bold; padding:7px 24px; }}
-QPushButton#primary:hover {{ background:{t['accent_hover']}; color:#ffffff; }}
-QPushButton#primary:disabled {{ background:{p['mid']}; color:{p['muted']}; border-color:{p['mid']}; }}
-QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r}px; padding:5px 8px; }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color:{a}; }}
-QComboBox::drop-down {{ border:none; width:24px; }}
-QComboBox::down-arrow {{ image:url({down}); width:12px; height:12px; }}
+QWidget {{ font-family:{FONT}; font-size:13px; color:{t['tx']}; }}
+QMainWindow, QDialog, QWidget#page, QStackedWidget, QScrollArea, QScrollArea > QWidget > QWidget {{ background:{t['bg']}; }}
+QLabel {{ background:transparent; }}
+
+/* 左边导航 */
+QFrame#sidebar {{ background:{t['side']}; border:none; border-right:1px solid {t['line']}; }}
+QLabel#brand {{ font-size:15px; font-weight:bold; color:{t['tx']}; }}
+QLabel#brandSub {{ font-size:12px; color:{t['dim']}; }}
+QPushButton#nav {{ text-align:left; padding:9px 12px; border:none; border-radius:10px; background:transparent;
+    font-size:14px; color:{t['tx2']}; }}
+QPushButton#nav:hover {{ background:{t['soft']}; }}
+QPushButton#nav:checked {{ background:{t['acc_bg']}; color:{t['acc']}; font-weight:bold; }}
+QLabel#navBadge {{ background:{t['orange']}; color:#ffffff; border-radius:9px; padding:0 5px; font-size:11px; font-weight:bold; }}
+
+/* 大字区(每页最上面) */
+QFrame#hero {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:16px; }}
+QFrame#hero[open="false"] {{ background:transparent; border-color:transparent; }}
+QLabel#heroMeta {{ color:{t['mu']}; font-size:13px; }}
+QLabel#heroBig {{ font-weight:bold; color:{t['tx']}; }}
+QLabel#heroBig[tone="good"] {{ color:{t['ok']}; }}
+QLabel#heroBig[tone="warn"] {{ color:{t['warn']}; }}
+QLabel#heroBig[tone="bad"] {{ color:{t['bad']}; }}
+QLabel#heroSub {{ color:{t['mu']}; font-size:13px; }}
+/* 明细收起时:大字区大一号、没有框,日期是个小胶囊,按钮也大(用户 2026-10-18:「高级感被压制了」) */
+QFrame#hero[open="false"] QLabel#heroSub {{ font-size:15px; }}
+QFrame#hero[open="false"] QLabel {{ font-size:14px; }}
+QFrame#hero[open="false"] QLabel#heroBig {{ letter-spacing:-1px; }}
+QFrame#hero[open="false"] QComboBox {{ border:none; background:{t['soft']}; border-radius:15px; padding:5px 14px; font-size:14px; }}
+QFrame#hero[open="false"] QPushButton#primary {{ font-size:16px; padding:12px 38px; border-radius:25px; }}
+QFrame#hero[open="false"] QPushButton#pill {{ font-size:14px; padding:11px 24px; border-radius:23px; }}
+QLabel#pageTitle {{ font-size:20px; font-weight:bold; color:{t['tx']}; }}
+QLabel#muted {{ color:{t['mu']}; font-size:12px; }}
+QLabel#warnText {{ color:{t['danger']}; font-weight:bold; }}
+QLabel#secTitle {{ font-size:14px; font-weight:bold; color:{t['tx']}; }}
+
+/* 问题卡片(点了就处理) */
+QFrame#probCard {{ background:{t['card']}; border:1px solid {t['line2']}; border-radius:18px; }}
+QFrame#probCard:hover {{ border-color:{t['acc']}; }}
+QLabel#probTitle {{ font-size:15px; font-weight:bold; color:{t['tx']}; }}
+QLabel#probTitle[tone="done"] {{ color:{t['mu']}; }}
+QLabel#probSub {{ color:{t['mu']}; font-size:12px; }}
+QPushButton#cardBtn {{ background:transparent; border:none; color:{t['acc']}; font-weight:bold; padding:2px 0; text-align:left; }}
+QPushButton#cardBtn:hover {{ color:{t['acc_h']}; text-decoration:underline; }}
+QPushButton#cardBtn:disabled {{ color:{t['dim']}; }}
+QPushButton#cardBtn::menu-indicator {{ image:none; width:0; }}
+
+/* 白色大块(列表外面那层) */
+QFrame#panel {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:14px; }}
+QFrame#stat {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:14px; }}
+QFrame#stat[click="true"]:hover {{ border-color:{t['acc']}; }}
+QLabel#statLbl {{ color:{t['mu']}; font-size:13px; }}
+QLabel#statVal {{ font-size:26px; font-weight:bold; color:{t['tx']}; }}
+QLabel#statVal[tone="good"] {{ color:{t['ok']}; }}
+QLabel#statVal[tone="warn"] {{ color:{t['warn']}; }}
+QLabel#statSub {{ color:{t['mu']}; font-size:12px; }}
+
+/* 「全部 / 要处理 / 能发 / 已发」 */
+QFrame#seg {{ background:{t['soft']}; border-radius:10px; }}
+QPushButton#segBtn {{ background:transparent; border:none; border-radius:8px; padding:5px 12px; color:{t['tx2']}; }}
+QPushButton#segBtn:hover {{ background:{t['soft_h']}; }}
+QPushButton#segBtn:checked {{ background:{t['card']}; color:{t['tx']}; font-weight:bold; }}
+
+/* 按钮:主按钮(蓝)/ 普通 / 危险(红)/ 像链接的 */
+QPushButton {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:8px; padding:7px 14px; color:{t['tx']}; }}
+QPushButton:hover {{ background:{t['soft']}; border-color:{t['dim']}; }}
+QPushButton:pressed {{ background:{t['soft_h']}; }}
+QPushButton:disabled {{ color:{t['dim']}; background:{t['soft']}; border-color:{t['soft']}; }}
+QPushButton::menu-indicator {{ subcontrol-position:right center; right:6px; }}
+QPushButton#primary {{ background:{t['acc']}; color:#ffffff; border:1px solid {t['acc']}; font-weight:bold; font-size:14px;
+    padding:9px 24px; border-radius:19px; }}
+QPushButton#primary:hover {{ background:{t['acc_h']}; border-color:{t['acc_h']}; }}
+QPushButton#primary:disabled {{ background:{t['soft']}; color:{t['dim']}; border-color:{t['soft']}; }}
+QPushButton#danger {{ background:{t['danger']}; color:#ffffff; border:1px solid {t['danger']}; font-weight:bold; border-radius:16px; padding:7px 18px; }}
+QPushButton#danger:hover {{ background:{t['danger_h']}; }}
+QPushButton#danger:disabled {{ background:{t['soft']}; color:{t['dim']}; border-color:{t['soft']}; }}
+QPushButton#pill {{ background:{t['soft']}; border:none; border-radius:16px; padding:7px 16px; color:{t['tx']}; }}
+QPushButton#pill:hover {{ background:{t['soft_h']}; }}
+QPushButton#pill:disabled {{ color:{t['dim']}; }}
+QPushButton#link, QPushButton#toggle {{ border:none; background:transparent; color:{t['acc']}; padding:4px 8px; }}
+QPushButton#link:hover, QPushButton#toggle:hover {{ color:{t['acc_h']}; background:transparent; }}
+QPushButton#toggle {{ font-weight:bold; }}
+QPushButton#nextBtn {{ text-align:left; background:transparent; border:none; border-radius:10px; padding:8px; }}
+QPushButton#nextBtn:hover {{ background:{t['soft']}; }}
+
+/* 输入框 */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QPlainTextEdit, QTextEdit {{ background:{t['card']}; border:1px solid {t['line']};
+    border-radius:8px; padding:6px 9px; selection-background-color:{t['acc']}; selection-color:#ffffff; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus, QPlainTextEdit:focus {{ border-color:{t['acc']}; }}
+QComboBox::drop-down, QDateEdit::drop-down {{ border:none; width:24px; }}
+QComboBox::down-arrow, QDateEdit::down-arrow {{ image:url({down}); width:12px; height:12px; }}
 QSpinBox::up-button, QSpinBox::down-button {{ border:none; width:20px; background:transparent; }}
 QSpinBox::up-arrow {{ image:url({up}); width:10px; height:10px; }}
 QSpinBox::down-arrow {{ image:url({down}); width:10px; height:10px; }}
-QComboBox QAbstractItemView {{ background:{p['base']}; border:1px solid {p['mid']}; selection-background-color:{soft}; selection-color:{a}; }}
-QPlainTextEdit#log {{ color:{p['muted']}; }}
-QTreeWidget, QTableWidget {{ background:{p['base']}; alternate-background-color:{p['alt']}; border:1px solid {p['mid']};
-    border-radius:{r + 2}px; gridline-color:{p['mid']}; }}
-QTreeWidget::item, QTableWidget::item {{ padding:4px 2px; }}
-QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{t.get('select') or soft}; color:{p['text']}; }}
-QLabel#scope {{ color:#1aa260; font-weight:bold; padding:4px 0; }}
-QLabel#scope[sel="true"] {{ background:{soft}; color:{a}; border-radius:{r}px; padding:4px 10px; }}
-QLabel#hint {{ background:{soft}; color:{a}; border:1px solid {_blend(a, p['base'], 0.35)}; border-radius:{r}px; padding:8px 12px;
-    font-weight:bold; }}
-QFrame#stat[click="true"]:hover {{ border-color:{a}; }}
-QPushButton#link {{ border:none; background:transparent; color:{p['muted']}; padding:2px 6px; }}
-QPushButton#link:hover {{ color:{a}; }}
-QHeaderView::section {{ background:{p['base']}; border:none; border-bottom:1px solid {p['mid']}; padding:8px 6px;
-    font-weight:bold; color:{p['muted']}; }}
-QGroupBox {{ background:{p['base']}; border:1px solid {p['mid']}; border-radius:{r + 2}px; margin-top:16px; padding:12px 10px 8px 10px; }}
-QGroupBox::title {{ subcontrol-origin:margin; left:12px; padding:0 4px; color:{a}; font-weight:bold; }}
-QCheckBox::indicator {{ width:15px; height:15px; }}
-QScrollBar:vertical {{ background:transparent; width:10px; margin:0; }}
-QScrollBar::handle:vertical {{ background:{p['mid']}; border-radius:5px; min-height:30px; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ height:0; }}
-QToolTip {{ background:{p['base']}; color:{p['text']}; border:1px solid {p['mid']}; padding:4px; }}
-QMenu {{ background:{p['base']}; border:1px solid {p['mid']}; padding:4px; }}
-QMenu::item {{ padding:6px 18px; border-radius:{r}px; }}
-QMenu::item:selected {{ background:{soft}; color:{a}; }}
+QComboBox QAbstractItemView {{ background:{t['card']}; border:1px solid {t['line']}; selection-background-color:{t['acc_bg']};
+    selection-color:{t['tx']}; outline:0; padding:4px; }}
+QLineEdit#search {{ background:{t['soft']}; border:1px solid transparent; border-radius:16px; padding:6px 12px; }}
+QLineEdit#search:focus {{ background:{t['card']}; border-color:{t['acc']}; }}
+QPlainTextEdit#log {{ color:{t['mu']}; background:{t['card']}; font-size:12px; }}
+QCheckBox {{ spacing:6px; color:{t['tx']}; }}
+QCheckBox::indicator, QTreeView::indicator, QTableView::indicator {{ width:16px; height:16px; border-radius:5px;
+    border:1.5px solid {t['dim']}; background:{t['card']}; }}
+QCheckBox::indicator:hover, QTreeView::indicator:hover {{ border-color:{t['acc']}; }}
+QCheckBox::indicator:checked, QTreeView::indicator:checked, QTableView::indicator:checked {{ background:{t['acc']};
+    border-color:{t['acc']}; image:url({chk}); }}
+QCheckBox::indicator:disabled, QTreeView::indicator:disabled {{ background:{t['soft']}; border-color:{t['line']}; }}
+
+/* 列表 / 表格 */
+QTreeWidget, QTableWidget {{ background:{t['card']}; alternate-background-color:{t['alt']}; border:1px solid {t['line']};
+    border-radius:14px; gridline-color:{t['line2']}; outline:0; }}
+QFrame#panel QTreeWidget, QFrame#panel QTableWidget {{ border:none; border-radius:0; }}
+QTreeWidget::item, QTableWidget::item {{ padding:6px 4px; border:none; }}
+QTreeWidget::item:hover, QTableWidget::item:hover {{ background:{t['soft']}; }}
+QTreeWidget::item:selected, QTableWidget::item:selected {{ background:{t['sel']}; color:{t['tx']}; }}
+QHeaderView {{ background:transparent; }}
+QHeaderView::section {{ background:{t['card']}; border:none; border-bottom:1px solid {t['line']}; padding:9px 8px;
+    font-weight:bold; color:{t['mu']}; font-size:12px; }}
+QTableCornerButton::section {{ background:{t['card']}; border:none; }}
+QSplitter::handle {{ background:transparent; width:10px; }}
+
+QLabel#scope {{ color:{t['ok']}; font-weight:bold; padding:2px 0; }}
+QLabel#scope[sel="true"] {{ background:{t['acc_bg']}; color:{t['acc']}; border-radius:8px; padding:4px 10px; }}
+QLabel#warnPill {{ background:{t['warn_bg']}; color:{t['warn']}; border-radius:13px; padding:4px 12px; font-weight:bold; }}
+QLabel#warnPill[tone="good"] {{ background:{t['ok_bg']}; color:{t['ok']}; }}
+QLabel#hint {{ background:{t['warn_bg']}; color:{t['warn']}; border:none; border-radius:10px; padding:9px 12px; font-weight:bold; }}
+QGroupBox {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:12px; margin-top:18px; padding:14px 12px 10px 12px; }}
+QGroupBox::title {{ subcontrol-origin:margin; left:12px; padding:0 4px; color:{t['tx']}; font-weight:bold; font-size:14px; }}
+QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }}
+QScrollBar::handle:vertical {{ background:{t['line']}; border-radius:4px; min-height:30px; }}
+QScrollBar::handle:vertical:hover {{ background:{t['dim']}; }}
+QScrollBar:horizontal {{ background:transparent; height:10px; margin:2px; }}
+QScrollBar::handle:horizontal {{ background:{t['line']}; border-radius:4px; min-width:30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height:0; width:0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
+QToolTip {{ background:{t['card']}; color:{t['tx']}; border:1px solid {t['line']}; padding:6px; border-radius:6px; }}
+QMenu {{ background:{t['card']}; border:1px solid {t['line']}; padding:6px; border-radius:10px; }}
+QMenu::item {{ padding:7px 22px 7px 14px; border-radius:6px; color:{t['tx']}; }}
+QMenu::item:selected {{ background:{t['acc_bg']}; color:{t['acc']}; }}
+QMenu::item:disabled {{ color:{t['dim']}; }}
+QMenu::separator {{ height:1px; background:{t['line']}; margin:4px 8px; }}
+QMessageBox QLabel {{ font-size:13px; }}
+QDialogButtonBox QPushButton {{ min-width:72px; }}
 """
 
 
 def palette(t: dict) -> QPalette:
-    p = _get(t)
     pal = QPalette()
-    for role, key in ((QPalette.ColorRole.Window, "window"), (QPalette.ColorRole.Base, "base"),
-                      (QPalette.ColorRole.AlternateBase, "alt"), (QPalette.ColorRole.Text, "text"),
-                      (QPalette.ColorRole.WindowText, "text"), (QPalette.ColorRole.ButtonText, "text"),
-                      (QPalette.ColorRole.Button, "button"), (QPalette.ColorRole.Highlight, "highlight"),
-                      (QPalette.ColorRole.HighlightedText, "htext"), (QPalette.ColorRole.ToolTipBase, "base"),
-                      (QPalette.ColorRole.ToolTipText, "text"), (QPalette.ColorRole.PlaceholderText, "muted")):
-        pal.setColor(role, QColor(p[key]))
+    for role, key in ((QPalette.ColorRole.Window, "bg"), (QPalette.ColorRole.Base, "card"),
+                      (QPalette.ColorRole.AlternateBase, "alt"), (QPalette.ColorRole.Text, "tx"),
+                      (QPalette.ColorRole.WindowText, "tx"), (QPalette.ColorRole.ButtonText, "tx"),
+                      (QPalette.ColorRole.Button, "card"), (QPalette.ColorRole.Highlight, "sel"),
+                      (QPalette.ColorRole.HighlightedText, "tx"), (QPalette.ColorRole.ToolTipBase, "card"),
+                      (QPalette.ColorRole.ToolTipText, "tx"), (QPalette.ColorRole.PlaceholderText, "dim"),
+                      (QPalette.ColorRole.Link, "acc")):
+        pal.setColor(role, QColor(t[key]))
     return pal
 
 
-DEFAULT = "抖音创作者"
-
-
 def apply(app, name: str) -> str:
-    """套用主题;名字不认识就用默认的。返回实际用的名字。也把列表状态行的底色换成这套的。"""
+    """套用主题;名字不认识(老版本存的「抖音创作者」这些)就用默认的。返回实际用的名字。
+    也把列表状态行的底色换成这套的(淡淡的一层,状态本身用彩色胶囊标)。"""
     if name not in THEMES:
         name = DEFAULT
     t = THEMES[name]
+    _CUR.clear()
+    _CUR.update(t)
     app.setStyle("Fusion")
     app.setPalette(palette(t))
     app.setStyleSheet(qss(t))
@@ -159,8 +220,10 @@ def apply(app, name: str) -> str:
     import gui.window as W
     from PySide6.QtGui import QBrush
     A.YELLOW, A.RED, A.GREEN, A.ORANGE = (QColor(t["rows"][k]) for k in ("yellow", "red", "green", "orange"))
+    A.GREY = QColor(t["dim"])
     W.YELLOW, W.GREEN = QBrush(QColor(t["rows"]["yellow"])), QBrush(QColor(t["rows"]["green"]))
-    # 教育页「摆好」那行:要和背景分得开(审查:原来用 alt,几乎和底色一样看不出来)
-    W.GREY = QBrush(QColor(t["rows"].get("ready") or t["rows"]["orange"]))
+    W.GREY = QBrush(QColor(t["rows"]["ready"]))
     W.RED = QBrush(QColor(t["rows"]["red"]))
+    for w in app.topLevelWidgets():                    # 设置里换了马上生效:自己画的部件重画一下
+        w.update()
     return name

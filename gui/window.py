@@ -22,6 +22,7 @@ from qe import folders as F
 from qe.config import APP_VERSION, bj_str, data_dir
 from qe.adjust import Adjustments
 from qe.records import Records
+from gui.theme import cur as _tok
 
 YELLOW = QBrush(QColor("#FFF3C4"))
 GREEN = QBrush(QColor("#DDF3E2"))
@@ -214,18 +215,18 @@ class MainWindow(QMainWindow):
 
     # ---------------- 界面 ----------------
     def _build(self):
-        from gui.widgets import StatCards, shell
+        """教育号页(用户 2026-10-18 选的「G 一键驾驶舱」):最上面一句大字说下一步(摆「家长小天地」2 条),
+        大按钮就在旁边;摆好了大字变「这批摆好了」、主按钮变「这批发好了」。下面左边勾员工、右边看视频。"""
+        from gui.widgets import Hero, PillDelegate, StatCards, shell
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(20, 16, 20, 12)
-        v.setSpacing(10)
-        title = QLabel("教育号 · 在创作罐头里摆好,人点发布")
-        title.setObjectName("pageTitle")
-        v.addWidget(title)
-        top = QHBoxLayout()
+        v.setContentsMargins(24, 18, 24, 14)
+        v.setSpacing(12)
+        self.hero = Hero(open_=True)
+        top = self.hero.meta
         top.addWidget(QLabel("要发哪天的:"))
         self.c_date = QComboBox()
-        self.c_date.setMinimumWidth(120)
+        self.c_date.setMinimumWidth(130)
         self.c_date.currentIndexChanged.connect(self._load_tree)
         top.addWidget(self.c_date)
         b = self.b_refresh = QPushButton("刷新")
@@ -235,21 +236,22 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QKeySequence, QShortcut
         sc = QShortcut(QKeySequence("F5"), w)              # 只在教育号这页管用(16 个号那页有它自己的 F5)
         sc.activated.connect(lambda: self.b_refresh.isEnabled() and self._load_dates())
-        top.addSpacing(16)
         self.lab_root = QLabel("")
-        self.lab_root.setStyleSheet("color:#8a8b91")
+        self.lab_root.setObjectName("heroMeta")
         from PySide6.QtWidgets import QSizePolicy
         self.lab_root.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)   # 路径太长就截,不撑宽窗口
+        self.lab_root.setMinimumWidth(120)
         top.addWidget(self.lab_root, 1)
         self._top = top
-        v.addLayout(top)
+        v.addWidget(self.hero)
         # 用词统一(审查 17):已发 / 摆好等发布(在罐头里摆好了、还没点发布)/ 还没发(还没动过)/ 没发成(出错了)
         self.cards = StatCards([("all", "勾上的视频"), ("sent", "已发"), ("ready", READY), ("todo", "还没发")])
+        self.cards.hide()                              # 数字写在大字下面那行了
         v.addWidget(self.cards)
         self.hint = QLabel("")
         self.hint.setObjectName("hint")
         self.hint.setWordWrap(True)
-        self.hint.hide()
+        self.hint.hide()                               # 「正在摆 / 这批摆好了」改成大字写
         v.addWidget(self.hint)
         self.row_note: dict[str, str] = {}            # 这一批里每条的临时状态:排队中 / 没摆成:原因
 
@@ -260,17 +262,25 @@ class MainWindow(QMainWindow):
         self.tree.itemChanged.connect(self._tree_changed)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
+        self.tree.setIndentation(18)
+        from gui.widgets import EduTableDelegate, EduTreeDelegate
+        self.tree.setItemDelegate(EduTreeDelegate(self.tree))
         sp.addWidget(self.tree)
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         self.lab_sum = QLabel(PICK_DAY)
+        self.lab_sum.setObjectName("hint")
         rv.addWidget(self.lab_sum)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["标题(= 文件名)", "号", "员工", "封面", "状态"])
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(62)
+        self.table.setItemDelegateForColumn(0, EduTableDelegate(self.table))   # 封面小图 + 标题 + 号 · 员工
+        self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setItemDelegateForColumn(4, PillDelegate(4, self.table))
         self.table.setToolTip("双击一条:预览封面、拖裁剪框")
         self.table.cellDoubleClicked.connect(lambda r, _c: self.preview_cover(r))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -278,24 +288,34 @@ class MainWindow(QMainWindow):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        for i, wd in ((1, 96), (2, 70), (3, 200), (4, 80)):
+        for i, wd in ((1, 104), (2, 70), (3, 200), (4, 120)):
             self.table.setColumnWidth(i, wd)
+        self.table.setColumnHidden(1, True)           # 号 / 员工写在标题下面那行小字里了(列还在)
+        self.table.setColumnHidden(2, True)
         rv.addWidget(self.table, 1)
+        self.lab_more = QLabel("左边再勾几个员工,视频会出现在这里")
+        self.lab_more.setObjectName("muted")
+        self.lab_more.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lab_more.setMinimumHeight(40)
+        self.lab_more.hide()
+        rv.addWidget(self.lab_more)
         sp.addWidget(right)
-        sp.setSizes([300, 900])
+        sp.setSizes([330, 900])
+        self.tree.setColumnWidth(1, 110)
         sp.setStretchFactor(0, 1)
         sp.setStretchFactor(1, 3)
-        v.addWidget(sp, 1)
 
-        bar = QHBoxLayout()
         self.b_go = QPushButton("摆下一批")
         self.b_go.setObjectName("primary")
-        self.b_go.setMinimumHeight(34)
+        self.b_go.setMinimumHeight(40)
         self.b_go.setToolTip("在罐头里打开这个号的发布页,传视频、传封面并裁好、选自主声明、补 AI 声明,停在发布前。发布你自己点。")
         self.b_go.clicked.connect(self.start_batch)
         self.b_stop = QPushButton("停")
+        self.b_stop.setObjectName("danger")
+        self.b_stop.setMinimumHeight(34)
         self.b_stop.clicked.connect(self.stop_batch)
         self.b_sent = QPushButton("这批发好了")
+        self.b_sent.setMinimumHeight(40)
         self.b_sent.setToolTip("你在罐头里点完「发布 → 全部发布」以后点这个:记下发布时间。")
         self.b_sent.clicked.connect(self.batch_sent)
         from PySide6.QtWidgets import QCheckBox
@@ -311,12 +331,14 @@ class MainWindow(QMainWindow):
         self.b_manual.setToolTip("你在罐头里自己手动发了的(软件没摆成 / 没摆):选中点这个,记成已发,下次就不会再摆它")
         self.b_manual.clicked.connect(self.mark_manual)
         self.b_open = QPushButton("打开文件夹")
+        self.b_open.setObjectName("link")
         self.b_open.setToolTip("在资源管理器里打开选中这条视频所在的文件夹,并选中它(右键列表 / 左边员工也有)")
         self.b_open.clicked.connect(lambda: self.open_selected("video"))
         self.b_preview = QPushButton("预览封面…")
         self.b_preview.setToolTip("看每个比例的裁剪框在哪;不满意就拖框(双击列表里一条也行)")
         self.b_preview.clicked.connect(lambda: self.preview_cover())
         self.b_move = QPushButton("这天发完,挪走…")
+        self.b_move.setObjectName("link")
         self.b_move.clicked.connect(self.move_day)
         self.b_wm = QPushButton("查水印")
         self.b_wm.setToolTip("勾上的员工的视频,查一遍有没有别的平台的水印 / 广告图标(B站、抖音、快手、得物、转转 …)。\n"
@@ -332,6 +354,8 @@ class MainWindow(QMainWindow):
                                 "(换了封面图的又会标黄;定时发布时还标黄的不发,留给你)")
         self.b_allok.clicked.connect(self.all_covers_ok)
         self.b_sched = QPushButton("摆好并定时发出…")
+        self.b_sched.setObjectName("pill")
+        self.b_sched.setMinimumHeight(36)
         self.b_sched.setToolTip("选哪天的素材、几点发:软件现在就一批一批在罐头里摆好,每批点罐头的「全部定时发布」定到那个点。\n"
                                 "摆完电脑能关,到点企鹅号自己发。没摆好的再试一次,还不行就关掉不发,接着摆别的。")
         self.b_sched.clicked.connect(self.schedule_clicked)
@@ -339,45 +363,87 @@ class MainWindow(QMainWindow):
         self.lab_scope = QLabel("")
         self.lab_scope.setObjectName("scope")
         self.lab_scope.setWordWrap(True)
-        v.addWidget(self.lab_scope)
         from PySide6.QtCore import QTimer
         self._scope_timer = QTimer(self)              # 一行一行刷的时候(认封面 / 查水印)攒一下再算,不每行都算一遍
         self._scope_timer.setSingleShot(True)
         self._scope_timer.setInterval(200)
         self._scope_timer.timeout.connect(self._update_scope)
-        for b in (self.b_wm, self.b_blur, self.b_go, self.b_stop, self.b_sent, self.b_drop):
-            bar.addWidget(b)
-        bar.addWidget(self.k_auto)
-        bar.addStretch(1)
-        self.lab_sched = QLabel("")
-        self.lab_sched.setStyleSheet("color:#fe2c55")
-        bar.addWidget(self.lab_sched)
-        bar.addWidget(self.b_allok)
+        # 大按钮那一排:定时离主按钮远一点(和 16 个号页一样,免得点错)
+        bar = self.hero.acts
         bar.addWidget(self.b_sched)
+        self.lab_sched = QLabel("")
+        self.lab_sched.setObjectName("warnText")
+        bar.addWidget(self.lab_sched)
+        bar.addSpacing(28)
+        for b in (self.b_drop, self.b_sent, self.b_go, self.b_stop):
+            bar.addWidget(b)
+        # 工具那一排:这次摆几条(绿字)+ 查水印 / 模糊水印 / 封面都看过了 / 自动点发布
+        tools = QHBoxLayout()
+        tools.setSpacing(8)
+        tools.addWidget(self.lab_scope, 1)
+        for b in (self.b_wm, self.b_blur, self.b_allok):
+            tools.addWidget(b)
+        tools.addSpacing(6)
+        tools.addWidget(self.k_auto)
+        v.addLayout(tools)
+        v.addWidget(sp, 1)
         for b in (self.b_open, self.b_move):          # 次要的放上面一行右边;「标成已发」「预览封面」在列表右键里
             self._top.addWidget(b)
         self.b_manual.hide()
         self.b_preview.hide()
-        v.addLayout(bar)
+        logrow = QHBoxLayout()
+        self.lab_last = QLabel("")
+        self.lab_last.setObjectName("muted")
+        self.lab_last.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        logrow.addWidget(self.lab_last, 1)
+        self.b_log = QPushButton("展开日志")
+        self.b_log.setObjectName("link")
+        self.b_log.clicked.connect(self._toggle_log)
+        logrow.addWidget(self.b_log)
+        v.addLayout(logrow)
         self.logbox = QPlainTextEdit()
         self.logbox.setObjectName("log")
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(3000)
-        self.logbox.setMaximumHeight(110)
+        self.logbox.setMaximumHeight(160)
+        self.logbox.hide()                            # 平时只露最近一句,「展开日志」看全
         v.addWidget(self.logbox)
         from gui.api_tab import ApiTab
         self.api_tab = ApiTab(self.st, self.rec, self.say, self)
 
-        # 记录页
+        # 记录页(用户 2026-10-18 看草图定的:彩色数字卡 + 表格放进白卡片 + 「每一条」合成一行)
         r = QWidget()
         rv2 = QVBoxLayout(r)
-        rv2.setContentsMargins(20, 16, 20, 12)
-        title = QLabel("数据记录 · 每条哪天、哪个号、什么时候发的")
+        from gui.widgets import RecDelegate
+        from PySide6.QtWidgets import QFrame
+        rv2.setContentsMargins(24, 18, 24, 14)
+        rv2.setSpacing(12)
+        title = QLabel("数据记录")
         title.setObjectName("pageTitle")
         rv2.addWidget(title)
-        self.rec_cards = StatCards([("sent", "已发"), ("fail", "没发成"), ("unsure", "不确定发没发"), ("ready", READY)])
+        sub = QLabel("每条哪天、哪个号、什么时候发的")
+        sub.setObjectName("heroSub")
+        rv2.addWidget(sub)
+        self.rec_cards = StatCards([("sent", "已发"), ("fail", "没发成"), ("unsure", "不确定发没发"), ("ready", READY)],
+                                   icons={"sent": ("check", "ok"), "fail": ("error", "bad"), "unsure": ("help", "warn"),
+                                          "ready": ("clock", "acc")})
         rv2.addWidget(self.rec_cards)
-        rh = QHBoxLayout()
+
+        def panel(title_text):
+            f = QFrame()
+            f.setObjectName("panel")
+            pv = QVBoxLayout(f)
+            pv.setContentsMargins(1, 1, 1, 1)
+            pv.setSpacing(0)
+            head = QHBoxLayout()
+            head.setContentsMargins(16, 10, 12, 10)
+            head.setSpacing(8)
+            t = QLabel(title_text)
+            t.setObjectName("secTitle")
+            head.addWidget(t)
+            pv.addLayout(head)
+            return f, pv, head
+        p1, pv1, rh = panel("每个员工发了多少")
         rh.addWidget(QLabel("日期:"))
         self.c_rec_date = QComboBox()
         self.c_rec_date.currentIndexChanged.connect(self.refresh_records)
@@ -389,15 +455,20 @@ class MainWindow(QMainWindow):
         b = QPushButton("导出 Excel…")
         b.clicked.connect(self.export_records)
         rh.addWidget(b)
-        rv2.addLayout(rh)
-        rv2.addWidget(QLabel("每个员工发了多少:"))
         self.t_sum = QTableWidget(0, 9)
         self.t_sum.setHorizontalHeaderLabels(["日期", "号", "员工", "已发", READY, "没发成", "结果不明", "第一条发布", "最后一条发布"])
         self.t_sum.verticalHeader().setVisible(False)
         self.t_sum.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.t_sum.setMaximumHeight(220)
-        rv2.addWidget(self.t_sum)
-        rv2.addWidget(QLabel("每一条:"))
+        self.t_sum.setShowGrid(False)
+        self.t_sum.verticalHeader().setDefaultSectionSize(34)
+        self.t_sum.setMaximumHeight(240)
+        pv1.addWidget(self.t_sum)
+        rv2.addWidget(p1)
+        p2, pv2, rh3 = panel("每一条")
+        tip = QLabel("点一条没发成的,下面能重试 / 标成已发")
+        tip.setObjectName("muted")
+        rh3.addWidget(tip)
+        rh3.addStretch(1)
         self.rec_empty = QLabel("")                   # 审查 20:空表没提示,不知道是没记录还是坏了
         self.rec_empty.setObjectName("hint")
         self.rec_empty.setWordWrap(True)
@@ -409,12 +480,19 @@ class MainWindow(QMainWindow):
         self.t_rec.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.t_rec.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.t_rec.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        rh2 = self.t_rec.horizontalHeader()           # 标题能拖宽窄,备注占剩下的(原来备注被挤得只剩几个字)
-        rh2.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.t_rec.setShowGrid(False)
+        self.t_rec.verticalHeader().setDefaultSectionSize(54)
+        self.t_rec.setItemDelegate(RecDelegate(self.t_rec))
+        rh2 = self.t_rec.horizontalHeader()           # 标题那格占满(下面一行小字写号 · 员工 · 时间 · 备注)
+        rh2.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         rh2.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
-        self.t_rec.setColumnWidth(3, 320)
+        for c in (1, 2, 5, 6, 7):                     # 合成到标题那格里了,列还在(右键 / 导出照旧)
+            self.t_rec.setColumnHidden(c, True)
+        self.t_rec.setColumnWidth(0, 70)
+        self.t_rec.setColumnWidth(4, 130)
         self.t_rec.itemSelectionChanged.connect(self._rec_sel)
-        rv2.addWidget(self.t_rec, 1)
+        pv2.addWidget(self.t_rec, 1)
+        rv2.addWidget(p2, 1)
         # 审查 23:点一条没发成 / 不确定发没发的,下面直接能「重试 / 标成已发」
         ra = QHBoxLayout()
         self.lab_rec_sel = QLabel("")
@@ -436,14 +514,57 @@ class MainWindow(QMainWindow):
         # 外壳:左边导航(教育号 / 16 个号 / 数据记录 / 设置),右边一页一页换(用户选的「抖音创作者中心」那种)
         from gui.daily_tab import DailyTab
         self.daily = DailyTab(self.st, self.rec, self)
-        root, self.nav, self.stack = shell([("", "教育号", w), ("", "16 个号", self.api_tab), ("", "每日汇总", self.daily),
-                                            ("", "数据记录", r)],
+        from gui.today_tab import TodayTab
+        self.today = TodayTab(self.st, self.rec, self)
+        self.pages = {"today": self.today, "edu": w, "api": self.api_tab, "daily": self.daily, "records": r}
+        root, self.nav, self.stack = shell([("today", "今天", self.today), ("school", "教育号", w), ("game", "16 个号", self.api_tab),
+                                            ("chart", "每日汇总", self.daily), ("table", "数据记录", r)],
                                            self.edit_settings, f"第 {APP_VERSION} 版")
         self.setCentralWidget(root)
-        self.stack.currentChanged.connect(lambda i: self.daily.refresh() if i == 2 else (i == 3 and self.refresh_records()))
+        self.stack.currentChanged.connect(self._page_changed)
+        from gui.widgets import set_badge
+        self.api_tab.on_badge = lambda n: set_badge(self.nav, 2, str(n) if n else "")
+        self.api_tab._update_sum()
+
+    def goto(self, key: str):
+        """跳到某一页(「今天」页的「下一步」点了用):today / edu / api / daily / records。"""
+        p = self.pages.get(key)
+        if p is not None:
+            self.stack.setCurrentWidget(p)
+
+    def _page_changed(self, _i: int):
+        from gui.widgets import fade_in
+        p = self.stack.currentWidget()
+        if p is self.daily:
+            self.daily.refresh()
+        elif p is self.pages.get("records"):
+            self.refresh_records()
+        if p is not self.today:
+            fade_in(p, 260)                           # 换页淡入一下(用户要活泼一点)
+
+    def play_splash(self):
+        """开场:「Hi,欢迎使用本工作台」→ 淡出,露出「今天」页(用户 2026-10-18)。设置里能关。"""
+        from gui.widgets import Splash
+        from qe.config import bj_now
+        n = bj_now()
+        s = Splash(self.centralWidget(), f"{n.month} 月 {n.day} 日 星期{'一二三四五六日'[n.weekday()]}")
+        self.centralWidget().installEventFilter(s)
+        s.done.connect(lambda: self.today.refresh(animate_=True))
+        s.play()
 
     def say(self, m: str):
         self.logbox.appendPlainText(f"[{bj_str()[11:]}] {m}")
+        if hasattr(self, "lab_last"):
+            last = m.strip().splitlines()[0] if m.strip() else ""
+            self.lab_last.setText(f"最近 {bj_str()[11:16]}:{last}")
+            self.lab_last.setToolTip(m)
+
+    def _toggle_log(self):
+        big = self.logbox.isHidden()
+        self.logbox.setVisible(big)
+        self.b_log.setText("收起日志" if big else "展开日志")
+        if big:
+            self.logbox.verticalScrollBar().setValue(self.logbox.verticalScrollBar().maximum())
 
     # ---------------- 日期 / 员工 / 视频 ----------------
     def _load_dates(self):
@@ -527,7 +648,7 @@ class MainWindow(QMainWindow):
                                                 "认不出是哪个号的(名字带「已发 / 不要」,或者两个号都像,或者缩写没在设置里)。\n"
                                                 "是哪个号的,就在左下角「设置」→「号和缩写」里给号加上这个名字,再点「刷新」。"))
                 for c in range(2):
-                    top.setForeground(c, QBrush(QColor("#8a8b91")))
+                    top.setForeground(c, QBrush(QColor(_tok()["mu"])))
                 self.tree.addTopLevelItem(top)
                 top.setExpanded(True)
         self.tree.blockSignals(False)
@@ -540,7 +661,7 @@ class MainWindow(QMainWindow):
         it.setFlags((it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable) | Qt.ItemFlag.ItemIsEnabled)
         it.setData(0, Qt.ItemDataRole.UserRole, path)                 # 只有路径(右键「打开这个文件夹」用);没有号 / 员工,勾不了
         for c in range(2):
-            it.setForeground(c, QBrush(QColor("#a8a9ae")))
+            it.setForeground(c, QBrush(QColor(_tok()["dim"])))
             it.setToolTip(c, f"{path}\n\n{why}")
         return it
 
@@ -677,6 +798,9 @@ class MainWindow(QMainWindow):
         stt_txt = READY if stt == "摆好" else stt
         for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or "还没发")]):
             it = QTableWidgetItem(t)
+            if c == 0:
+                from gui.widgets import THUMB
+                it.setData(THUMB, v.cover or v.png or v.vcover or v.jpg)      # 封面小图(草图 ②)
             if c == 4 and (note or skip):
                 it.setToolTip(note or skip)
             if c == 4 and (skip or wmb):
@@ -708,9 +832,12 @@ class MainWindow(QMainWindow):
         st = [self.rec.status_of(v.path) for v in self.videos]
         self.lab_sum.setText("" if n else PICK_DAY if not self.c_date.currentData() else PICK_EMP)
         self.lab_sum.setVisible(not n)
+        if hasattr(self, "lab_more"):
+            self.lab_more.setVisible(0 < n < 6)
         self.cards.set(all=n, sent=(st.count("已发"), "good" if n and st.count("已发") == n else ""),
                        ready=(st.count("摆好"), "warn" if st.count("摆好") else ""), todo=st.count(""))
         self._update_scope()
+        self._edu_hero()
 
     def _skip_reasons(self) -> list[tuple[str, list]]:
         """勾上的里面这次不摆的,按原因分:[(原因, [视频])](绿字那行和「摆下一批」确认框共用)。"""
@@ -755,6 +882,7 @@ class MainWindow(QMainWindow):
         self.lab_scope.setText(text)
         self.lab_scope.setToolTip(tip + ("\n\n(鼠标放在列表的状态上看每条为什么)" if tip else ""))
         self.lab_scope.setVisible(bool(text))
+        self._edu_hero()
 
     # ---------- 打开文件所在位置 ----------
     @staticmethod
@@ -972,15 +1100,18 @@ class MainWindow(QMainWindow):
                 b.style().polish(b)
         if running:
             self.hint.setText("正在摆…摆的时候别在罐头里切到别的号。要停就点「停」。")
-            self.hint.show()
         elif waiting:
             n = self.rec.ready_in_batch(self.batch_id)
             acc = self.batch_videos[0].account if self.batch_videos else ""
             self.hint.setText(f"「{acc}」这批 {n} 条摆好了 → 去罐头里检查,点「发布 → 全部发布」→ 回来点「这批发好了」"
                               "(不要了就在罐头里删掉,点「这批不要了」)")
-            self.hint.show()
         else:
-            self.hint.hide()
+            self.hint.setText("")
+        # 大按钮那排只露现在该点的:平时「摆下一批」;摆好了「这批发好了 / 这批不要了」;摆的时候「停」
+        self.b_go.setVisible(not waiting)
+        self.b_sent.setVisible(bool(self.batch_id))
+        self.b_drop.setVisible(bool(self.batch_id))
+        self.b_stop.setVisible(running)
         # 审查 16:摆的时候 / 摆好等确认时底栏只留要点的,「查水印 / 模糊水印 / 封面都看过了」先藏起来
         for b in (self.b_wm, self.b_blur, self.b_allok):
             b.setVisible(not running and not waiting)
@@ -994,6 +1125,39 @@ class MainWindow(QMainWindow):
         self.tree.setEnabled(not running)
         if hasattr(self, "lab_scope"):
             self._update_scope()
+        self._edu_hero()
+
+    def _edu_hero(self):
+        """教育号页的大字:现在该干什么。"""
+        if not hasattr(self, "hero"):
+            return
+        running = bool(self.worker and self.worker.isRunning())
+        n = len(self.videos)
+        st = [self.rec.status_of(v.path) for v in self.videos]
+        counts = f"勾上 {n} 条 · 已发 {st.count('已发')} · {READY} {st.count('摆好')} · 还没发 {st.count('')}" if n else ""
+        if running:
+            big, sub, tone = "正在摆…", "摆的时候别在罐头里切到别的号。要停就点「停」。", ""
+            if self._unattended:
+                big = "正在自己摆、自己发…"
+        elif self.batch_id:
+            nb = self.rec.ready_in_batch(self.batch_id)
+            acc = self.batch_videos[0].account if self.batch_videos else ""
+            big, tone = (f"「{acc}」这批 {nb} 条摆好了" if acc else f"这批 {nb} 条摆好了"), "good"
+            sub = "去罐头里检查,点「发布 → 全部发布」→ 回来点「这批发好了」(不要了就在罐头里删掉,点「这批不要了」)"
+        elif not self.c_date.currentData():
+            big, sub, tone = "先选要发哪天的", PICK_DAY, ""
+        elif not n:
+            big, sub, tone = "勾上要发的员工", PICK_EMP, ""
+        else:
+            acc, vids = self.next_batch()
+            if vids:
+                big, tone = f"下一步:摆「{acc}」{len(vids)} 条", ""
+                sub = "摆好停在发布前,发布你自己点 · " + counts
+            elif st.count("") == 0:
+                big, sub, tone = "勾上的都发了 √", counts, "good"
+            else:
+                big, sub, tone = "勾上的都不能摆", "看列表里的状态(鼠标放上去看为什么)· " + counts, "warn"
+        self.hero.set(big, sub, tone)
 
     def next_batch(self) -> tuple[str, list]:
         """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
@@ -1593,12 +1757,16 @@ class MainWindow(QMainWindow):
                 for c in range(self.t_rec.columnCount()):
                     item = self.t_rec.item(i, c)
                     if item:
-                        item.setBackground(QBrush(QColor("#ffe7eb" if x["status"] == "没发成" else "#ffeedd")))
-        for c in (0, 1, 2, 4, 5, 6):
+                        item.setBackground(RED if x["status"] == "没发成" else YELLOW)
+        for c in (0, 1, 2, 5, 6):
             self.t_rec.resizeColumnToContents(c)
+        self.t_rec.setColumnWidth(0, max(64, self.t_rec.columnWidth(0)))
+        self.t_rec.setColumnWidth(4, 130)                 # 状态胶囊要的宽度(按字算会太窄,画成「…」)
         self._rec_sel()
         self.t_sum.resizeColumnsToContents()
         self.t_sum.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hh = self.t_sum.horizontalHeader().sizeHint().height()       # 有几行就多高,不空一大块(草图 ④)
+        self.t_sum.setFixedHeight(min(240, hh + max(1, self.t_sum.rowCount()) * 34 + 4))
         for i in range(self.t_sum.rowCount()):
             it = self.t_sum.item(i, 2)
             if it and it.text() == "接口":
@@ -1750,13 +1918,13 @@ class MainWindow(QMainWindow):
             w1, e1 = path_row(pre)
             e1.setMinimumWidth(300)
             lab = QLabel("\\" + suf)
-            lab.setStyleSheet("color:#8a8b91")
+            lab.setObjectName("muted")
             lab.setToolTip("这半截是按月份 / 日期自动换的({month} = 月份,{date} = 日期),不能改")
             w1.layout().insertWidget(1, lab)
             vv.addWidget(w1)
             if broken:
                 warn = QLabel(f"原来填的「{text}」里没有 {{month}},每个月都会挪到同一个地方 —— 已经换回按月份的,点「确定」才存")
-                warn.setStyleSheet("color:#fe2c55")
+                warn.setObjectName("warnText")
                 warn.setWordWrap(True)
                 vv.addWidget(warn)
             return w0, e1, lambda: (os.path.join(e1.text().strip().rstrip("\\/") + "\\", suf) if e1.text().strip() else "")
@@ -1775,7 +1943,7 @@ class MainWindow(QMainWindow):
         f.addRow("素材文件夹", w_root)
         f.addRow("一天发完挪到", w_arc)
         prev = QLabel("")
-        prev.setStyleSheet("color:#8a8b91")
+        prev.setObjectName("muted")
         prev.setWordWrap(True)
 
         def show_prev():
@@ -1833,12 +2001,15 @@ class MainWindow(QMainWindow):
         g4 = QGroupBox("界面")
         f4 = QFormLayout(g4)
         c_theme = QComboBox()
-        c_theme.addItem("原来的样子", "")
         for n, t in TH.THEMES.items():
             c_theme.addItem(f"{n} —— {t['desc']}", n)
         c_theme.setCurrentIndex(max(0, c_theme.findData(self.st.get("theme", ""))))
-        f4.addRow("界面风格", c_theme)
-        f4.addRow("", QLabel("换了以后关掉软件再打开就是新的样子"))
+        f4.addRow("界面颜色", c_theme)
+        from PySide6.QtWidgets import QCheckBox
+        k_splash = QCheckBox("打开软件时放「Hi,欢迎使用本工作台」开场动画")
+        k_splash.setChecked(bool(self.st.get("splash", True)))
+        f4.addRow("", k_splash)
+        f4.addRow("", QLabel("颜色换了以后关掉软件再打开,图标颜色才全换过来"))
         outer.addWidget(g4)
         g3 = QGroupBox("AI(两边共用)")
         f3 = QFormLayout(g3)
@@ -1867,9 +2038,12 @@ class MainWindow(QMainWindow):
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
                        api_threads=sp_thr.value(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
                        api_archive=api_get() or self.st.get("api_archive", ""),
-                       api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or "")
+                       api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or TH.DEFAULT,
+                       splash=k_splash.isChecked())
         C.AI_KEY = self.st.ai_key()
         self.st.save()
+        from PySide6.QtWidgets import QApplication
+        TH.apply(QApplication.instance(), self.st["theme"])
         self._load_dates()
 
     def closeEvent(self, e):

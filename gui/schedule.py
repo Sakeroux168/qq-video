@@ -142,7 +142,7 @@ def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "",
     if head:
         h = QLabel(head)
         h.setWordWrap(True)
-        h.setStyleSheet("color:#fe2c55;font-weight:bold")
+        h.setObjectName("warnText")
         f.addRow(h)
     lab_sum = QLabel("")
     lab_sum.setWordWrap(True)
@@ -186,7 +186,7 @@ def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "",
     tip = QLabel((tip or "到点后软件自己发,发到完为止。\n电脑别关机、别睡眠(软件会叫它别睡);软件和创作罐头都要开着,罐头最小化没关系。") +
                  (f"\n\n{note}" if note else ""))
     tip.setWordWrap(True)
-    tip.setStyleSheet("color:#8a8b91")
+    tip.setObjectName("muted")
     f.addRow(tip)
     bb = QDialogButtonBox()
     bb.addButton("定好了", QDialogButtonBox.ButtonRole.AcceptRole)

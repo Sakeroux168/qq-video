@@ -240,6 +240,13 @@ class Records:
                 (f"{day}%",)).fetchall()
         return {r["account"]: int(r["n"]) for r in rows}
 
+    def published_on(self, day: str) -> list[dict]:
+        """这天(北京日期 2026-10-18)发出去的 / 没发成的,按时间排(「今天」页画「今天发了这几批」用)。"""
+        with _LOCK:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT account, employee, status, published_at FROM posts WHERE published_at LIKE ? "
+                "AND status IN ('已发','没发成') ORDER BY published_at", (f"{day}%",))]
+
     def summary(self, date: str = "") -> list[dict]:
         """按 日期 / 号 / 员工 数:已发几条、摆好还没发几条、没发成几条(后来发成了的不算)、结果不明几条。"""
         self._fill()

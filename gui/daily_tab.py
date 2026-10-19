@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDateEdit, QHBox
 
 from qe import plan
 from qe.config import bj_now
-from gui.widgets import StatCards
+from gui.widgets import StatCards, repolish
 
 
 class DailyTab(QWidget):
@@ -18,11 +18,14 @@ class DailyTab(QWidget):
         super().__init__(parent)
         self.st, self.rec = st, rec
         v = QVBoxLayout(self)
-        v.setContentsMargins(20, 16, 20, 12)
+        v.setContentsMargins(24, 18, 24, 14)
         v.setSpacing(10)
-        title = QLabel("每日汇总 · 每个号今天发够了没有")
+        title = QLabel("每日汇总")
         title.setObjectName("pageTitle")
         v.addWidget(title)
+        sub = QLabel("每个号今天发够了没有")
+        sub.setObjectName("heroSub")
+        v.addWidget(sub)
 
         top = QHBoxLayout()
         top.addWidget(QLabel("哪天:"))
@@ -41,7 +44,7 @@ class DailyTab(QWidget):
         b.clicked.connect(self.refresh)
         top.addWidget(b)
         tip = QLabel("按「哪天发出去的」算,不看素材文件夹的日期")
-        tip.setStyleSheet("color:#8a8b91")
+        tip.setObjectName("muted")
         top.addWidget(tip, 1)
         self.b_copy = QPushButton("复制,贴到企业微信表")
         self.b_copy.setObjectName("primary")
@@ -55,25 +58,38 @@ class DailyTab(QWidget):
         top.addWidget(b)
         v.addLayout(top)
 
-        self.cards = StatCards([("游戏", "游戏"), ("教育", "教育"), ("动漫", "动漫"), ("总", "总发布量")])
+        self.cards = StatCards([("游戏", "游戏"), ("教育", "教育"), ("动漫", "动漫"), ("总", "总发布量")],
+                               rings={"游戏": "acc", "教育": "green", "动漫": "orange", "总": "acc"})
         v.addWidget(self.cards)
-        self.hint = QLabel("")
-        self.hint.setObjectName("hint")
-        self.hint.setWordWrap(True)
-        v.addWidget(self.hint)
+        hr = QHBoxLayout()
+        self.hint = QLabel("")                          # 草图 ③:一个小标签「12 个号还没发够」,鼠标放上去看是哪些
+        self.hint.setObjectName("warnPill")
+        hr.addWidget(self.hint)
+        self.hint_more = QLabel("鼠标放上去看是哪些")
+        self.hint_more.setObjectName("muted")
+        hr.addWidget(self.hint_more)
+        hr.addStretch(1)
+        v.addLayout(hr)
 
         self.t = QTableWidget(0, 5)
         self.t.setHorizontalHeaderLabels(["品类", "号", "规定条数", "这天发了", "还差"])
         self.t.verticalHeader().setVisible(False)
         self.t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.t.setShowGrid(False)
+        self.t.verticalHeader().setDefaultSectionSize(38)
+        self.t.setAlternatingRowColors(False)
+        from gui.widgets import DailyDelegate
+        self.t.setItemDelegate(DailyDelegate(self.t))     # 品类分段、这天发了画进度条、还差画胶囊
         hh = self.t.horizontalHeader()
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for i, wd in ((0, 90), (2, 90), (3, 90), (4, 90)):
+        for i, wd in ((0, 90), (2, 90), (3, 300), (4, 110)):
             self.t.setColumnWidth(i, wd)
+        self.t.setColumnHidden(2, True)                   # 规定条数写在进度条旁边了(列还在,复制用)
+        self.t.setHorizontalHeaderLabels(["品类", "号", "规定条数", "这天发了 / 规定", "还差"])
         v.addWidget(self.t, 1)
         foot = QLabel("说明:只数用这个软件发出去的(旧软件发的、自己在后台手动发的不算);教育每个号各多少还没定,只看两个号加起来够不够 106。")
-        foot.setStyleSheet("color:#8a8b91")
+        foot.setObjectName("muted")
         foot.setWordWrap(True)
         v.addWidget(foot)
         self.refresh()
@@ -91,24 +107,32 @@ class DailyTab(QWidget):
         self._s = s
         for lab, q, a in s["rows"]:
             key = lab.replace("总发布量", "")
-            self.cards.set(**{key: (f"{a} / {q}", "good" if a >= q else ("warn" if a else "")),
+            self.cards.set(**{key: (f"{a} / {q}", "good" if a >= q else ""),
                               f"{key}_sub": "够了 √" if a >= q else f"还差 {q - a} 条"})
+            self.cards.set_ring(key, a / q if q else 0)
         tq, ta = s["total"]
-        self.cards.set(总=(f"{ta} / {tq}", "good" if ta >= tq else ("warn" if ta else "")),
+        self.cards.set(总=(f"{ta} / {tq}", "good" if ta >= tq else ""),
                        总_sub="都够了 √" if ta >= tq else f"还差 {tq - ta} 条")
+        self.cards.set_ring("总", ta / tq if tq else 0)
         short = plan.short_list(s)
         if short:
-            names = "、".join(f"{n} 差 {q - a}" for n, q, a in short[:6]) + (f" … 共 {len(short)} 个号" if len(short) > 6 else "")
-            self.hint.setText(f"还没发够的号:{names}")
-            self.hint.show()
+            self.hint.setText(f"{len(short)} 个号还没发够")
+            tip = "还没发够的号:\n" + "\n".join(f"{n}:差 {q - a}" for n, q, a in short)
+            self.hint.setToolTip(tip)
+            self.hint_more.setToolTip(tip)
+            self.hint_more.show()
+            repolish(self.hint, tone="warn")
         else:
             self.hint.setText("有规定的号都发够了 √")
-            self.hint.show()
+            self.hint.setToolTip("")
+            self.hint_more.hide()
+            repolish(self.hint, tone="good")
         accs = s["accounts"]
         self.t.setRowCount(len(accs))
-        red, green = QBrush(QColor("#ffe7eb")), QBrush(QColor("#e6f7ec"))
+        from gui.theme import cur
+        red, green = QBrush(QColor(cur()["rows"]["red"])), QBrush(QColor(cur()["rows"]["green"]))
         for i, (cat, n, q, a) in enumerate(accs):
-            diff = "" if not q else ("√" if a >= q else str(q - a))
+            diff = "" if not q else ("够了 √" if a >= q else f"还差 {q - a}")
             for c, txt in enumerate([cat, n, str(q) if q else "—", str(a), diff]):
                 it = QTableWidgetItem(txt)
                 if c >= 2:
