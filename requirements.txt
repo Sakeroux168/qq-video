@@ -5,3 +5,4 @@ Pillow
 openpyxl
 pyinstaller
 requests
+psutil

@@ -169,6 +169,9 @@ QSplitter::handle {{ background:transparent; width:10px; }}
 
 QLabel#scope {{ color:{t['ok']}; font-weight:bold; padding:2px 0; }}
 QLabel#scope[sel="true"] {{ background:{t['acc_bg']}; color:{t['acc']}; border-radius:8px; padding:4px 10px; }}
+QFrame#chip, QLabel#chip {{ background:{t['soft']}; border:none; border-radius:13px; padding:4px 12px; color:{t['tx2']}; font-size:12px; }}
+QFrame#chip {{ padding:0; }}
+QLabel#chipText {{ color:{t['tx']}; font-size:12px; font-weight:bold; background:transparent; }}
 QLabel#warnPill {{ background:{t['warn_bg']}; color:{t['warn']}; border-radius:13px; padding:4px 12px; font-weight:bold; }}
 QLabel#warnPill[tone="good"] {{ background:{t['ok_bg']}; color:{t['ok']}; }}
 QLabel#hint {{ background:{t['warn_bg']}; color:{t['warn']}; border:none; border-radius:10px; padding:9px 12px; font-weight:bold; }}

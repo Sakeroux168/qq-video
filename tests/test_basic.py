@@ -2625,6 +2625,77 @@ def test_ui_g(tmp: Path):
     w.close()
 
 
+def test_pub_progress(tmp: Path):
+    print("[发布进度(用户 2026-10-19 选的 B):大字写第几条、纸飞机进度条、每秒网速、正在发哪条、小字轮换、发完总结]")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    import gui.widgets as W
+    root = tmp / "api_pp"
+    (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18").mkdir(parents=True)
+    for f in ("p1.mp4", "p2.mp4", "p3.mp4"):
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18" / f).write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_pp.json")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "发布pp" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    tab = T.ApiTab(st, Records(tmp / "rec_pp.sqlite"), lambda m: None)
+    tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 3)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+    tab._update_scope()
+    seen = {}
+
+    class Slow:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, on_progress=None, **k):
+            if on_progress:
+                on_progress(5 << 20, 10 << 20)
+            time.sleep(0.4)
+            if before_publish:
+                before_publish("V")
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+    real = (omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning)
+    omapi.Client, T.ask = Slow, (lambda *a, **k: True)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: 0)
+    try:
+        tab.run_publish()
+        _wait(app, lambda: tab._pub and tab._pub["done"] >= 1, 20)
+        seen["big"] = tab.hero.big.text()
+        seen["strip"] = not tab.hero._extra_w.isHidden() and not tab.b_stop.isHidden() and tab.b_pub.isHidden()
+        seen["fun"] = tab.hero.sub.text()
+        _wait(app, lambda: tab._pub and tab._pub.get("cur") is not None, 5)
+        tab._pub_tick()
+        seen["cur"] = tab.pub_strip.cur.text()
+        _wait(app, lambda: not tab.busy(), 30)
+        app.processEvents()
+    finally:
+        omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
+    check(seen.get("big", "").startswith("正在发布 · ") and seen["big"].endswith("/ 3"), f"发的时候大字写第几条 / 一共几条 -> {seen.get('big')}")
+    check(seen.get("strip") is True, "发的时候露出进度条和「停」,灰掉的「现在发布」藏起来")
+    pool = W.FUN_TIPS + W.FUN_ROAST + [f"{a}:{x}    {b}:{y}" for a, x, b, y in W.FUN_TALK]
+    check(seen.get("fun") in pool, f"大字下面是小科普 / 段子 / 两个小人对话 -> {seen.get('fun')}")
+    check("正在发" in seen.get("cur", "") and "CSGO战神君" in seen.get("cur", ""), f"写着正在发哪个号哪条 -> {seen.get('cur')}")
+    p = tab._pub
+    check(p["end"] and p["ok"] == 3 and "收工" in tab.pub_strip.cur.text() and "用时" in tab.pub_strip.eta.text(),
+          f"发完:进度停下、写总结和用时 -> {tab.pub_strip.cur.text()} / {tab.pub_strip.eta.text()}")
+    check(not tab.b_pub.isHidden() and tab.b_stop.isHidden(), "发完「现在发布」回来、「停」藏起来")
+    lines = [W.fun_line() for _ in range(8)]
+    check(len(set(lines)) == 8, "小字连着换不重复")
+    tab.pub_strip.set_speed(2.345)
+    check(tab.pub_strip.spd.text() == "↑ 2.3 MB/s", f"网速写成 MB/s -> {tab.pub_strip.spd.text()}")
+    tab.pub_strip.set_speed(0.05)
+    check(tab.pub_strip.spd.text() == "↑ 51 KB/s", f"慢的时候写 KB/s -> {tab.pub_strip.spd.text()}")
+
+
 def test_misfire_api(tmp: Path):
     print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
@@ -3170,6 +3241,7 @@ if __name__ == "__main__":
     test_sched_edu(tmp)
     test_sched_api(tmp)
     test_ui_g(tmp)
+    test_pub_progress(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

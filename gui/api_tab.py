@@ -13,7 +13,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
 from qe import apiacc, apisrc, checks, plan, titleclean, topic, vertical, wmstore
 from qe.config import bj_now, bj_str, data_dir
 from qe.records import pkey
+from html import escape as html_escape
 
 COLS = ["号 / 标题(= 文件名)", "画面", "要处理的", "状态"]
 YELLOW, RED, GREEN, ORANGE = QColor("#fff3c4"), QColor("#ffd6d6"), QColor("#d9f2d9"), QColor("#ffd9a8")
@@ -215,6 +216,21 @@ class ApiTab(QWidget):
         self.b_stop.clicked.connect(self.stop)
         a.addWidget(self.b_stop)
         self._head = QWidget()                           # 大字 + 卡片 + 「看明细」:收起时收在中间一栏(用户 2026-10-18:铺满太散,高级感没了)
+        # 发布进度(用户 2026-10-19 选的 B):纸飞机进度条 + 每秒网速 + 正在发哪条 + 成功 / 没发成 + 还要多久;平时藏着
+        from gui.widgets import BusyDots, PubStrip
+        self.pub_strip = PubStrip()
+        self.hero.extra.addWidget(self.pub_strip)
+        self.dots = BusyDots()
+        self.dots.hide()
+        self.hero.meta.addWidget(self.dots)
+        self._pub = None
+        self._fun = ""
+        self._pub_timer = QTimer(self)
+        self._pub_timer.setInterval(1000)                # 每秒量一次网速
+        self._pub_timer.timeout.connect(self._pub_tick)
+        self._fun_timer = QTimer(self)
+        self._fun_timer.setInterval(7000)                # 小字 7 秒换一句
+        self._fun_timer.timeout.connect(self._fun_next)
         hv = QVBoxLayout(self._head)
         hv.setContentsMargins(0, 0, 0, 0)
         hv.setSpacing(14)
@@ -386,6 +402,8 @@ class ApiTab(QWidget):
         self.b_pick.setVisible(on)
         self.b_pub.setMinimumHeight(40 if on else 50)
         self.b_sched.setMinimumHeight(36 if on else 46)
+        self.b_stop.setMinimumHeight(36 if on else 46)
+        self.b_stop.setMinimumWidth(72 if on else 96)
         self._fit_head()
         if animate_ and self.isVisible():
             slide(self.detail, on)
@@ -394,6 +412,103 @@ class ApiTab(QWidget):
             self.detail.setVisible(on)
             self._gap.setFixedHeight(0 if on else self._gap_h())
         self._detail_text()
+
+    # ---------------- 发布进度(大字区下面那块) ----------------
+    @staticmethod
+    def _net_sent():
+        """整台电脑一共往外传了多少字节(用户 2026-10-19 选的:每秒量整台电脑,别的程序在传也会算进去)。"""
+        try:
+            import psutil
+            return psutil.net_io_counters().bytes_sent
+        except Exception:
+            return None
+
+    def _pub_begin(self, total: int):
+        from gui.widgets import fun_line
+        self._pub = {"total": total, "done": 0, "ok": 0, "fail": 0, "t0": time.time(), "cur": None, "pct": "", "end": False}
+        self._net = (self._net_sent(), time.time())
+        s = self.pub_strip
+        s.track.done = False
+        s.track._set(0)
+        s.track.set_running(True)
+        s.spark.vals = []
+        s.set_speed(None)
+        s.set_numbers(0, 0, "准备上传第一条…", "算一下要多久…")
+        self.hero._extra_w.show()
+        self.dots.show()
+        self._fun = fun_line()
+        self._pub_timer.start()
+        self._fun_timer.start()
+
+    def _pub_progress(self, t: str):
+        import re
+        p = self._pub
+        m = re.match(r"正在发 (\d+)/(\d+) · 成功 (\d+) · 没发成 (\d+)", t or "")
+        if not p or p["end"] or not m:
+            return
+        p["done"], p["total"], p["ok"], p["fail"] = (int(x) for x in m.groups())
+        self.pub_strip.track.set_value(p["done"] / max(1, p["total"]))
+        self._pub_show()
+
+    def _pub_show(self):
+        p = self._pub
+        cur = ""
+        i = p.get("cur")
+        if i is not None and 0 <= i < len(self.videos):
+            v = self.videos[i]
+            title = v.title if len(v.title) <= 16 else v.title[:16] + "…"
+            cur = f"正在发 <b>{html_escape(v.account)}</b> · 《{html_escape(title)}》 {p.get('pct', '')}"
+        if p["done"]:
+            rem = (time.time() - p["t0"]) / p["done"] * (p["total"] - p["done"])
+            eta = "不到 1 分钟" if rem < 60 else f"还要大约 {round(rem / 60)} 分钟"
+        else:
+            eta = "算一下要多久…"
+        self.pub_strip.set_numbers(p["ok"], p["fail"], cur or "准备上传…", eta)
+
+    def _pub_tick(self):
+        """每秒:量一次网速、更新正在发哪条 / 还要多久。"""
+        if not self._pub or self._pub["end"]:
+            return
+        now, (b0, t0) = time.time(), self._net
+        b = self._net_sent()
+        if b is not None and b0 is not None and now > t0:
+            self.pub_strip.set_speed((b - b0) / (now - t0) / 1024 / 1024)
+        self._net = (b, now)
+        self._pub_show()
+
+    def _fun_next(self):
+        from gui.widgets import fade_in, fun_line
+        if not self._pub or self._pub["end"]:
+            return
+        self._fun = fun_line()
+        self.hero.sub.setText(self._fun)
+        fade_in(self.hero.sub, 450)
+
+    def _pub_end(self, msg: str):
+        p = self._pub
+        if not p or p["end"]:
+            return
+        p["end"] = True
+        self._pub_timer.stop()
+        self._fun_timer.stop()
+        self.dots.hide()
+        s = self.pub_strip
+        s.track.set_running(False)
+        s.track.done = p["fail"] == 0 and p["done"] >= p["total"]
+        s.track.set_value(p["done"] / max(1, p["total"]))
+        s.set_speed(None)
+        mins = (time.time() - p["t0"]) / 60
+        took = "用时不到 1 分钟" if mins < 1 else f"用时 {round(mins)} 分钟"
+        if "停下了没发" in msg:
+            line = "停好了,发过的都记着呢"
+        elif p["fail"]:
+            line = "差一点点全中,没发成的再点一下「再发一次没发成的」就好"
+        else:
+            line = "全部收工,今天也很高效"
+        s.set_numbers(p["ok"], p["fail"], line, took)
+        if p["ok"] and self.isVisible():
+            from gui.widgets import Confetti
+            Confetti(self.hero)                         # 发完撒一把彩带
 
     def _gap_h(self) -> int:
         """明细收起时大字往下放多少:窗口高的一成多一点,看着在中间偏上。"""
@@ -461,6 +576,9 @@ class ApiTab(QWidget):
         quota = self._quota_sub()
         if not self.day():
             big, sub, tone = "先选要发哪天的", "在上面「要发哪天的」里挑一天", ""
+        elif self.busy() and self._pub and not self._pub["end"]:
+            p = self._pub
+            big, sub, tone = f"正在发布 · {min(p['done'] + 1, p['total'])} / {p['total']}", self._fun, ""
         elif self.busy() and not getattr(self, "_quiet", False):
             prog = self.lab_scope.text()
             big = "正在发布…" if prog.startswith("正在发") else (getattr(self, "_job_title", "") or "正在处理…")
@@ -487,7 +605,7 @@ class ApiTab(QWidget):
             big, sub, tone = "没有能发的", "", ""
         if cats.get("o") and not self.busy():
             sub += ("\n" if sub else "") + f"其中 {cats['o']} 条标题里有别的平台的名字,要你自己改(列表里右键「改标题」)"
-        if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)):
+        if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)) and sub != self._fun:
             sub = (sub + " · " if sub else "") + quota
         self.hero.set(big, sub, tone)
         self.card_v.set(f"{cats['v']} 条横屏 / 偏方" if cats["v"] else "没有横屏 / 偏方", "warn" if cats["v"] else "done")
@@ -532,6 +650,7 @@ class ApiTab(QWidget):
             b.setEnabled(not on or quiet)
         self.b_stop.setEnabled(on)
         self.b_stop.setVisible(on and not quiet)        # 「停」只在干活的时候出来(大红按钮)
+        self.b_pub.setVisible(not (on and not quiet))   # 干活的时候灰掉的「现在发布」先藏起来,只留「停」
         if not on:
             self._update_scope()
         if hasattr(self, "hero"):
@@ -668,6 +787,9 @@ class ApiTab(QWidget):
             self.cache[pkey(v.path)] = (sig, dict(v.checks))
 
     def load(self):
+        if not self.busy() and hasattr(self, "pub_strip"):   # 换日期 / 刷新:上一轮的发布进度收起来
+            self.hero._extra_w.hide()
+            self._pub = None
         if self.busy() and getattr(self, "_quiet", False):   # 只是后台自动检查:停掉它,重读
             self.job.stop()
             self.job.wait()
@@ -1219,11 +1341,14 @@ class ApiTab(QWidget):
             return
         if i == PROGRESS:
             self.lab_scope.setText(t)
+            self._pub_progress(t)
             self._update_sum()
             return
         if i < 0:
             self.say(t)
             return
+        if self._pub and not self._pub["end"] and t.startswith("上传"):
+            self._pub["cur"], self._pub["pct"] = i, t.split("%")[0].replace("上传", "").strip() + "%"
         if t == CLEAR:
             self.state.pop(i, None)
         elif t:
@@ -1238,6 +1363,7 @@ class ApiTab(QWidget):
         if self._stale():
             return
         self._quiet = False
+        self._pub_end(msg or "")
         self._busy(False)
         if msg:
             self.say(msg)
@@ -2015,6 +2141,7 @@ class ApiTab(QWidget):
                                                "会接着发没发的(发过的不会重发)。" if bad else ""), bool(bad))
             self._show_bad_after = bool(bad)
             return summary
+        self._pub_begin(len(rows))
         self._start(fn, f"开始发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
                     f",间隔 {gap:g} 秒")
 

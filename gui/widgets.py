@@ -304,6 +304,10 @@ class Hero(QFrame):
         self.big.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         self.sub = QLabel("")
         self.sub.setObjectName("heroSub")
+        self._extra_w = QWidget()                        # 大字下面多放一块(发布进度条)
+        self.extra = QVBoxLayout(self._extra_w)
+        self.extra.setContentsMargins(0, 8, 0, 4)
+        self._extra_w.hide()
         self._acts_w = QWidget()
         self.acts = QHBoxLayout(self._acts_w)
         self.acts.setContentsMargins(0, 0, 0, 0)
@@ -330,7 +334,7 @@ class Hero(QFrame):
             return
         old = self._open
         self._open = on
-        for w in (self._meta_w, self.big, self.sub, self._acts_w):
+        for w in (self._meta_w, self.big, self.sub, self._extra_w, self._acts_w):
             self.grid.removeWidget(w)
         L, C, R = Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight
         V = Qt.AlignmentFlag.AlignVCenter
@@ -340,6 +344,7 @@ class Hero(QFrame):
             self.grid.addWidget(self.big, 1, 0, L | V)
             self.grid.addWidget(self.sub, 2, 0, L | V)
             self.grid.addWidget(self._acts_w, 0, 1, 3, 1, R | V)
+            self.grid.addWidget(self._extra_w, 3, 0, 1, 2)
             self.grid.setColumnStretch(0, 1)
             self.sub.setAlignment(L)
         else:
@@ -347,7 +352,8 @@ class Hero(QFrame):
             self.grid.addWidget(self._meta_w, 0, 0, C)
             self.grid.addWidget(self.big, 1, 0, C)
             self.grid.addWidget(self.sub, 2, 0, C)
-            self.grid.addWidget(self._acts_w, 3, 0, C)
+            self.grid.addWidget(self._extra_w, 3, 0)
+            self.grid.addWidget(self._acts_w, 4, 0, C)
             self.grid.setColumnStretch(0, 1)
             self.grid.setColumnStretch(1, 0)
             self.sub.setAlignment(C)
@@ -1101,3 +1107,266 @@ class RecDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         s = super().sizeHint(option, index)
         return QSize(s.width(), 54)
+
+
+# ---------------- 发布进度(用户 2026-10-19 选的 B:大字看整体进度 + 每秒网速 + 有趣的小字 + 小动画,自己画) ----------------
+# 发布时大字下面轮着换的小字(用户 2026-10-19:「生活小科普 / 损人的搞笑段子 / 两个小人在那里对话」)
+FUN_TIPS = ["小科普:香蕉其实是浆果,草莓反而不是", "小科普:章鱼有三颗心脏,难怪那么能折腾",
+            "小科普:蜂蜜放三千年都不会坏,比你的计划保质期长", "小科普:人一天大约眨眼一万五千次,刚才那下也算",
+            "小科普:企鹅的膝盖藏在羽毛里,它们其实一直在半蹲", "小科普:打哈欠会传染,看到这句你可能已经想打了",
+            "小科普:长颈鹿一天只睡两小时左右,比打工人还拼", "小科普:水獭睡觉会手拉手,怕自己漂走",
+            "小科普:喝水别等渴了再喝,感觉渴的时候身体已经缺水了", "小科普:眼睛盯屏幕 20 分钟,看 6 米外 20 秒,护眼",
+            "小科普:蜗牛可以一觉睡三年,别学", "小科普:猫一天能睡十几个小时,它们才是真正的摸鱼大师"]
+FUN_ROAST = ["进度条:我在走了,你别催,你催我也不会变快", "网速表示:我已经尽力了,剩下的交给命运",
+             "这速度,跟你周一早上起床差不多", "别盯着看了,盯着它也不会快,去喝口水吧",
+             "上传中…这点耐心都没有,怎么当运营", "电脑风扇在呼呼转,它也在为你的 KPI 奋斗",
+             "发完这批,今天的工作量就能拿出去吹了", "你负责摸鱼,我负责发视频,分工明确",
+             "老板路过的话,记得把表情调成「很忙」", "别担心,发不出去的不是你,是网"]
+FUN_TALK = [("小企鹅", "这条怎么这么重?", "小飞机", "装的是你今天的 KPI"),
+            ("小企鹅", "还有多久到?", "小飞机", "快了,前面在排队检票"),
+            ("小企鹅", "你飞慢点,我晕机", "小飞机", "你是企鹅,本来就不会飞"),
+            ("小企鹅", "外面网好卡啊", "小飞机", "嘘,别让老板听见"),
+            ("小企鹅", "这个标题有点长", "小飞机", "没事,企鹅号装得下"),
+            ("小企鹅", "封面带了吗?", "小飞机", "带了带了,还擦了擦"),
+            ("小企鹅", "我们发完能下班吗?", "小飞机", "我能,你不行"),
+            ("小企鹅", "这一批好多啊", "小飞机", "多好,说明素材管够"),
+            ("小企鹅", "要是没发成怎么办?", "小飞机", "再点一下「再发一次没发成的」就好"),
+            ("小企鹅", "你说人类在干嘛?", "小飞机", "在等我们,顺便摸鱼")]
+_FUN_SEEN: list[str] = []
+
+
+def fun_line() -> str:
+    """随便挑一句(科普 / 段子 / 两个小人对话),最近出现过的先不挑。"""
+    import random
+    pool = FUN_TIPS + FUN_ROAST + [f"{a}:{x}    {b}:{y}" for a, x, b, y in FUN_TALK]
+    left = [x for x in pool if x not in _FUN_SEEN] or pool
+    s = random.choice(left)
+    _FUN_SEEN.append(s)
+    del _FUN_SEEN[:-12]
+    return s
+
+
+class PlaneTrack(QWidget):
+    """进度条 + 一架小纸飞机沿着它飞(上下轻轻晃);发完飞机停在终点变绿。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(38)
+        self._v, self._phase, self.running, self.done = 0.0, 0.0, False, False
+        self._t = QTimer(self)
+        self._t.setInterval(33)
+        self._t.timeout.connect(self._tick)
+
+    def set_value(self, v: float):
+        v = max(0.0, min(1.0, float(v)))
+        if self.isVisible():
+            animate(self, "v", self._v, v, 500, self._set)
+        else:
+            self._set(v)
+
+    def _set(self, v):
+        self._v = float(v)
+        self.update()
+
+    def set_running(self, on: bool):
+        self.running = on
+        (self._t.start if on else self._t.stop)()
+        self.update()
+
+    def _tick(self):
+        self._phase += 0.12
+        self.update()
+
+    def paintEvent(self, _e):
+        import math
+        t = tok()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        h, y = 10, self.height() - 8
+        x0, w = 14, self.width() - 28
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(t["soft"]))
+        p.drawRoundedRect(QRectF(x0, y - h / 2, w, h), h / 2, h / 2)
+        col = QColor(t["green"] if self.done else t["acc"])
+        if self._v > 0:
+            p.setBrush(col)
+            p.drawRoundedRect(QRectF(x0, y - h / 2, max(h, w * self._v), h), h / 2, h / 2)
+        if self.running:                                  # 进度条上一道亮光慢慢扫过去
+            sx = x0 + (self._phase * 40) % max(1, w * max(self._v, 0.02))
+            g = QColor("#ffffff")
+            g.setAlpha(70)
+            p.setBrush(g)
+            p.drawRoundedRect(QRectF(sx, y - h / 2, 26, h), h / 2, h / 2)
+        px = x0 + w * self._v
+        bob = math.sin(self._phase) * 3 if self.running else 0
+        f = QFont(ICON_FONT)
+        f.setPixelSize(18)
+        p.setFont(f)
+        p.setPen(col)
+        p.drawText(QRectF(px - 11, y - h / 2 - 26 + bob, 22, 22), Qt.AlignmentFlag.AlignCenter, GLYPH["send"])
+        p.end()
+
+
+class Spark(QWidget):
+    """小波浪线:最近十几秒的网速。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(64, 20)
+        self.vals: list[float] = []
+
+    def push(self, v: float):
+        self.vals = (self.vals + [max(0.0, v)])[-16:]
+        self.update()
+
+    def paintEvent(self, _e):
+        if len(self.vals) < 2:
+            return
+        from PySide6.QtGui import QPainterPath
+        t = tok()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        top = max(self.vals) or 1
+        n = len(self.vals)
+        path = QPainterPath()
+        for k, v in enumerate(self.vals):
+            pt = QPointF(k * (self.width() - 2) / (n - 1) + 1, self.height() - 2 - v / top * (self.height() - 4))
+            path.moveTo(pt) if k == 0 else path.lineTo(pt)
+        p.setPen(QPen(QColor(t["acc"]), 1.6))
+        p.drawPath(path)
+        p.end()
+
+
+class BusyDots(QWidget):
+    """三个一跳一跳的小点:正在干活。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(26, 14)
+        self._p = 0.0
+        self._t = QTimer(self)
+        self._t.setInterval(40)
+        self._t.timeout.connect(lambda: (setattr(self, "_p", self._p + 0.15), self.update()))
+
+    def showEvent(self, e):
+        self._t.start()
+        super().showEvent(e)
+
+    def hideEvent(self, e):
+        self._t.stop()
+        super().hideEvent(e)
+
+    def paintEvent(self, _e):
+        import math
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QColor(tok()["acc"])
+        for k in range(3):
+            s = (math.sin(self._p - k * 0.8) + 1) / 2
+            c.setAlphaF(0.3 + 0.7 * s)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawEllipse(QRectF(2 + k * 8, 6 - s * 3, 5, 5))
+        p.end()
+
+
+class Confetti(QWidget):
+    """发完撒一把彩带(1.6 秒),盖在大字区上面,不挡鼠标。"""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        import random
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setGeometry(parent.rect())
+        t = tok()
+        cols = [t["acc"], t["green"], t["orange"], "#f5b800", t["danger"]]
+        w = max(1, parent.width())
+        self.ps = [(random.uniform(0, w), random.uniform(-40, 0), random.uniform(-40, 40), random.uniform(160, 300),
+                    random.uniform(0, 360), random.uniform(-500, 500), cols[k % len(cols)], random.uniform(0, 0.4))
+                   for k in range(46)]
+        self._k = 0.0
+        self.show()
+        self.raise_()
+        animate(self, "fall", 0.0, 1.0, 1700, self._set, self.deleteLater, QEasingCurve.Type.Linear)
+
+    def _set(self, k):
+        self._k = float(k)
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for x, y, vx, vy, rot, vr, col, delay in self.ps:
+            k = max(0.0, (self._k - delay) / (1 - delay))
+            if k <= 0:
+                continue
+            c = QColor(col)
+            c.setAlphaF(max(0.0, 1 - k * k))
+            p.save()
+            p.translate(x + vx * k, y + vy * k * 1.6 + 120 * k * k)
+            p.rotate(rot + vr * k)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawRoundedRect(QRectF(-3, -5, 6, 10), 2, 2)
+            p.restore()
+        p.end()
+
+
+class PubStrip(QWidget):
+    """大字下面那块:纸飞机进度条 + 一排小标签(每秒网速 + 小波浪线 / 正在发哪条 / 成功 / 没发成 / 还要多久)。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        self.track = PlaneTrack()
+        v.addWidget(self.track)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.spd_w = QFrame()
+        self.spd_w.setObjectName("chip")
+        sh = QHBoxLayout(self.spd_w)
+        sh.setContentsMargins(12, 3, 12, 3)
+        sh.setSpacing(8)
+        self.spd = QLabel("↑ — MB/s")
+        self.spd.setObjectName("chipText")
+        self.spd.setMinimumWidth(96)
+        sh.addWidget(self.spd)
+        self.spark = Spark()
+        sh.addWidget(self.spark)
+        row.addWidget(self.spd_w)
+        self.cur = self._chip("")
+        self.cur.setMaximumWidth(520)
+        row.addWidget(self.cur)
+        row.addStretch(1)
+        self.ok = self._chip("")
+        row.addWidget(self.ok)
+        self.bad = self._chip("")
+        row.addWidget(self.bad)
+        self.eta = self._chip("")
+        row.addWidget(self.eta)
+        v.addLayout(row)
+
+    @staticmethod
+    def _chip(text):
+        lab = QLabel(text)
+        lab.setObjectName("chip")
+        lab.setTextFormat(Qt.TextFormat.RichText)
+        return lab
+
+    def set_numbers(self, ok: int, bad: int, cur: str = "", eta: str = ""):
+        t = tok()
+        self.ok.setText(f"成功 <b style='color:{t['ok']}'>{ok}</b>")
+        self.bad.setText(f"没发成 <b style='color:{t['bad'] if bad else t['mu']}'>{bad}</b>")
+        self.cur.setText(cur)
+        self.cur.setVisible(bool(cur))
+        self.eta.setText(eta)
+        self.eta.setVisible(bool(eta))
+
+    def set_speed(self, mbps: float | None):
+        if mbps is None:
+            self.spd.setText("↑ — MB/s")
+            return
+        self.spd.setText(f"↑ {mbps:.1f} MB/s" if mbps >= 0.1 else f"↑ {mbps * 1024:.0f} KB/s")
+        self.spark.push(mbps)
