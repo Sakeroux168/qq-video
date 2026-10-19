@@ -133,10 +133,13 @@ class Records:
 
     def relink(self, rid: int, new_path: str) -> bool:
         """发过的那条被人挪了 / 文件夹改了名:记下现在的位置,之后按路径也认得出发过。
-        已经记过挪走位置、而且那里文件还在的不动(不把归档的位置盖掉)。返回改没改。"""
+        已经记过挪走位置、而且那里文件还在的不动(不把归档的位置盖掉)。返回改没改。
+        审查 22:原来的文件还在 = 不是挪了,是员工又放了一份同名的 → 不改(不然那份没发的被当成已发,「挪走」时一起挪走)。"""
         with _LOCK:
             r = self.conn.execute("SELECT path, moved_pkey FROM posts WHERE id=?", (rid,)).fetchone()
             if r is None or (r["moved_pkey"] and r["moved_pkey"] != pkey(r["path"]) and os.path.exists(r["moved_pkey"])):
+                return False
+            if pkey(r["path"]) != pkey(new_path) and os.path.exists(r["path"]):
                 return False
             self.conn.execute("UPDATE posts SET moved_pkey=? WHERE id=?", (pkey(new_path), rid))
             self.conn.commit()
@@ -165,6 +168,13 @@ class Records:
                 ("已发" if sent else "没发成", "已发" if sent else "", bj_str(), pkey(path)))
             self.conn.commit()
             return cur.rowcount
+
+    def mark_sent(self, rid: int) -> None:
+        """数据记录页:人去后台看了,这条「没发成」的其实发出去了 → 记成已发(发布时间 = 现在,补记)。"""
+        with _LOCK:
+            self.conn.execute("UPDATE posts SET status='已发', published_at=?, note=note || '(人去后台看过,标成已发)' WHERE id=?",
+                              (bj_str(), rid))
+            self.conn.commit()
 
     def failed_in_batch(self, batch: str) -> list[dict]:
         """这批里没摆成、后来也没记已发的(人可能在罐头里手动补好一起发了)。"""
@@ -260,7 +270,7 @@ class Records:
             ws.append([r["date"], r["account"], r["employee"], r["title"], r["cover_kind"], r["status"],
                        r["prepared_at"], r["published_at"], r["note"], r["path"]])
         ws2 = wb.create_sheet("按员工汇总")
-        ws2.append(["日期", "号", "员工", "已发", "摆好没发", "没发成", "结果不明", "第一条发布", "最后一条发布"])
+        ws2.append(["日期", "号", "员工", "已发", "摆好等发布", "没发成", "结果不明", "第一条发布", "最后一条发布"])
         for s in self.summary(date):
             ws2.append([s["date"], s["account"], s["employee"], s["sent"], s["ready"], s["failed"], s["unsure"],
                         s["first_at"] or "", s["last_at"] or ""])

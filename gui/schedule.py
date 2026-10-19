@@ -7,7 +7,7 @@
 import ctypes
 import datetime as dt
 
-from PySide6.QtCore import QObject, QTime, QTimer
+from PySide6.QtCore import QObject, Qt, QTime, QTimer
 from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QTimeEdit
 
 from qe.config import bj_now
@@ -129,11 +129,25 @@ class Scheduler(QObject):
         return f"⏰ {short_at(p['at'])} 开始发 {p['date']} 的(还有 {left_text(p['at'])})" if p else ""
 
 
-def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "", tip: str = "") -> tuple[str, str] | None:
-    """弹框选:哪天的素材、哪天几点开始(北京时间)。返回 (「YYYY-MM-DD HH:MM」, 素材日期);不定了返回 None。"""
+def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "", tip: str = "",
+                 head: str = "", time_label: str = "几点发出去(北京时间):", overview=None) -> tuple[str, str] | None:
+    """弹框选:哪天的素材、哪天几点发(北京时间)。返回 (「YYYY-MM-DD HH:MM」, 素材日期);不定了返回 None。
+    审查 12:最上面先写总览(哪个号几条、几点发)—— overview(素材日期) 返回「家长研习空间 40 条、…」;
+    head = 红字一行(两页意思不一样:教育号摆完电脑能关 / 16 个号到点前电脑不能关)。"""
+    from PySide6.QtWidgets import QApplication
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
+    dlg.setMinimumWidth(460)
     f = QFormLayout(dlg)
+    if head:
+        h = QLabel(head)
+        h.setWordWrap(True)
+        h.setStyleSheet("color:#fe2c55;font-weight:bold")
+        f.addRow(h)
+    lab_sum = QLabel("")
+    lab_sum.setWordWrap(True)
+    lab_sum.setObjectName("hint")
+    f.addRow(lab_sum)
     c_date = QComboBox()
     c_date.addItems(dates)
     if cur in dates:
@@ -145,10 +159,30 @@ def ask_schedule(parent, title: str, dates: list[str], cur: str, note: str = "",
         d = today + dt.timedelta(days=k)
         c_day.addItem(f"{word}({d.month}月{d.day}日)", d.isoformat())
     c_day.setCurrentIndex(1)
-    f.addRow("哪天开始:", c_day)
+    f.addRow("哪天发:", c_day)
     e_time = QTimeEdit(QTime(9, 0))
     e_time.setDisplayFormat("HH:mm")
-    f.addRow("几点开始(北京时间):", e_time)
+    f.addRow(time_label, e_time)
+    cache: dict[str, str] = {}
+
+    def show_sum(*_a):
+        """总览:换了素材日期 / 时间就跟着变(数视频要翻文件夹,一个日期只数一次)。"""
+        date = c_date.currentText()
+        at = f"{c_day.currentData()} {e_time.time().toString('HH:mm')}"
+        if overview and date and date not in cache:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                cache[date] = overview(date) or ""
+            except Exception as e:                     # 网络盘断了之类:总览不写,照样能定
+                cache[date] = f"(数不出来:{type(e).__name__})"
+            finally:
+                QApplication.restoreOverrideCursor()
+        what = cache.get(date, "")
+        lab_sum.setText(f"{date or '?'} 的素材 → {short_at(at)}(北京时间)发出去" + (f"\n{what}" if what else ""))
+    c_date.currentIndexChanged.connect(show_sum)
+    c_day.currentIndexChanged.connect(show_sum)
+    e_time.timeChanged.connect(show_sum)
+    show_sum()
     tip = QLabel((tip or "到点后软件自己发,发到完为止。\n电脑别关机、别睡眠(软件会叫它别睡);软件和创作罐头都要开着,罐头最小化没关系。") +
                  (f"\n\n{note}" if note else ""))
     tip.setWordWrap(True)

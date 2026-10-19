@@ -5,6 +5,38 @@ from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QMenu,
                                QWidget)
 
 
+def fill_dates(combo, dates: list[str], cur: str = "", blank: str = "", empty=()) -> None:
+    """两页的「要发哪天的」下拉(审查 15:两页顺序不一样):最新的在上面,今天标出来,没视频的灰掉。
+    dates = 日期文件夹名(新的在前);empty = 这天没视频的。每项的数据 = 日期本身(文字可能多了「(今天)」)。"""
+    from PySide6.QtGui import QBrush, QColor
+    from qe.config import bj_now
+    from qe.folders import day_of
+    today = f"{bj_now().month}.{bj_now().day}"
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(blank, "")
+    for d in dates:
+        tags = (["今天"] if day_of(d) == today else []) + (["没视频"] if d in empty else [])
+        combo.addItem(d + (f"({' · '.join(tags)})" if tags else ""), d)
+        if d in empty:
+            i = combo.count() - 1
+            combo.setItemData(i, QBrush(QColor("#a8a9ae")), Qt.ItemDataRole.ForegroundRole)
+            combo.setItemData(i, "这天还没有视频(文件夹是空的 / 还没建)", Qt.ItemDataRole.ToolTipRole)
+    i = combo.findData(cur) if cur else -1
+    combo.setCurrentIndex(i if i > 0 else 0)
+    combo.blockSignals(False)
+
+
+def newest_first(dates: list[str]) -> list[str]:
+    """日期文件夹按 月.日 从新到旧(「10.14（101）」这种改过名的也按开头算);认不出日期的放最后。"""
+    from qe.folders import day_of
+
+    def key(d):
+        k = day_of(d)
+        return (0, -int(k.split(".")[0]), -int(k.split(".")[1]), d) if k else (1, 0, 0, d)
+    return sorted(dates, key=key)
+
+
 class MenuButton(QPushButton):
     """带下拉的按钮:鼠标挪上去停一下就弹出列表(用户 2026-10-16:「鼠标挪到检查 弹出列表」),点也弹。
     b = MenuButton("检查"); b.add("普通检查", fn, "说明")。"""

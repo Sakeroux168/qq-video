@@ -371,7 +371,7 @@ class ApiTab(QWidget):
         undo = self.ledger.last()
         self.b_undo.setToolTip("把上一次改话题 / 批量改话题 / 改标题改回去" +
                                (f"\n上一次:{topic.Ledger.label(undo)}" if undo else "\n(现在没有能撤销的)"))
-        if not self.c_date.currentText():
+        if not self.day():
             self.lab_scope.setText("先在左上角选「要发哪天的」")
             self.b_clear.setVisible(False)
             self.b_pub.setText("现在发布")
@@ -414,21 +414,32 @@ class ApiTab(QWidget):
         if self.busy():
             return
         # 记住上次选的日期(用户 2026-10-15「可以记住」;教育页那边仍然不自动选)
-        cur = self.c_date.currentText() or str(self.st.get("api_last_date") or "")
-        self.c_date.blockSignals(True)
-        self.c_date.clear()
-        self.c_date.addItem("")
+        cur = self.day() or str(self.st.get("api_last_date") or "")
+        from gui.widgets import fill_dates, newest_first
         ds = apisrc.dates(self.roots(), self.known())
+        has = set(ds) | {k for k, v in (self.st.get("api_picked") or {}).items() if v}
         today = f"{bj_now().month}.{bj_now().day}"
         for x in list((self.st.get("api_picked") or {}).keys()) + [today]:   # 手选过文件夹的日子、今天:没有日期文件夹也能选
             if x and x not in ds:
                 ds.append(x)
-        ds.sort(key=lambda d: tuple(int(x) for x in d.split(".")))
-        self.c_date.addItems(list(reversed(ds)))
-        if cur:
-            self.c_date.setCurrentText(cur)
-        self.c_date.blockSignals(False)
+        # 和教育号页一样:最新的在上面、今天标出来、没日期文件夹的(今天还没建)灰掉(审查 15)
+        fill_dates(self.c_date, newest_first(ds), cur, empty={d for d in ds if d not in has})
         self.load()
+
+    def day(self) -> str:
+        """现在选的是哪天(「10.19」;下拉里的字可能多了「(今天)」,日期存在数据里)。"""
+        d = self.c_date.currentData()
+        return d if isinstance(d, str) else self.c_date.currentText()
+
+    def set_day(self, date: str) -> bool:
+        """选到这天(换了会自己重读);下拉里没有返回 False。"""
+        i = self.c_date.findData(date)
+        if i < 0:
+            i = self.c_date.findText(date)
+        if i < 0:
+            return False
+        self.c_date.setCurrentIndex(i)
+        return True
 
     def _show_source(self, d: str):
         """上面那行:素材到底从哪来(短说;完整的放鼠标悬停里)。"""
@@ -478,7 +489,7 @@ class ApiTab(QWidget):
             self._busy(False)
         if self.busy():                              # 后台按行号刷状态,这时重读列表会刷到别的视频上
             return
-        d = self.c_date.currentText()
+        d = self.day()
         if d and self.st.get("api_last_date") != d:
             self.st["api_last_date"] = d
             self.st.save()
@@ -549,7 +560,7 @@ class ApiTab(QWidget):
             g.addChild(it)
             self.items[i] = it
             self._fill(i, group=False)
-        if self.c_date.currentText():                     # 这天没找到视频的号也列出来(灰的),一眼看出少了谁
+        if self.day():                     # 这天没找到视频的号也列出来(灰的),一眼看出少了谁
             for nick in apiacc.nicks():
                 if nick not in self.groups:
                     g = group(nick)
@@ -665,7 +676,7 @@ class ApiTab(QWidget):
         fail = sum(1 for i in rows if self.state.get(i, "").startswith(FAILED[:2]))
         unsure = sum(1 for i in rows if self.state.get(i, "") == "结果不明")
         ok = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
-        pk = "(手选文件夹)" if nick in self.picked(self.c_date.currentText()) else ""
+        pk = "(手选文件夹)" if nick in self.picked(self.day()) else ""
         g.setText(0, f"{nick}  {n} 条{pk}")
         g.setText(1, "")
         parts = []
@@ -682,7 +693,7 @@ class ApiTab(QWidget):
         q = self._quota_text(nick)
         g.setText(3, " · ".join(x for x in (base, q) if x))
         g.setToolTip(3, "「今天 X / Y」= 今天(按发出去的时间)已经发了 X 条,规定每天 Y 条")
-        g.setToolTip(0, self.picked(self.c_date.currentText()).get(nick, "") or nick)
+        g.setToolTip(0, self.picked(self.day()).get(nick, "") or nick)
         col = GREEN if n and sent == n else ORANGE if unsure else YELLOW if bad or fail else None
         for c in range(len(COLS)):
             g.setBackground(c, col if col else QColor(0, 0, 0, 0))
@@ -695,11 +706,15 @@ class ApiTab(QWidget):
             return f"今天 {t}" if t else ""
         return f"今天 {t}/{q}" + (" √" if t >= q else "")
 
+    def _quota_nicks(self) -> list[tuple[str, int]]:
+        """有规定条数的号:[(号, 每天几条)]。账号还没搬(nicks 空)就用列表里出现的号(审查 14:原来没号可算时写「都发够了」)。"""
+        names = apiacc.nicks() or sorted({v.account for v in self.videos})
+        return [(n, q) for n in names for q in (plan.quota_of(self.st, n),) if q]
+
     def _quota_card(self):
         """「今天达标」卡片:有规定的号里今天发够了几个(按发出去的时间算)。"""
         got = getattr(self, "today_sent", {}) or {}
-        qs = [(n, plan.quota_of(self.st, n)) for n in apiacc.nicks()]
-        qs = [(n, q) for n, q in qs if q]
+        qs = self._quota_nicks()
         if not qs:
             return "–"
         ok = sum(1 for n, q in qs if got.get(n, 0) >= q)
@@ -707,8 +722,11 @@ class ApiTab(QWidget):
 
     def _quota_sub(self) -> str:
         got = getattr(self, "today_sent", {}) or {}
-        short = sum(max(0, plan.quota_of(self.st, n) - got.get(n, 0)) for n in apiacc.nicks())
-        return f"今天还差 {short} 条" if short else "今天都发够了"
+        qs = self._quota_nicks()
+        if not qs:
+            return "没有规定条数的号"
+        short = sum(max(0, q - got.get(n, 0)) for n, q in qs)
+        return f"今天还差 {short} 条" if short else "今天都发够了 √"
 
     def _update_sum(self):
         n = len(self.videos)
@@ -799,7 +817,7 @@ class ApiTab(QWidget):
         if self.busy():
             QMessageBox.information(self, "给号选文件夹", "后台还在做事(发布 / 转竖屏 / 改话题 / 检查),做完或点「停」以后再换文件夹。")
             return
-        d = self.c_date.currentText()
+        d = self.day()
         if not d:
             QMessageBox.information(self, "给号选文件夹", "先在左上角选是哪天的。")
             return
@@ -848,7 +866,7 @@ class ApiTab(QWidget):
             self.job.wait()
         if self.busy():
             return
-        d = self.c_date.currentText()
+        d = self.day()
         self._set_pick(d, nick, "")
         self.say(f"{d}「{nick}」不用手选的文件夹了,回到自动找")
         self.load()
@@ -925,7 +943,7 @@ class ApiTab(QWidget):
                 m.addAction("打开所在文件夹", lambda: self.reveal(i))
             m.addSeparator()
             m.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick)).setEnabled(not busy)
-            if nick in self.picked(self.c_date.currentText()):
+            if nick in self.picked(self.day()):
                 m.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick)).setEnabled(not busy)
             m.addSeparator()
         m.addAction("给别的号选文件夹…", lambda: self.pick_folder()).setEnabled(not busy)
@@ -1542,7 +1560,7 @@ class ApiTab(QWidget):
     def run_publish(self, only: list[int] | None = None, auto: bool = False):
         """only = 只发这几行(右键「只发这个号的」);None = 选中的,没选就是看得见的全部。发之前一定弹框让人点「发」。
         auto = 定时发布到点了(人定时的时候已经确认过):不弹框,有问题的 / 没检查出来的跳过,能发的都发。"""
-        d = self.c_date.currentText()
+        d = self.day()
         if not d or self.busy():
             return
         if auto:
@@ -1844,16 +1862,29 @@ class ApiTab(QWidget):
                 self.sched.cancel()
             return
         from gui.schedule import ask_schedule
-        dates = [self.c_date.itemText(i) for i in range(self.c_date.count()) if self.c_date.itemText(i)]
+        dates = [self.c_date.itemData(i) for i in range(self.c_date.count()) if self.c_date.itemData(i)]
         if not dates:
             QMessageBox.information(self, "定时发布", "还没有能选的日期。")
             return
-        r = ask_schedule(self, "定时发布 · 16 个号", dates, self.c_date.currentText(),
+        r = ask_schedule(self, "定时发布 · 16 个号", dates, self.day(),
                          "到点会发这天所有号能发的(不管选中;「只看有问题的」/ 搜索会清掉),按设置里「几个号一起发」。\n"
-                         "话题、标准竖屏先处理好;到点还有问题的不发。")
+                         "话题、标准竖屏先处理好;到点还有问题的不发。",
+                         head="16 个号是软件到点自己一条条发:到点前、发完前电脑不能关,软件和创作罐头都要开着。",
+                         time_label="几点开始发(北京时间):", overview=self._sched_overview)
         if r:
             self._clear_notice()
             self.sched.set(*r)
+
+    def _sched_overview(self, date: str) -> str:
+        """定时框最上面的总览:这天每个号还有几条没发(到点还有问题的不发,所以是「最多」)。"""
+        per: dict[str, int] = {}
+        for v in apisrc.videos(self.roots(), date, self.known(), self.picked(date)):
+            if not self.rec.blocked(v.path):
+                per[v.account] = per.get(v.account, 0) + 1
+        if not per:
+            return "这天没有要发的视频(都发过了 / 还没有素材)"
+        return (f"最多发 {sum(per.values())} 条(到点还有问题的不发):" +
+                "、".join(f"{n} {k} 条" for n, k in sorted(per.items(), key=lambda x: -x[1])))
 
     def _sched_fire(self, date: str):
         if self.busy() and not getattr(self, "_quiet", False):
@@ -1866,15 +1897,15 @@ class ApiTab(QWidget):
         self.k_bad.setChecked(False)
         self.e_find.clear()
         self.tree.clearSelection()
-        if self.c_date.findText(date) < 0:
+        if self.c_date.findData(date) < 0:
             self.reload_dates()
-        if self.c_date.findText(date) < 0:
+        if self.c_date.findData(date) < 0:
             self._sched_end(f"⚠ 到点了,但没有「{date}」这天的素材,定时发布没开始", problem=True)
             return
-        if self.c_date.currentText() == date:
+        if self.day() == date:
             self.reload_dates()                           # 同一天也重读(员工可能加了视频);会自动检查新的
         else:
-            self.c_date.setCurrentText(date)              # 换日期会自己重读 + 自动检查
+            self.set_day(date)                            # 换日期会自己重读 + 自动检查
         self._sched_wait = 0
         self._auto_poll()
 

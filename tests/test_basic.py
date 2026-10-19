@@ -1514,7 +1514,7 @@ def test_window_dups(tmp: Path):
     check(sorted((v.employee, v.title) for v in vids) == sorted([("张", "同名"), ("李", "新的")]),
           f"这批只摆 张的同名 + 李的新的 -> {[(v.employee, v.title) for v in vids]}")
     st4 = {w.table.item(i, 0).text() + "/" + w.table.item(i, 2).text(): w.table.item(i, 4).text() for i in range(w.table.rowCount())}
-    check(st4["同名/李"].startswith("不发:和「张」") and st4["挪过的/李"].startswith("不发:这个号发过同名的") and st4["新的/李"] == "没发",
+    check(st4["同名/李"].startswith("不发:和「张」") and st4["挪过的/李"].startswith("不发:这个号发过同名的") and st4["新的/李"] == "还没发",
           f"表里写清楚为什么不发 -> {st4}")
     check("另有 2 条不发" in w._nothing_left(), "没得摆时也说还有几条不发")
     w.close()
@@ -2833,6 +2833,223 @@ def test_sched_notice(tmp: Path):
         QMessageBox.warning = real_w
 
 
+def _modal(app, fn, wait: float = 0.3):
+    """等一会儿,对弹出来的模态框调 fn(框)(测试里看框里写了什么 / 改了再点确定)。"""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+    QTimer.singleShot(int(wait * 1000), lambda: fn(QApplication.activeModalWidget()))
+
+
+def test_cd_items(tmp: Path):
+    print("[改进清单 C / D(10~23):看得懂、知道下一步、小问题]")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel, QLineEdit, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    import gui.schedule as S
+    import gui.window as GW
+    from gui.widgets import newest_first
+    from qe import apiacc, apisrc
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    today = f"{bj_now().month}.{bj_now().day}"
+    root = tmp / "素材cd"
+    for emp, names in (("王", ("cd第一条视频", "cd第二条视频")), ("李", ("cd第一条视频",))):
+        d = root / "10.21" / "小天地" / emp
+        d.mkdir(parents=True)
+        for n in names:
+            (d / f"{n}.mp4").write_bytes(b"x")
+            _img(d / f"{n}.png", 640, 360)
+    (root / "10.21" / "小天地" / "31条（已发）").mkdir(parents=True)
+    (root / "10.21" / "小天地" / "31条（已发）" / "发过的那条.mp4").write_bytes(b"x")
+    (root / "10.21" / "不认识").mkdir(parents=True)
+    (root / "9.30" / "小天地" / "张").mkdir(parents=True)
+    (root / "9.30" / "小天地" / "张" / "旧的.mp4").write_bytes(b"x")
+    if today not in ("10.21", "9.30"):
+        (root / today).mkdir()                      # 今天的文件夹还空着:下拉里标「今天」、灰掉
+    api_root = tmp / "api_cd" / "游戏视频"
+    (api_root / "CSGO--CSGO战神君" / "10.22").mkdir(parents=True)
+    (api_root / "CSGO--CSGO战神君" / "10.22" / "重试的那条.mp4").write_bytes(b"x")
+    accs0 = apiacc.load()
+
+    def fake_decide(v):
+        v.cover, v.cover_kind, v.cover_why, v.plan = v.png, "png", "测试", {}
+        v.warn = False
+    real = (GW.C.decide, GW.C.note_wide, QMessageBox.information)
+    boxes = []
+    GW.C.decide, GW.C.note_wide = fake_decide, (lambda v: None)
+    QMessageBox.information = staticmethod(lambda _p, t, x, *a, **k: boxes.append(x))
+    try:
+        apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"),
+                      "category": 1604, "enabled": True}])
+        st = Settings(tmp / "s_cd.json")
+        st["material_root"] = str(root)
+        st["api_roots"] = [str(api_root)]
+        st["archive_root"] = str(tmp / "教育归档" / "10.15")          # 被人改坏了的(少 {month})
+        st["ai_key"] = "test"
+        rec = Records(tmp / "r_cd.sqlite")
+        w = GW.MainWindow(st, rec)
+        # 13:刚打开是空白 → 告诉人先选日期
+        check(w.lab_sum.text() == GW.PICK_DAY and w.lab_scope.text() == GW.PICK_DAY, f"13 刚打开提示先选日期 -> {w.lab_sum.text()}")
+        # 15:最新的在上面、今天标出来、没视频的灰掉
+        ds = [w.c_date.itemData(i) for i in range(1, w.c_date.count())]
+        check(ds == newest_first(ds) and ds.index("10.21") < ds.index("9.30") and w.c_date.itemText(0) == "(选一天)",
+              f"15 教育号日期:最新的在上面 -> {ds}")
+        check(newest_first(["9.30", "10.14（101）", "10.2", "乱七八糟"]) == ["10.14（101）", "10.2", "9.30", "乱七八糟"], "15 改过名的日期也按开头排")
+        if today not in ("10.21", "9.30"):
+            i = w.c_date.findData(today)
+            fg = w.c_date.itemData(i, Qt.ItemDataRole.ForegroundRole)
+            check("今天" in w.c_date.itemText(i) and "没视频" in w.c_date.itemText(i) and fg is not None,
+                  f"15 今天标出来、空的灰掉 -> {w.c_date.itemText(i)}")
+        i = w.c_date.findData("10.21")
+        check(w.c_date.itemText(i) == "10.21" and w.c_date.itemData(i, Qt.ItemDataRole.ForegroundRole) is None, "15 有视频的正常显示")
+        # 10:没选日期 / 没勾员工点「摆下一批」
+        w.start_batch()
+        check(boxes and "左上角" in boxes[-1], f"10 没选日期:提示先选日期 -> {boxes[-1:]}")
+        w.c_date.setCurrentIndex(i)
+        check(w.lab_sum.text() == GW.PICK_EMP, f"13 选了日期没勾员工:提示勾员工 -> {w.lab_sum.text()}")
+        w.start_batch()
+        check("你还没勾员工" in boxes[-1] and "发完" not in boxes[-1], f"10 没勾员工:不再说「都发完了」 -> {boxes[-1]}")
+        # 11:名字带「已发」的文件夹留灰行;不认识的文件夹也列出来
+        top = next(w.tree.topLevelItem(k) for k in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(k).text(0) == "家长小天地")
+        kids = [top.child(k) for k in range(top.childCount())]
+        grey = [x for x in kids if "已发" in x.text(0)]
+        check(len(grey) == 1 and grey[0].text(1) == "1 条,不发" and not grey[0].flags() & Qt.ItemFlag.ItemIsUserCheckable
+              and "已发" in grey[0].toolTip(0), f"11 带「已发」的文件夹留一行灰的 -> {[x.text(0) for x in kids]}")
+        unk = [w.tree.topLevelItem(k) for k in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(k).text(0) == "没读的文件夹"]
+        check(unk and unk[0].child(0).text(0) == "不认识", "11 认不出号的文件夹也列出来")
+        for x in kids:
+            if x.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                x.setCheckState(0, Qt.CheckState.Checked)
+        grey[0].setCheckState(0, Qt.CheckState.Checked)                 # 灰行就算被勾上也不算
+        check(sorted(e for _a, _d, e in w.checked_dirs()) == ["李", "王"], f"11 灰行勾不上 -> {w.checked_dirs()}")
+        w._load_videos()
+        _wait(app, lambda: not (w.cover_worker and w.cover_worker.isRunning()))
+        w._update_scope()
+        # 18:这次摆 N 条 / 跳过 N 条(为什么)
+        sc = w.lab_scope.text()
+        check("这次摆「家长小天地」2 条" in sc and "跳过 1 条" in sc and "同名" in sc, f"18 主按钮上面写这次摆几条、跳过几条 -> {sc}")
+        # 17:用词统一
+        stt = [w.table.item(r, 4).text() for r in range(w.table.rowCount())]
+        check(stt.count("还没发") == 2 and not any(s == "没发" for s in stt), f"17 状态写「还没发」 -> {stt}")
+        check(GW.READY == "摆好等发布" and w.t_sum.horizontalHeaderItem(4).text() == "摆好等发布", "17 「摆好没发」统一成「摆好等发布」")
+        # 16:「封面都看过了」;摆好等确认时底栏只留要点的
+        check(w.b_allok.text() == "封面都看过了", "16 「全部调好了」改名「封面都看过了」")
+        check(not w.b_wm.isHidden() and not w.b_blur.isHidden(), "16 平时有「查水印 / 模糊水印」")
+        w.batch_id = "测试批"
+        w._refresh_buttons()
+        check(w.b_wm.isHidden() and w.b_blur.isHidden() and w.b_allok.isHidden() and not w.b_sent.isHidden(),
+              "16 摆好等确认时藏起「查水印 / 模糊水印 / 封面都看过了」")
+        w.batch_id = ""
+        w._refresh_buttons()
+        # 12:定时框先写总览,标签「几点发出去」,两页意思写清楚
+        ov = w._sched_overview("10.21")
+        check("家长小天地 2 条" in ov, f"12 教育号总览:同名的只算一条 -> {ov}")
+        seen = {}
+
+        def look(dlg):
+            seen["labels"] = [x.text() for x in dlg.findChildren(QLabel)] if dlg else []
+            if dlg:
+                dlg.reject()
+        _modal(app, look)
+        r = S.ask_schedule(w, "定时发布 · 教育号", ["10.21", "9.30"], "10.21", head="摆完电脑就能关", overview=w._sched_overview)
+        labs = "\n".join(seen.get("labels", []))
+        check(r is None and "家长小天地 2 条" in labs and "发出去" in labs and "几点发出去(北京时间):" in labs and "摆完电脑就能关" in labs,
+              f"12 定时框最上面是总览、标签「几点发出去」 -> {labs[:200]}")
+        api_ov = w.api_tab._sched_overview("10.22")
+        check("CSGO战神君 1 条" in api_ov, f"12 16 个号总览 -> {api_ov}")
+        # 15:16 个号页也是最新的在上、今天标出来
+        tab = w.api_tab
+        ti = tab.c_date.findData(today)
+        check(ti > 0 and "今天" in tab.c_date.itemText(ti) and tab.c_date.itemData(1) == newest_first(
+            [tab.c_date.itemData(k) for k in range(1, tab.c_date.count())])[0], "15 16 个号页:最新的在上、今天标出来")
+        # 14:还没搬账号(nicks 空)时「今天达标」别写「都发够了」
+        apiacc.save([])
+        check(tab.set_day("10.22") and tab.videos, "16 个号页选到 10.22")
+        sub = tab._quota_sub()
+        check("差" in sub and "都发够了" not in sub, f"14 0/20 时不写「都发够了」 -> {sub}")
+        apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"),
+                      "category": 1604, "enabled": True}])
+        # 20:数据记录页空表有提示
+        w.refresh_records()
+        check(not w.rec_empty.isHidden() and "还没有记录" in w.rec_empty.text(), f"20 空表有提示 -> {w.rec_empty.text()}")
+        check(w.t_rec.horizontalHeader().sectionResizeMode(7) == GW.QHeaderView.ResizeMode.Stretch, "20 备注那列占剩下的宽度")
+        # 23:没发成的直接「重试 / 标成已发」
+        tab.reload_dates()
+        tab.set_day("10.22")
+        v = tab.videos[0]
+        rec.api_result(v, "没发成", "网断了")
+        w.refresh_records()
+        check(w.rec_empty.isHidden(), "20 有记录了提示就藏起来")
+        w.t_rec.selectRow(0)
+        check(not w.b_rec_retry.isHidden() and not w.b_rec_sent.isHidden() and w.b_rec_unsent.isHidden(),
+              "23 选中没发成的:有「重试」「标成已发」")
+        w.stack.setCurrentIndex(3)
+        w.rec_retry()
+        check(w.stack.currentWidget() is tab and tab.day() == "10.22" and tab.selected_rows() == [0],
+              f"23 重试 = 跳到 16 个号页、选中这条(不自己发) -> {tab.day()} {tab.selected_rows()}")
+        check(rec.status_of(v.path) == "", "23 重试不会自己发")
+        w._ask = lambda *a, **k: True
+        w.t_rec.selectRow(0)
+        w.rec_mark(True)
+        check(rec.status_of(v.path) == "已发", "23 标成已发")
+        p2 =api_root / "CSGO--CSGO战神君" / "10.22" / "不确定的那条.mp4"
+        p2.write_bytes(b"x")
+        tab.reload_dates()
+        v2 = next(x for x in tab.videos if x.path == str(p2))
+        rec.api_begin(v2)
+        w.refresh_records()
+        row = next(k for k in range(w.t_rec.rowCount()) if w.t_rec.item(k, 3).text() == "不确定的那条")
+        w.t_rec.selectRow(row)
+        check(w.t_rec.item(row, 4).text() == "不确定发没发" and not w.b_rec_unsent.isHidden() and w.b_rec_retry.isHidden(),
+              "23 不确定发没发的:有「标成没发出去」,先不能重试")
+        w.rec_mark(False)
+        check(rec.status_of(str(p2)) == "", "23 标成没发出去:之后能再发")
+        # 21:日期统一写 10.19
+        check(w.daily.d.displayFormat() == "M.d", "21 每日汇总的日期写 10.19")
+        w.refresh_records()
+        pubs = [w.t_rec.item(k, 6).text() for k in range(w.t_rec.rowCount()) if w.t_rec.item(k, 6).text()]
+        check(pubs and all(re.match(r"^\d{1,2}\.\d{1,2} \d\d:\d\d", x) for x in pubs), f"21 数据记录的时间写 10.19 10:30 -> {pubs}")
+        # 19:设置里「发完挪到」只能改前面那段;改坏了的换回按月份
+        got = {}
+
+        def settings(dlg):
+            if not dlg:
+                return
+            got["warn"] = [x.text() for x in dlg.findChildren(QLabel) if "没有 {month}" in x.text()]
+            got["tpl"] = [x.text() for x in dlg.findChildren(QLabel) if x.text().startswith("\\{month}")]
+            ed = [x for x in dlg.findChildren(QLineEdit) if x.text() == r"X:\知乎视频\内容查看"]
+            got["n"] = len(ed)
+            if ed:
+                ed[0].setText(str(tmp / "教育归档"))
+            dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+        _modal(app, settings)
+        w.edit_settings()
+        check(got.get("warn") and r"\{month}月发布视频\企鹅号\教育" in got.get("tpl", []) and got.get("n") == 2,
+              f"19 模板那半截灰字不能改;改坏了的红字说换回来了 -> {got}")
+        check(st["archive_root"] == os.path.join(str(tmp / "教育归档"), r"{month}月发布视频\企鹅号\教育"),
+              f"19 存的是 前半截 + 模板 -> {st['archive_root']}")
+        check(st["api_archive"] == r"X:\知乎视频\内容查看\{month}月发布视频\企鹅号\企鹅号软件发布", f"19 没动的不变 -> {st['api_archive']}")
+        w.close()
+        w.deleteLater()
+    finally:
+        GW.C.decide, GW.C.note_wide, QMessageBox.information = real
+        apiacc.save(accs0)
+    # 22:relink 只在原来的文件已经不在了才改(同号同名的另一份不算成已发)
+    from qe import folders as F
+    a = tmp / "relink" / "甲" / "同名.mp4"
+    b = tmp / "relink" / "乙" / "同名.mp4"
+    for p in (a, b):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    r2 = Records(tmp / "r_relink.sqlite")
+    v = F.Video(path=str(a), title="同名", account="家长小天地", employee="甲", date="10.21")
+    r2.manual_published(v)
+    rid = r2.rows()[0]["id"]
+    check(not r2.relink(rid, str(b)) and r2.status_of(str(b)) == "", "22 原来那份还在:另一份同名的不算已发")
+    a.unlink()
+    check(r2.relink(rid, str(b)) and r2.status_of(str(b)) == "已发", "22 原来那份没了(被挪了 / 改了名):认新位置")
+
+
 def _no_dialogs():
     """测试里不弹框:中文确认框(gui.api_tab.ask)一律点「是」,提示框一律关掉(不然 offscreen 下会一直等人点)。"""
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -2882,6 +3099,7 @@ if __name__ == "__main__":
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)
+    test_cd_items(tmp)
     test_api_wm(tmp)
     test_edu_wm(tmp)
     test_blur(tmp)

@@ -14,8 +14,8 @@ from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-                               QPushButton, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from qe import cover as C
 from qe import folders as F
@@ -115,6 +115,9 @@ class BlurWorker(QThread):
 
 
 WAIT_NOTE = "上传中(这批一起传,传完再一条条弄封面)"
+READY = "摆好等发布"          # 记录里的「摆好」:在罐头里摆好了,还没点发布(审查 17:原来「摆好没发 / 没发 / 还没发」三个词混着用)
+PICK_DAY = "先在左上角「要发哪天的」里选一天"       # 审查 13:刚打开是空白,不知道先干什么
+PICK_EMP = "左边勾上要发的员工(可以勾好几个)"
 
 
 class BatchWorker(QThread):
@@ -240,7 +243,8 @@ class MainWindow(QMainWindow):
         top.addWidget(self.lab_root, 1)
         self._top = top
         v.addLayout(top)
-        self.cards = StatCards([("all", "勾上的视频"), ("sent", "已发"), ("ready", "摆好没发"), ("todo", "还没发")])
+        # 用词统一(审查 17):已发 / 摆好等发布(在罐头里摆好了、还没点发布)/ 还没发(还没动过)/ 没发成(出错了)
+        self.cards = StatCards([("all", "勾上的视频"), ("sent", "已发"), ("ready", READY), ("todo", "还没发")])
         v.addWidget(self.cards)
         self.hint = QLabel("")
         self.hint.setObjectName("hint")
@@ -260,7 +264,7 @@ class MainWindow(QMainWindow):
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
-        self.lab_sum = QLabel("左边勾上要发的员工")
+        self.lab_sum = QLabel(PICK_DAY)
         rv.addWidget(self.lab_sum)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["标题(= 文件名)", "号", "员工", "封面", "状态"])
@@ -323,14 +327,24 @@ class MainWindow(QMainWindow):
         self.b_blur.setToolTip("查到水印的(标黄的),把水印那块糊掉(只糊水印出现的那几段);原片挪进同文件夹的「水印原片」,不删。")
         self.b_blur.clicked.connect(self.run_blur)
         self.blur_worker = None
-        self.b_allok = QPushButton("全部调好了")
-        self.b_allok.setToolTip("封面都在「预览封面」里看过、调好了:点这个,勾上的员工里标黄的封面都算没问题,不再停下来等你。\n"
+        self.b_allok = QPushButton("封面都看过了")       # 审查 16:原来叫「全部调好了」,看不出是说封面
+        self.b_allok.setToolTip("标黄的封面都在「预览封面」里看过、调好了:点这个,勾上的员工里标黄的封面都算没问题,不再停下来等你。\n"
                                 "(换了封面图的又会标黄;定时发布时还标黄的不发,留给你)")
         self.b_allok.clicked.connect(self.all_covers_ok)
         self.b_sched = QPushButton("摆好并定时发出…")
         self.b_sched.setToolTip("选哪天的素材、几点发:软件现在就一批一批在罐头里摆好,每批点罐头的「全部定时发布」定到那个点。\n"
                                 "摆完电脑能关,到点企鹅号自己发。没摆好的再试一次,还不行就关掉不发,接着摆别的。")
         self.b_sched.clicked.connect(self.schedule_clicked)
+        # 审查 18:主按钮上面一行绿字写「这次摆 N 条 / 跳过 N 条(为什么)」(像 16 个号页那样)
+        self.lab_scope = QLabel("")
+        self.lab_scope.setObjectName("scope")
+        self.lab_scope.setWordWrap(True)
+        v.addWidget(self.lab_scope)
+        from PySide6.QtCore import QTimer
+        self._scope_timer = QTimer(self)              # 一行一行刷的时候(认封面 / 查水印)攒一下再算,不每行都算一遍
+        self._scope_timer.setSingleShot(True)
+        self._scope_timer.setInterval(200)
+        self._scope_timer.timeout.connect(self._update_scope)
         for b in (self.b_wm, self.b_blur, self.b_go, self.b_stop, self.b_sent, self.b_drop):
             bar.addWidget(b)
         bar.addWidget(self.k_auto)
@@ -361,7 +375,7 @@ class MainWindow(QMainWindow):
         title = QLabel("数据记录 · 每条哪天、哪个号、什么时候发的")
         title.setObjectName("pageTitle")
         rv2.addWidget(title)
-        self.rec_cards = StatCards([("sent", "已发"), ("fail", "没发成"), ("unsure", "不确定发没发"), ("ready", "摆好没发")])
+        self.rec_cards = StatCards([("sent", "已发"), ("fail", "没发成"), ("unsure", "不确定发没发"), ("ready", READY)])
         rv2.addWidget(self.rec_cards)
         rh = QHBoxLayout()
         rh.addWidget(QLabel("日期:"))
@@ -378,18 +392,47 @@ class MainWindow(QMainWindow):
         rv2.addLayout(rh)
         rv2.addWidget(QLabel("每个员工发了多少:"))
         self.t_sum = QTableWidget(0, 9)
-        self.t_sum.setHorizontalHeaderLabels(["日期", "号", "员工", "已发", "摆好没发", "没发成", "结果不明", "第一条发布", "最后一条发布"])
+        self.t_sum.setHorizontalHeaderLabels(["日期", "号", "员工", "已发", READY, "没发成", "结果不明", "第一条发布", "最后一条发布"])
         self.t_sum.verticalHeader().setVisible(False)
         self.t_sum.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.t_sum.setMaximumHeight(220)
         rv2.addWidget(self.t_sum)
         rv2.addWidget(QLabel("每一条:"))
+        self.rec_empty = QLabel("")                   # 审查 20:空表没提示,不知道是没记录还是坏了
+        self.rec_empty.setObjectName("hint")
+        self.rec_empty.setWordWrap(True)
+        self.rec_empty.hide()
+        rv2.addWidget(self.rec_empty)
         self.t_rec = QTableWidget(0, 8)
         self.t_rec.setHorizontalHeaderLabels(["日期", "号", "员工", "标题", "状态", "摆好 / 开始发", "发布时间", "备注(没发成的原因)"])
         self.t_rec.verticalHeader().setVisible(False)
         self.t_rec.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.t_rec.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.t_rec.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.t_rec.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        rh2 = self.t_rec.horizontalHeader()           # 标题能拖宽窄,备注占剩下的(原来备注被挤得只剩几个字)
+        rh2.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        rh2.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self.t_rec.setColumnWidth(3, 320)
+        self.t_rec.itemSelectionChanged.connect(self._rec_sel)
         rv2.addWidget(self.t_rec, 1)
+        # 审查 23:点一条没发成 / 不确定发没发的,下面直接能「重试 / 标成已发」
+        ra = QHBoxLayout()
+        self.lab_rec_sel = QLabel("")
+        self.lab_rec_sel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        ra.addWidget(self.lab_rec_sel, 1)
+        self.b_rec_retry = QPushButton("重试(去 16 个号页)")
+        self.b_rec_retry.setToolTip("跳到「16 个号」页、选好这一天和这一条;你再点「再发一次没发成的」就发(不会自己发)")
+        self.b_rec_retry.clicked.connect(self.rec_retry)
+        self.b_rec_sent = QPushButton("标成已发")
+        self.b_rec_sent.setToolTip("你去企鹅号后台看了,其实发出去了:记成已发,软件不会再发它")
+        self.b_rec_sent.clicked.connect(lambda: self.rec_mark(True))
+        self.b_rec_unsent = QPushButton("标成没发出去")
+        self.b_rec_unsent.setToolTip("你去企鹅号后台看了,没发出去:记成没发成,之后能再发")
+        self.b_rec_unsent.clicked.connect(lambda: self.rec_mark(False))
+        for b in (self.b_rec_retry, self.b_rec_sent, self.b_rec_unsent):
+            ra.addWidget(b)
+        rv2.addLayout(ra)
+        self._rec_sel()
         # 外壳:左边导航(教育号 / 16 个号 / 数据记录 / 设置),右边一页一页换(用户选的「抖音创作者中心」那种)
         from gui.daily_tab import DailyTab
         self.daily = DailyTab(self.st, self.rec, self)
@@ -407,19 +450,25 @@ class MainWindow(QMainWindow):
         root = self.st["material_root"]
         self.lab_root.setText(f"素材在 {root}")
         self.lab_root.setToolTip(root)
-        dates = F.list_dates(root)
-        cur = self.c_date.currentText() or self.st.get("last_date", "")
-        self.c_date.blockSignals(True)
-        self.c_date.clear()
-        self.c_date.addItem("(选一天)", "")
-        for d in dates:
-            self.c_date.addItem(d, d)
-        i = self.c_date.findData(cur)
-        self.c_date.setCurrentIndex(i if i > 0 else 0)
-        self.c_date.blockSignals(False)
+        from gui.widgets import fill_dates, newest_first
+        dates = newest_first(F.list_dates(root))        # 审查 15:和 16 个号页一样,最新的在上面
+        cur = self.c_date.currentData() or self.st.get("last_date", "")
+        fill_dates(self.c_date, dates, cur, "(选一天)", empty={d for d in dates if not self._date_has_files(root, d)})
         if not dates:
             self.say(f"素材文件夹里没有日期文件夹:{root}(网络盘连上了吗?)")
         self._load_tree()
+
+    def _date_has_files(self, root: str, date: str) -> bool:
+        """这天有没有东西(下拉里没视频的灰掉):有认得出的号文件夹、而且里面不是空的。只看一两层,不把网络盘翻到底。"""
+        try:
+            for dirs in F.account_dirs(root, date, self.st).values():
+                for d in dirs:
+                    with os.scandir(d) as it:
+                        if any(True for _e in it):
+                            return True
+        except OSError:
+            return True                                # 打不开的不灰(说不准),点进去会说打不开
+        return False
 
     def _load_tree(self):
         date = self.c_date.currentData() or ""
@@ -460,6 +509,9 @@ class MainWindow(QMainWindow):
                         it.setCheckState(0, Qt.CheckState.Checked if (acc, d, emp) in keep else Qt.CheckState.Unchecked)
                         top.addChild(it)
                         n_all += len(vids)
+                for kind, p, n in rep:                 # 审查 11:名字带「已发」的文件夹不再悄悄消失,留一行灰的说为什么不发
+                    if kind == "跳过" and n:
+                        top.addChild(self._grey_row(os.path.basename(p), f"{n} 条,不发", p, self._skip_why(p)))
                 top.setText(1, (f"{n_all} 条" if dirs else "这天没有它的文件夹") + (f",⚠ {bad} 个文件夹打不开" if bad else ""))
                 self.tree.addTopLevelItem(top)
                 top.setExpanded(True)
@@ -467,8 +519,38 @@ class MainWindow(QMainWindow):
             if unk:
                 self.say(f"⚠ {date} 里这些文件夹没读(认不出是哪个号 / 两个号都像 / 名字带已发):{'、'.join(unk)}"
                          "(是哪个号的,就在「设置」里给号加上这个缩写)")
+                top = QTreeWidgetItem(["没读的文件夹", f"{len(unk)} 个"])
+                top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                top.setToolTip(0, "这天里认不出是哪个号的文件夹,里面的视频没读")
+                for u in unk:
+                    top.addChild(self._grey_row(u, "没读", os.path.join(root, date, u),
+                                                "认不出是哪个号的(名字带「已发 / 不要」,或者两个号都像,或者缩写没在设置里)。\n"
+                                                "是哪个号的,就在左下角「设置」→「号和缩写」里给号加上这个名字,再点「刷新」。"))
+                for c in range(2):
+                    top.setForeground(c, QBrush(QColor("#8a8b91")))
+                self.tree.addTopLevelItem(top)
+                top.setExpanded(True)
         self.tree.blockSignals(False)
         self._load_videos()
+
+    @staticmethod
+    def _grey_row(name: str, count: str, path: str, why: str) -> QTreeWidgetItem:
+        """左边不能勾的灰行:跳过的 / 没读的文件夹(右键能打开它看看)。"""
+        it = QTreeWidgetItem([f"{name}(不发)" if count != "没读" else name, count])
+        it.setFlags((it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable) | Qt.ItemFlag.ItemIsEnabled)
+        it.setData(0, Qt.ItemDataRole.UserRole, path)                 # 只有路径(右键「打开这个文件夹」用);没有号 / 员工,勾不了
+        for c in range(2):
+            it.setForeground(c, QBrush(QColor("#a8a9ae")))
+            it.setToolTip(c, f"{path}\n\n{why}")
+        return it
+
+    @staticmethod
+    def _skip_why(p: str) -> str:
+        name = os.path.basename(p).strip()
+        if name in F.ORIG_DIRS:
+            return f"「{name}」里是处理前的原片(转竖屏 / 糊水印 / 剪广告以前的),处理好的那份已经在外面了,不再发。"
+        return ("文件夹名带「已发 / 不能用 / 不要 / 重复 / 作废 / 脏话」,软件当成不发的。\n"
+                "里面的其实要发:让员工把名字里这些字去掉,再点「刷新」。")
 
     def _emp_text(self, vids) -> str:
         """员工那行第二列:几条、发了几条、几条没无字封面、几条不发(同名 / 发过 / 坏的)。"""
@@ -541,7 +623,7 @@ class MainWindow(QMainWindow):
             top = self.tree.topLevelItem(i)
             for k in range(top.childCount()):
                 it = top.child(k)
-                if it.checkState(0) == Qt.CheckState.Checked:
+                if it.checkState(0) == Qt.CheckState.Checked and it.data(0, Qt.ItemDataRole.UserRole + 2):   # 灰行(不发的文件夹)不算
                     out.append((it.data(0, Qt.ItemDataRole.UserRole + 1), it.data(0, Qt.ItemDataRole.UserRole + 2),
                                 it.data(0, Qt.ItemDataRole.UserRole + 3)))
         return out
@@ -573,6 +655,7 @@ class MainWindow(QMainWindow):
         if todo:
             self.cover_worker = CoverWorker(self.videos, self.adj, self)
             self.cover_worker.one.connect(self._fill_row)
+            self.cover_worker.finished.connect(self._update_scope)     # 认完了:「这次摆几条」重算
             self.cover_worker.start()
         self._refresh_buttons()
 
@@ -591,7 +674,8 @@ class MainWindow(QMainWindow):
         wmb = not (stt or note or skip) and wmstore.blocks(v.wm)       # 查到水印、人还没说没问题:不摆
         wtxt = f"有水印:{checks.wm_text(v.wm)}" if wmb else ""
         newt = "" if stt else titleclean.clean(v.title)
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt or note or (f"不发:{skip}" if skip else wtxt or "没发")]):
+        stt_txt = READY if stt == "摆好" else stt
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or "还没发")]):
             it = QTableWidgetItem(t)
             if c == 4 and (note or skip):
                 it.setToolTip(note or skip)
@@ -616,14 +700,61 @@ class MainWindow(QMainWindow):
                 it.setToolTip(f"摆的时候标题会改成:{newt}(去掉乱码 / @ 那段;文件名不动)")
                 it.setText(f"{v.title}  → {newt}")
             self.table.setItem(i, c, it)
+        if hasattr(self, "_scope_timer"):
+            self._scope_timer.start()
 
     def _update_sum(self):
         n = len(self.videos)
         st = [self.rec.status_of(v.path) for v in self.videos]
-        self.lab_sum.setText("" if n else "左边勾上要发的员工")
+        self.lab_sum.setText("" if n else PICK_DAY if not self.c_date.currentData() else PICK_EMP)
         self.lab_sum.setVisible(not n)
         self.cards.set(all=n, sent=(st.count("已发"), "good" if n and st.count("已发") == n else ""),
                        ready=(st.count("摆好"), "warn" if st.count("摆好") else ""), todo=st.count(""))
+        self._update_scope()
+
+    def _skip_reasons(self) -> list[tuple[str, list]]:
+        """勾上的里面这次不摆的,按原因分:[(原因, [视频])](绿字那行和「摆下一批」确认框共用)。"""
+        from qe import titleclean, wmstore
+        left = [v for v in self.videos if not self.rec.status_of(v.path)]
+        out = [("没无字封面", [v for v in left if (v.cover_kind or v.cover_why) and not v.cover and not v.skip]),
+               ("同名 / 发过 / 坏文件", [v for v in left if v.skip]),
+               ("有水印", [v for v in left if not v.skip and wmstore.blocks(v.wm)]),
+               ("标题有广告词", [v for v in left if not v.skip and titleclean.ad_problem(v.account, v.title)])]
+        return [(k, vs) for k, vs in out if vs]
+
+    def _update_scope(self):
+        """审查 18:主按钮上面写清楚「这次摆 N 条 / 跳过 N 条(为什么)」。"""
+        if not hasattr(self, "lab_scope"):
+            return
+        if not self.c_date.currentData():
+            text, tip = PICK_DAY, ""
+        elif not self.videos:
+            text, tip = PICK_EMP + ",这里会写这次摆几条", ""
+        elif self.worker and self.worker.isRunning() or self.batch_id:
+            text, tip = "", ""                         # 正在摆 / 等确认:上面横幅写着呢
+        else:
+            acc, vids = self.next_batch()
+            todo = self._todo()
+            nb = len({v.account for v in todo})
+            bs = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
+            import math
+            nbatch = sum(math.ceil(sum(1 for v in todo if v.account == a) / bs) for a in {v.account for v in todo})
+            text = (f"这次摆「{acc}」{len(vids)} 条" + (f"(能摆的一共 {len(todo)} 条,分 {nbatch} 批" +
+                                                      (f",{nb} 个号" if nb > 1 else "") + ")" if len(todo) > len(vids) else "")
+                    if vids else "勾上的都发了 / 都不能摆")
+            if self.cover_worker and self.cover_worker.isRunning():
+                text += " · 封面还在认人…"
+            sk = self._skip_reasons()
+            if sk:
+                text += f" · 跳过 {sum(len(vs) for _k, vs in sk)} 条(" + "、".join(f"{k} {len(vs)}" for k, vs in sk) + ")"
+            warn = [v for v in vids if v.warn]
+            if warn:
+                text += f" · 其中 {len(warn)} 条封面标黄,先看一眼"
+            tip = "\n".join(f"{k}:" + "、".join(f"「{v.title[:20]}」" for v in vs[:5]) + ("…" if len(vs) > 5 else "")
+                            for k, vs in sk)
+        self.lab_scope.setText(text)
+        self.lab_scope.setToolTip(tip + ("\n\n(鼠标放在列表的状态上看每条为什么)" if tip else ""))
+        self.lab_scope.setVisible(bool(text))
 
     # ---------- 打开文件所在位置 ----------
     @staticmethod
@@ -850,6 +981,9 @@ class MainWindow(QMainWindow):
             self.hint.show()
         else:
             self.hint.hide()
+        # 审查 16:摆的时候 / 摆好等确认时底栏只留要点的,「查水印 / 模糊水印 / 封面都看过了」先藏起来
+        for b in (self.b_wm, self.b_blur, self.b_allok):
+            b.setVisible(not running and not waiting)
         self.b_go.setEnabled(not running and not self.batch_id)
         self.b_stop.setEnabled(running)
         self.b_sent.setEnabled(not running and bool(self.batch_id))
@@ -858,6 +992,8 @@ class MainWindow(QMainWindow):
         self.c_date.setEnabled(not running)
         self.b_refresh.setEnabled(not running)          # 摆的时候不许刷新(会换掉中间的列表)
         self.tree.setEnabled(not running)
+        if hasattr(self, "lab_scope"):
+            self._update_scope()
 
     def next_batch(self) -> tuple[str, list]:
         """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
@@ -893,16 +1029,29 @@ class MainWindow(QMainWindow):
         wmv = [v for v in self.videos if not self.rec.status_of(v.path) and not v.skip and wmstore.blocks(v.wm)]
         if wmv:
             tail += f"\n\n有 {len(wmv)} 条查到水印没摆(标黄的),比如「{wmv[0].title[:24]}」;不是水印就右键「没水印,能摆」。"
+        from qe import titleclean
+        tad = [v for v in self.videos if not self.rec.status_of(v.path) and not v.skip and titleclean.ad_problem(v.account, v.title)]
+        if tad:
+            tail += f"\n\n有 {len(tad)} 条标题有广告词没摆,比如「{tad[0].title[:24]}」;剪好了就右键「…能摆」。"
         if nocover:
             return (f"能摆的都摆完了,但还有 {len(nocover)} 条没有无字封面(png),没摆,比如「{nocover[0].title[:24]}」。\n\n"
                     "让员工补上 png 以后点「刷新」再摆。" + tail)
-        return "勾上的员工都发完了(或者都摆好了等你确认)。" + tail
+        if tail:
+            return "能摆的都摆完了,剩下的这次不摆:" + tail
+        return "勾上的员工都发完了(或者都摆好了等你确认)。"
 
     def _auto_toggled(self, on: bool):
         if on:
             self.say("已勾上:摆好后软件自己点「全部发布」,接着摆下一批(有问题会停下来叫你)")
 
     def start_batch(self, chained: bool = False):
+        if not self._unattended and not chained:        # 审查 10:没勾员工原来说「都发完了」,人以为发完了
+            if not self.c_date.currentData():
+                QMessageBox.information(self, "摆下一批", PICK_DAY + ",再勾上员工。")
+                return
+            if not self.checked_dirs():
+                QMessageBox.information(self, "摆下一批", "你还没勾员工:先在左边勾上要发的员工(可以勾好几个),再点「摆下一批」。")
+                return
         busy = ("还在查水印,查完再摆(或者点「停查水印」)。" if self.wm_worker and self.wm_worker.isRunning() else
                 "还在糊水印,糊完再摆。" if getattr(self, "blur_worker", None) and self.blur_worker.isRunning() else
                 "封面还在认人,等几秒再点。" if self.cover_worker and self.cover_worker.isRunning() else "")
@@ -1077,8 +1226,10 @@ class MainWindow(QMainWindow):
             r = ask_schedule(self, "定时发布 · 教育号", dates, self.c_date.currentData() or "",
                              "用罐头自带的「全部定时发布」:点「定好了」软件就开始一批一批摆,每批都定时到这个点。\n"
                              "摆完电脑就能关,到点企鹅号自己发。只能定 7 天以内、分钟选 00 / 05 / 10 … 55。\n"
-                             "还标黄的封面不发(先在「预览封面」里看好,点「全部调好了」);没摆好的再试一次,还不行关掉不发。",
-                             tip="这里的时间都是北京时间(企鹅号也按北京时间算)。")
+                             "还标黄的封面不发(先在「预览封面」里看好,点「封面都看过了」);没摆好的再试一次,还不行关掉不发。",
+                             tip="这里的时间都是北京时间(企鹅号也按北京时间算)。",
+                             head="教育号用罐头自带的定时:软件现在就一批批摆好定上,摆完电脑就能关,到点企鹅号自己发。",
+                             overview=self._sched_overview)
             if not r:
                 return
             at, date = r
@@ -1105,27 +1256,42 @@ class MainWindow(QMainWindow):
             return
         self._sched_fire(date, at)
 
-    def _sched_estimate(self, date: str) -> tuple[int, int]:
-        """定时前估一下:这天还有几条没发、要摆几批(一批只能一个号,每个号按「一批几条」分)。"""
-        import math
+    def _sched_counts(self, date: str) -> dict[str, int]:
+        """这天每个号还有几条没发(不算不发的)。"""
         per: dict[str, int] = {}
         try:
             for acc, dirs in F.account_dirs(self.st["material_root"], date, self.st).items():
-                for d in dirs:
-                    per[acc] = per.get(acc, 0) + sum(1 for v in F.scan_account(d, acc, date)
-                                                     if not v.skip and not self.rec.status_of(v.path))
+                vs = [v for d in dirs for v in F.scan_account(d, acc, date)]
+                F.mark_dups(vs, prefer=lambda v: bool(self.rec.status_of(v.path)))     # 同号同名只算一条
+                per[acc] = sum(1 for v in vs if not v.skip and not self.rec.status_of(v.path))
         except OSError:
             pass
+        return {k: n for k, n in per.items() if n}
+
+    def _sched_estimate(self, date: str) -> tuple[int, int]:
+        """定时前估一下:这天还有几条没发、要摆几批(一批只能一个号,每个号按「一批几条」分)。"""
+        import math
+        per = self._sched_counts(date)
         bs = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
         return sum(per.values()), sum(math.ceil(k / bs) for k in per.values())
+
+    def _sched_overview(self, date: str) -> str:
+        """定时框最上面的总览(审查 12):这天每个号要摆几条、几批。"""
+        import math
+        per = self._sched_counts(date)
+        if not per:
+            return "这天没有要发的视频(都发过了 / 还没有素材)"
+        bs = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
+        return (f"要摆 {sum(per.values())} 条(封面还标黄的不发):" +
+                "、".join(f"{a} {n} 条({math.ceil(n / bs)} 批)" for a, n in per.items()))
 
     def all_covers_ok(self):
         vs = [v for v in self.videos if v.warn and v.cover and not self.rec.status_of(v.path)]
         if not vs:
-            QMessageBox.information(self, "全部调好了", "勾上的员工里现在没有标黄的封面。" if self.videos else "左边先勾上员工。")
+            QMessageBox.information(self, "封面都看过了", "勾上的员工里现在没有标黄的封面。" if self.videos else "左边先勾上员工。")
             return
-        if not self._ask("全部调好了", f"勾上的员工里有 {len(vs)} 条封面标黄。\n\n都在「预览封面」里看过、调好了?点了以后它们不再标黄,"
-                                       "自动发布 / 定时发布不会再为它们停下来。", "都调好了", "还没看完"):
+        if not self._ask("封面都看过了", f"勾上的员工里有 {len(vs)} 条封面标黄。\n\n都在「预览封面」里看过、调好了?点了以后它们不再标黄,"
+                                        "自动发布 / 定时发布不会再为它们停下来。", "都看过了", "还没看完"):
             return
         for v in vs:
             self.adj.set_ok(v.path, v.cover)
@@ -1153,7 +1319,8 @@ class MainWindow(QMainWindow):
         for k in range(self.tree.topLevelItemCount()):
             top = self.tree.topLevelItem(k)
             for j in range(top.childCount()):
-                top.child(j).setCheckState(0, Qt.CheckState.Checked)
+                if top.child(j).data(0, Qt.ItemDataRole.UserRole + 2):     # 员工行才勾(灰的「不发」文件夹不勾)
+                    top.child(j).setCheckState(0, Qt.CheckState.Checked)
         self.tree.blockSignals(False)
         self._load_videos()
         self._unattended, self._sched_skip, self._sched_tries, self._sched_at = True, set(), 0, at
@@ -1378,14 +1545,14 @@ class MainWindow(QMainWindow):
                 return tuple(int(x) for x in str(d).split(".")[:2])
             except ValueError:
                 return (99, 99)
-        dates = sorted({r["date"] for r in self.rec.rows()}, key=_dk)
+        dates = sorted({r["date"] for r in self.rec.rows()}, key=_dk, reverse=True)    # 和另外两页一样:最新的在上面
         self.c_rec_date.blockSignals(True)
         self.c_rec_date.clear()
         self.c_rec_date.addItem("全部", "")
         for d in dates:
             self.c_rec_date.addItem(d, d)
         i = self.c_rec_date.findData(cur) if cur is not None else -1
-        self.c_rec_date.setCurrentIndex(i if i >= 0 else (self.c_rec_date.count() - 1 if dates else 0))   # 默认最新的一天
+        self.c_rec_date.setCurrentIndex(i if i >= 0 else (1 if dates else 0))   # 默认最新的一天
         self.c_rec_date.blockSignals(False)
         date = self.c_rec_date.currentData() or ""
         s = self.rec.summary(date)
@@ -1394,17 +1561,27 @@ class MainWindow(QMainWindow):
                            unsure=(tot["unsure"], "warn" if tot["unsure"] else ""), ready=tot["ready"],
                            sent_sub="" if date else "全部日期")
         self.t_sum.setRowCount(len(s))
-        def short(t):                              # 「2026-10-15 18:42:45」→「10-15 18:42:45」(审查:时分秒被截掉了)
-            return str(t or "")[5:] if str(t or "")[:2] == "20" else str(t or "")
+        def short(t):                              # 「2026-10-15 18:42:45」→「10.15 18:42:45」(审查:时分秒被截掉了;21:日期统一写 10.15)
+            s = str(t or "")
+            if s[:2] == "20" and len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                return f"{int(s[5:7])}.{int(s[8:10])}{s[10:]}"
+            return s
         for i, x in enumerate(s):
             for c, k in enumerate(["date", "account", "employee", "sent", "ready", "failed", "unsure", "first_at", "last_at"]):
                 val = x[k] if x[k] is not None else ""
                 self.t_sum.setItem(i, c, QTableWidgetItem(short(val) if k.endswith("_at") else str(val)))
         rows = self.rec.rows(date)
+        self._rec_rows = rows
+        self.rec_empty.setText("" if rows else
+                               ("还没有记录。在「教育号」摆好、点了「这批发好了」,或者在「16 个号」发了以后,这里会一条条记下来。"
+                                if not dates else f"{date} 这天没有记录,上面换个日期看看(或者选「全部」)。"))
+        self.rec_empty.setVisible(not rows)
         self.t_rec.setRowCount(len(rows))
         for i, x in enumerate(rows):
             for c, k in enumerate(["date", "account", "employee", "title", "status", "prepared_at", "published_at", "note"]):
                 val = short(x[k]) if k.endswith("_at") else str(x[k] or "")
+                if k == "status":
+                    val = {"摆好": READY, "结果不明": "不确定发没发", "发布中": "不确定发没发"}.get(val, val)
                 if k == "employee" and val == "接口":
                     val = "16 个号"                       # 接口发的,员工一栏写人话
                 if k == "note" and val.startswith("article_id="):
@@ -1419,12 +1596,91 @@ class MainWindow(QMainWindow):
                         item.setBackground(QBrush(QColor("#ffe7eb" if x["status"] == "没发成" else "#ffeedd")))
         for c in (0, 1, 2, 4, 5, 6):
             self.t_rec.resizeColumnToContents(c)
+        self._rec_sel()
         self.t_sum.resizeColumnsToContents()
         self.t_sum.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for i in range(self.t_sum.rowCount()):
             it = self.t_sum.item(i, 2)
             if it and it.text() == "接口":
                 it.setText("16 个号")
+
+    def _rec_cur(self) -> dict | None:
+        rows = sorted({ix.row() for ix in self.t_rec.selectedIndexes()})
+        recs = getattr(self, "_rec_rows", [])
+        return recs[rows[0]] if rows and rows[0] < len(recs) else None
+
+    def _rec_sel(self):
+        """审查 23:选中一条没发成 / 不确定发没发的,下面的「重试 / 标成已发」才亮。"""
+        r = self._rec_cur()
+        now = self.rec.status_of(r["path"]) if r else ""
+        bad = bool(r) and r["status"] in ("没发成", "结果不明", "发布中") and now != "已发"
+        unsure = bad and now == "结果不明"
+        api = bool(r) and r["employee"] == "接口"
+        if not r:
+            txt = "点一条「没发成 / 不确定发没发」的(红的),这里能重试或者标成已发"
+        elif r["status"] in ("没发成", "结果不明", "发布中") and now == "已发":
+            txt = f"「{r['title'][:24]}」后来发成了,不用管"
+        elif unsure:
+            txt = f"「{r['title'][:24]}」不确定发没发:先去企鹅号后台看一眼,再点下面的"
+        elif bad:
+            txt = f"「{r['title'][:24]}」没发成:{(r['note'] or '')[:40]}"
+        else:
+            txt = ""
+        self.lab_rec_sel.setText(txt)
+        self.b_rec_retry.setVisible(api and bad and not unsure)
+        self.b_rec_sent.setVisible(bad)
+        self.b_rec_unsent.setVisible(unsure)
+
+    def rec_mark(self, sent: bool):
+        r = self._rec_cur()
+        if not r:
+            return
+        if self.api_tab.busy() and not getattr(self.api_tab, "_quiet", False):
+            QMessageBox.information(self, "数据记录", "16 个号那边正在发,发完再改。")
+            return
+        what = "标成已发" if sent else "标成没发出去"
+        if not self._ask(what, f"「{r['title'][:40]}」\n\n" + ("你去企鹅号后台看了,这条其实发出去了?记成已发以后软件不会再发它。" if sent else
+                                                         "你去企鹅号后台看了,这条没发出去?记成没发成,之后能在「16 个号」页再发。"),
+                         what, "先不"):
+            return
+        if self.rec.status_of(r["path"]) == "结果不明":
+            self.rec.resolve_unsure(r["path"], sent)
+        elif sent:
+            self.rec.mark_sent(r["id"])
+        self.say(f"数据记录:「{r['title'][:30]}」{what}")
+        if not self.api_tab.busy():
+            self.api_tab.load()                       # 16 个号页的状态跟着变
+        self.refresh_records()
+
+    def rec_retry(self):
+        """跳到 16 个号页、选好这天和这一条;发不发还是人点「现在发布 / 再发一次没发成的」(这里不发)。"""
+        r = self._rec_cur()
+        if not r:
+            return
+        tab = self.api_tab
+        if tab.busy() and not getattr(tab, "_quiet", False):
+            QMessageBox.information(self, "重试", "16 个号那边正在发 / 处理别的,弄完再重试。")
+            return
+        self.stack.setCurrentWidget(tab)
+        if tab.day() != r["date"] and not tab.set_day(r["date"]):
+            QMessageBox.information(self, "重试", f"16 个号页里没有「{r['date']}」这天了(素材挪走了?)。")
+            return
+        from qe.records import pkey
+        k = pkey(r["path"])
+        i = next((j for j, v in enumerate(tab.videos) if pkey(v.path) == k), None)
+        if i is None or i not in tab.items:
+            QMessageBox.information(self, "重试", f"「{r['date']}」里找不到这条了(文件被改名 / 挪走了?):\n{r['title']}")
+            return
+        tab.k_bad.setChecked(False)
+        tab.e_find.clear()
+        it = tab.items[i]
+        tab.tree.clearSelection()
+        if it.parent():
+            it.parent().setExpanded(True)
+        it.setSelected(True)
+        tab.tree.setCurrentItem(it)
+        tab.tree.scrollToItem(it)
+        tab.say(f"从数据记录跳过来:选中了「{r['title'][:30]}」,要再发就点下面的「再发一次没发成的」")
 
     def export_records(self):
         date = self.c_rec_date.currentData() or ""
@@ -1477,10 +1733,39 @@ class MainWindow(QMainWindow):
             h.addWidget(b)
             return w, e
 
+        def tpl_row(text: str, default: str):
+            """审查 19:「发完挪到」里的 {month} / {date} 容易被改坏(真填成过 …\\教育\\10.15)→ 只让改前面那段(盘 + 文件夹),
+            带 {month} 的后半截灰字不能改。原来的已经坏了(没有 { })就换回默认的后半截,红字说一声。返回 (控件, 前半截框, 取完整路径)。"""
+            def split(t):
+                i = t.find("{")
+                j = max(t.rfind("\\", 0, i), t.rfind("/", 0, i)) if i >= 0 else -1
+                return (t[:j], t[j + 1:]) if j >= 0 else ("", t)
+            pre, suf = split(text)
+            broken = "{" not in text
+            if broken:
+                pre, suf = split(default)
+            w0 = QWidget()
+            vv = QVBoxLayout(w0)
+            vv.setContentsMargins(0, 0, 0, 0)
+            w1, e1 = path_row(pre)
+            e1.setMinimumWidth(300)
+            lab = QLabel("\\" + suf)
+            lab.setStyleSheet("color:#8a8b91")
+            lab.setToolTip("这半截是按月份 / 日期自动换的({month} = 月份,{date} = 日期),不能改")
+            w1.layout().insertWidget(1, lab)
+            vv.addWidget(w1)
+            if broken:
+                warn = QLabel(f"原来填的「{text}」里没有 {{month}},每个月都会挪到同一个地方 —— 已经换回按月份的,点「确定」才存")
+                warn.setStyleSheet("color:#fe2c55")
+                warn.setWordWrap(True)
+                vv.addWidget(warn)
+            return w0, e1, lambda: (os.path.join(e1.text().strip().rstrip("\\/") + "\\", suf) if e1.text().strip() else "")
+
         g1 = QGroupBox("教育号(在创作罐头里摆,人点发布)")
         f = QFormLayout(g1)
         w_root, e_root = path_row(self.st["material_root"])
-        w_arc, e_arc = path_row(self.st["archive_root"])
+        from qe.config import DEFAULTS
+        w_arc, e_arc, arc_get = tpl_row(self.st["archive_root"], DEFAULTS["archive_root"])
         e_acc = QPlainTextEdit("\n".join(f"{a['name']}={'、'.join(a.get('aliases') or [])}" for a in self.st["accounts"]))
         e_acc.setToolTip("一行一个号:罐头里的号名=日期文件夹下面的缩写(几个用顿号隔开)")
         e_acc.setMaximumHeight(70)
@@ -1494,7 +1779,7 @@ class MainWindow(QMainWindow):
         prev.setWordWrap(True)
 
         def show_prev():
-            prev.setText("比如 10.15 那天的会挪到:" + os.path.join(e_arc.text().replace("{month}", "10"), "10.15"))
+            prev.setText("比如 10.15 那天的会挪到:" + os.path.join(arc_get().replace("{month}", "10"), "10.15"))
         e_arc.textChanged.connect(lambda _t: show_prev())
         show_prev()
         f.addRow("", prev)
@@ -1512,7 +1797,7 @@ class MainWindow(QMainWindow):
         sp_gap.setRange(0, 600)
         sp_gap.setSuffix(" 秒")
         sp_gap.setValue(_num(self.st.get("api_interval"), 5))
-        w_api, e_api_arc = path_row(self.st.get("api_archive", ""))
+        w_api, e_api_arc, api_get = tpl_row(self.st.get("api_archive", "") or DEFAULTS["api_archive"], DEFAULTS["api_archive"])
         k_game = QCheckBox("按游戏放进子文件夹(CSGO、DNF、光与夜之恋 …)")
         k_game.setChecked(bool(self.st.get("api_archive_by_game", True)))
         f2.addRow("发成了挪到", w_api)
@@ -1578,10 +1863,10 @@ class MainWindow(QMainWindow):
             elif line.strip():
                 accs.append({"name": line.strip(), "aliases": []})
         self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
-                       archive_root=e_arc.text().strip() or self.st["archive_root"], accounts=accs or self.st["accounts"],
+                       archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
                        api_threads=sp_thr.value(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
-                       api_archive=e_api_arc.text().strip() or self.st.get("api_archive", ""),
+                       api_archive=api_get() or self.st.get("api_archive", ""),
                        api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or "")
         C.AI_KEY = self.st.ai_key()
         self.st.save()

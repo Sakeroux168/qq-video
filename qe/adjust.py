@@ -78,7 +78,7 @@ class Adjustments:
             self._save()
 
     def set_ok(self, video: str, cover: str):
-        """人点了「全部调好了」:这张封面现在这样就行,不再标黄(换了封面图就不算了,又会标黄)。"""
+        """人点了「封面都看过了」:这张封面现在这样就行,不再标黄(换了封面图就不算了,又会标黄)。"""
         self.d.setdefault(video, {})["ok"] = cover
         self._save()
 
