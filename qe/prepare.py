@@ -72,6 +72,30 @@ class Runner:
         self.port = ports[0]
         self.page: Page | None = None
         self.account = ""
+        self._awake_at = 0.0                             # 上次叫醒罐头的时间(最小化了任务不动,2026-10-19)
+        self._told_min = False
+        # A 放在单独的小哨兵里每秒看一次:主流程卡在「等罐头回话」时也照样能把窗口恢复
+        # (2026-10-19 实测:只在等待的循环里看,第二次最小化白等了 95 秒)。摆完 close() 就停,平时你最小化罐头它不管
+        import threading
+        self._closed = threading.Event()
+        threading.Thread(target=self._window_guard, daemon=True).start()
+
+    # ---------------- 罐头最小化了任务不动(用户 2026-10-19) ----------------
+    def awake(self, force: bool = False):
+        """A:罐头被最小化 → 悄悄恢复成普通窗口(不抢焦点、放最后面);B:叫这个页面别「省电」(当成一直在前台)。
+        最多 3 秒做一次;等东西的时候一直调。"""
+        now = time.time()
+        if not force and now - self._awake_at < 3:
+            return
+        self._awake_at = now
+        self._unmin()
+        if self.page:
+            for method, params in (("Emulation.setFocusEmulationEnabled", {"enabled": True}),
+                                   ("Page.setWebLifecycleState", {"state": "active"})):
+                try:
+                    self.page.cmd(method, params, timeout=5)
+                except Exception:                        # 叫不醒也不耽误摆
+                    pass
 
     # ---------------- 小工具 ----------------
     def _chk(self):
@@ -82,6 +106,7 @@ class Runner:
         end = time.time() + s
         while time.time() < end:
             self._chk()
+            self.awake()
             time.sleep(min(0.25, max(0.0, end - time.time())))
 
     def ev(self, js: str, timeout: float = 20):
@@ -92,6 +117,7 @@ class Runner:
         end = time.time() + timeout
         while time.time() < end:
             self._chk()
+            self.awake()
             try:
                 v = self.ev(js)
             except CdpError:
@@ -142,6 +168,7 @@ class Runner:
     def open_account(self, name: str) -> None:
         """在罐头里点开这个号(已经开着就切过去),拿到它那个看得见的企鹅号页面。"""
         self._chk()
+        self.awake(force=True)
         home = self._home()
         try:
             # 先看顶上已经开着的页签(用户在首页搜了别的号时,列表里就没有它了)
@@ -176,6 +203,7 @@ class Runner:
                     self.page.close()
                 self.page = Page(ts[0])
                 self.account = name
+                self.awake(force=True)
                 self.log(f"罐头里打开了「{name}」")
                 return
             if len(ts) > 1:
@@ -244,6 +272,7 @@ class Runner:
         last = 0
         while time.time() < end:
             self._chk()
+            self.awake()
             st = self.ev("""(() => { const f = [...document.querySelectorAll('.omui-inputautogrowing__inner')].find(e => window.__qe.vis(e));
                 const box = f && f.closest('.omui-panel');
                 const t = (box || document.body).innerText || '';
@@ -805,7 +834,23 @@ class Runner:
                 return
             self.sleep(0.8)
 
+    def _unmin(self):
+        try:
+            from .winfix import unminimize
+            if unminimize() and not self._told_min:
+                self._told_min = True
+                self.log("罐头被最小化了(最小化会让它停住),软件把它恢复了,放在别的窗口后面,不挡你")
+        except Exception:
+            pass
+
+    def _window_guard(self):
+        while not self._closed.wait(1.0):
+            self._unmin()
+
     def close(self):
+        closed = getattr(self, "_closed", None)
+        if closed is not None:
+            closed.set()                                 # 哨兵收工
         if self.page:
             self.page.close()
             self.page = None

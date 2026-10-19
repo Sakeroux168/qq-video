@@ -11,6 +11,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QE_DATA_DIR", tempfile.mkdtemp(prefix="qe_data_"))
+os.environ.setdefault("QE_NO_WINFIX", "1")                 # 测试时别去恢复真罐头的窗口
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 fails = []
@@ -2717,6 +2718,39 @@ def test_pub_progress(tmp: Path):
     check(tab.pub_strip.spd.text() == "↑ 51 KB/s", f"慢的时候写 KB/s -> {tab.pub_strip.spd.text()}")
 
 
+def test_awake(tmp: Path):
+    print("[罐头最小化了任务不动(2026-10-19):摆的时候一直叫醒页面;最小化了悄悄恢复(测试里不动真窗口)]")
+    from qe import prepare, winfix
+    calls = []
+
+    class FakePage:
+        def cmd(self, method, params=None, timeout=20):
+            calls.append((method, params))
+            if method == "Page.setWebLifecycleState":
+                raise prepare.CdpError("不支持")         # 叫不醒也不耽误
+            return {}
+    r = prepare.Runner.__new__(prepare.Runner)
+    r.log, r.stopped, r.page, r._awake_at, r._told_min = (lambda m: None), (lambda: False), FakePage(), 0.0, False
+    r.awake()
+    check(("Emulation.setFocusEmulationEnabled", {"enabled": True}) in calls
+          and ("Page.setWebLifecycleState", {"state": "active"}) in calls, f"叫页面别省电 -> {calls}")
+    n = len(calls)
+    r.awake()
+    check(len(calls) == n, "3 秒内不重复叫")
+    r.awake(force=True)
+    check(len(calls) == n + 2, "换号的时候马上叫")
+    check(winfix.unminimize() == 0, "测试里不去动真罐头的窗口")
+    import threading
+    r._closed = threading.Event()
+    t = threading.Thread(target=r._window_guard, daemon=True)
+    t.start()
+    r.page = None
+    r.close()
+    t.join(3)
+    check(not t.is_alive(), "摆完 close():看窗口的小哨兵跟着收工(平时你最小化罐头它不管)")
+    check(isinstance(winfix.czgt_windows(), list), "能找罐头窗口(找不到就是空的)")
+
+
 def test_misfire_api(tmp: Path):
     print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
@@ -3263,6 +3297,7 @@ if __name__ == "__main__":
     test_sched_api(tmp)
     test_ui_g(tmp)
     test_pub_progress(tmp)
+    test_awake(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)
