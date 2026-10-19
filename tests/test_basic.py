@@ -2123,6 +2123,27 @@ def test_cover_dialog_src(tmp: Path):
     check(Adjustments(tmp / "adj_dlg.json").use_own(v2) and v2.png.endswith("我选的.png"), "关了再开:还是用你选的")
     dlg.set_cover("")
     check(v.cover.endswith("横屏16x9.png") and not adj.own_cover(v.path), "用回自动配的")
+    # 用户 2026-10-19:员工忘了处理封面 → 复制封面图 / 去豆包处理 / 打开封面文件夹
+    from PySide6.QtGui import QDesktopServices
+    import subprocess
+    opened, ran = [], []
+    real = (QDesktopServices.openUrl, subprocess.Popen)
+    QDesktopServices.openUrl = staticmethod(lambda u: opened.append(u.toString()) or True)
+    subprocess.Popen = lambda args, *a, **k: ran.append(args)
+    try:
+        QApplication.clipboard().clear()
+        check(dlg.copy_cover() and QApplication.clipboard().image().width() == 640, "复制封面图:剪贴板里是这张图")
+        QApplication.clipboard().clear()
+        dlg.to_doubao()
+        check(opened == [dlg.DOUBAO] and QApplication.clipboard().image().width() == 640 and "Ctrl+V" in dlg.lab_toast.text(),
+              f"去豆包处理:先复制封面,再在浏览器里打开豆包 -> {opened}")
+        dlg.open_cover_dir()
+        check(ran and ran[-1][0] == "explorer" and ran[-1][-1].endswith("横屏16x9.png"), f"打开封面文件夹并选中它 -> {ran}")
+        dlg._src_path = ""
+        QApplication.clipboard().clear()
+        check(not dlg.copy_cover() and QApplication.clipboard().image().isNull(), "没有封面:复制不了,写一句")
+    finally:
+        QDesktopServices.openUrl, subprocess.Popen = real
     dlg.close()
 
 
