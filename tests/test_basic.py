@@ -1570,6 +1570,38 @@ def test_window_renamed(tmp: Path):
     w.close()
 
 
+def test_at_titles(tmp: Path):
+    print("[标题带 @某某 / @某平台 的不能发(16 个号算有问题,教育号跳过)]")
+    from types import SimpleNamespace as NS
+    from qe import checks
+    check(checks.at_hits("好看的视频@腾讯游戏 #英雄联盟") == ["@腾讯游戏"] and checks.at_hits("联系＠小王 有惊喜") == ["＠小王"]
+          and checks.at_hits("没有艾特的标题#英雄联盟") == [], "认得出半角 @ 和全角 ＠,没有的不乱报")
+    v = NS(title="五杀集锦 @抖音小助手 #英雄联盟", checks={"w": 1080, "h": 1920, "tags": ["英雄联盟"], "platform": []})
+    check(any("@抖音小助手" in p for p in checks.problems(v)), f"16 个号:带 @ 的算有问题(不让发)-> {checks.problems(v)}")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from gui.window import MainWindow
+    from qe.config import Settings
+    from qe.records import Records
+    root = tmp / "素材at"
+    d = root / "10.20" / "小天地" / "张"
+    d.mkdir(parents=True)
+    for t in ("正常的一条视频标题", "带艾特的视频@某平台官方"):
+        (d / f"{t}.mp4").write_bytes(b"x")
+        _img(d / f"{t}.png", 640, 360)
+    st = Settings(tmp / "s_at.json")
+    st["material_root"] = str(root)
+    st["api_roots"] = [str(tmp / "api_none")]
+    st["ai_key"] = "test"
+    w = MainWindow(st, Records(tmp / "r_at.sqlite"))
+    w.c_date.setCurrentIndex(w.c_date.findData("10.20"))
+    vs = [v for vv in w._scan.values() for v in vv]
+    bad = next(v for v in vs if "艾特" in v.title)
+    ok = next(v for v in vs if "正常" in v.title)
+    check("@" in (bad.skip or "") and not ok.skip, f"教育号:带 @ 的跳过、写清楚原因 -> {bad.skip}")
+    w.close()
+
+
 def test_schedule(tmp: Path):
     print("[定时发布:定好 / 到点 / 软件没开着错过了 / 别让电脑睡]")
     from PySide6.QtWidgets import QApplication
@@ -2539,6 +2571,7 @@ if __name__ == "__main__":
     test_daily_plan(tmp)
     test_login_key(tmp)
     test_window_renamed(tmp)
+    test_at_titles(tmp)
     test_schedule(tmp)
     test_prepare_retry(tmp)
     test_sched_edu(tmp)

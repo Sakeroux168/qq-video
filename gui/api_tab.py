@@ -981,8 +981,7 @@ class ApiTab(QWidget):
             if t.startswith("已发") and not self.state.get(i, "").startswith("已发"):
                 self.today_sent = self.rec.sent_on(plan.today())
             self.state[i] = t
-            if t.startswith(("上传", "发布中")) and i in self.items:   # 发布中:列表跟着滚到正在发的那条
-                self.tree.scrollToItem(self.items[i])
+            # 不再跟着滚到正在发的那条(用户 2026-10-18:发布的时候列表一直往回跳,没法上下翻看别的);进度看下面那行绿字
         if i in self.items:
             self._fill(i)
 

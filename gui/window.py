@@ -484,6 +484,11 @@ class MainWindow(QMainWindow):
         ③ 同一天的(文件夹被改了名:10.17 有人把「10.14」改成「10.14（101）」)就是发过的那条 → 记下新位置,
         直接算「已发」(不然显示没发,人会再标一遍手动发过,每日汇总就多算了)。"""
         F.mark_dups(vs, prefer=lambda v: bool(self.rec.status_of(v.path)))
+        from qe.checks import at_hits
+        for v in vs:                                  # 标题带 @某某 / @某平台 的坚决不发(用户 2026-10-18)
+            ats = at_hits(v.title)
+            if ats and not v.skip and not self.rec.status_of(v.path):
+                v.skip = f"标题里有「{'、'.join(ats[:2])}」,带 @ 的不能发(让员工把 @ 那段删掉再发)"
         sent = {}
         for r in self.rec.rows():
             if r["status"] == "已发":
