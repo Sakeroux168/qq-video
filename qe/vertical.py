@@ -5,7 +5,8 @@
 - 用显卡编码 h264_nvenc,声音直接拷不重编;显卡不行就退回 libx264 veryfast。
 - 用百家号发布助手2 带的 ffmpeg 4.2.2(ainame 带的 ffmpeg 8 要新显卡驱动,这台用不了)。
 
-原片不删:挪到同一个文件夹里的「横屏原片」里,转好的竖屏用原来的名字放回原处。
+原片:keep_orig=True 挪到同一个文件夹里的「横屏原片」里;keep_orig=False(16 个号页,用户 2026-10-20:「处理完原视频就不需要了
+直接删了就行」)转好以后直接删掉。转好的竖屏都用原来的名字放回原处;转失败的什么都不动。
 """
 import os
 import re
@@ -79,8 +80,8 @@ def _cmd(ff: str, src: str, dst: str, nvenc: bool) -> list[str]:
             *enc, "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", dst]
 
 
-def to_vertical(path: str, ffmpeg: str = "", stop=None) -> tuple[str, str]:
-    """转成竖屏,原片挪进「横屏原片」。返回 (竖屏的位置, 原片的新位置)。
+def to_vertical(path: str, ffmpeg: str = "", stop=None, keep_orig: bool = True) -> tuple[str, str]:
+    """转成竖屏,原片挪进「横屏原片」(keep_orig=False:原片删掉)。返回 (竖屏的位置, 原片的新位置;删了就是 "")。
     出错一律抛 RuntimeError,原片放回原处、临时文件删掉(2026-10-15 审查:OSError 时会留下 _处理中_ 文件)。"""
     ff = ffmpeg or ffmpeg_path()
     if not ff:
@@ -89,7 +90,7 @@ def to_vertical(path: str, ffmpeg: str = "", stop=None) -> tuple[str, str]:
     # 临时文件名带进程号和随机数:同名的 a.mov / a.mp4 一起转不会抢同一个临时文件
     tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:6]}_{src.stem}.mp4")
     try:
-        return _convert(src, tmp, ff, stop)
+        return _convert(src, tmp, ff, stop, keep_orig)
     except RuntimeError:
         raise
     except OSError as e:
@@ -98,7 +99,7 @@ def to_vertical(path: str, ffmpeg: str = "", stop=None) -> tuple[str, str]:
         tmp.unlink(missing_ok=True)
 
 
-def _convert(src: Path, tmp: Path, ff: str, stop) -> tuple[str, str]:
+def _convert(src: Path, tmp: Path, ff: str, stop, keep_orig: bool = True) -> tuple[str, str]:
     err = ""
     for nvenc in (True, False):
         try:
@@ -122,6 +123,8 @@ def _convert(src: Path, tmp: Path, ff: str, stop) -> tuple[str, str]:
         tmp.unlink(missing_ok=True)
     else:
         raise RuntimeError(f"转竖屏失败:{err[-200:] or '不知道为什么'}")
+    if not keep_orig:
+        return _replace_orig(src, tmp)
     odir = src.parent / ORIG_DIR
     if odir.exists() and not odir.is_dir():
         raise RuntimeError(f"转竖屏失败:文件夹里有个叫「{ORIG_DIR}」的文件挡着,原片没地方放")
@@ -154,3 +157,19 @@ def _convert(src: Path, tmp: Path, ff: str, stop) -> tuple[str, str]:
         os.replace(orig, src)                       # 新的放不回去:把原片挪回来,当没转过
         raise
     return str(out), str(orig)
+
+
+def _replace_orig(src: Path, tmp: Path) -> tuple[str, str]:
+    """转好的放回原名,原片删掉(转好的已经确认过不是空文件)。a.mp4:直接盖掉原来的;a.mov:放成 a.mp4(撞名加 (2)),再删 a.mov。"""
+    from .topic import _numbered
+    out = src.with_suffix(".mp4")
+    if os.path.normcase(str(out)) == os.path.normcase(str(src)):
+        os.replace(tmp, src)                            # 一步换掉:要么还是原片,要么已经是竖屏的
+        return str(src), ""
+    k = 2
+    while out.exists():
+        out = src.with_name(f"{_numbered(src.stem, k)}.mp4")
+        k += 1
+    os.rename(tmp, out)
+    src.unlink(missing_ok=True)
+    return str(out), ""

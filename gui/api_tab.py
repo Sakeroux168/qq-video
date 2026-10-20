@@ -248,7 +248,7 @@ class ApiTab(QWidget):
         self.b_check.add("查口播广告", lambda: self.run_ads(),
                          "把视频里说的话转成文字,找「点击下方链接」「扫码」「得物」这类广告词,标出第几秒。转过的不再转")
         self.b_vert = QPushButton("转标准竖屏")
-        self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n原片挪进同文件夹的「横屏原片」,不删。")
+        self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n转好以后原来的横屏视频直接删掉(转失败的不动)。")
         self.b_vert.clicked.connect(lambda: self.run_vertical())
         self.b_blur = MenuButton("去水印 / 广告")
         self.b_blur.setToolTip("查到的水印糊掉、查到的口播广告剪掉。原片都留着(「水印原片」「广告原片」),不删。")
@@ -510,6 +510,44 @@ class ApiTab(QWidget):
             from gui.widgets import Confetti
             Confetti(self.hero)                         # 发完撒一把彩带
 
+    def _spill(self, nick: str, emit=None) -> int:
+        """这个号今天发够了:列表里它还没发的(没发过 / 没发成的)连同同名封面挪到明天的日期文件夹(没有就建,和这天的放一起)。
+        手选的文件夹(名字不是日期)不挪,明天接着从那里发。返回挪了几条。"""
+        tmr = plan.tomorrow_folder()
+        n = 0
+        for i, v in enumerate(self.videos):
+            if v.account != nick or self.state.get(i, "").startswith("已发") or self.rec.status_of(v.path) or not os.path.isfile(v.path):
+                continue
+            d = os.path.dirname(v.path)
+            if not apisrc.date_key(os.path.basename(d)):
+                continue
+            dst = os.path.join(os.path.dirname(d), tmr)
+            try:
+                stem = os.path.splitext(v.path)[0]
+                for f in [v.path] + [stem + e for e in (".jpg", ".jpeg", ".png", ".webp") if os.path.isfile(stem + e)]:
+                    plan.move_noclobber(f, dst)
+                n += 1
+                if emit:
+                    emit(i, f"挪到明天({tmr})")
+            except OSError as e:
+                (emit or (lambda *_a: None))(-1, f"「{v.title}」挪不到明天的文件夹:{e}")
+        if n:
+            (emit or (lambda _i, m: self.say(m)))(-1, f"「{nick}」今天发够规定条数了,还没发的 {n} 条挪到明天的文件夹 {tmr}")
+        return n
+
+    def _quota_cap(self, idxs) -> tuple[int, int]:
+        """这些能发的里,按每个号今天还能发几条,真正会发几条;多出来几条(发够以后挪到明天)。"""
+        sent = getattr(self, "today_sent", None) or {}
+        by: dict[str, int] = {}
+        for i in idxs:
+            by[self.videos[i].account] = by.get(self.videos[i].account, 0) + 1
+        n = extra = 0
+        for nick, c in by.items():
+            left = plan.left_today(self.rec, self.st, nick, sent=sent)
+            k = c if left is None else min(c, left)
+            n, extra = n + k, extra + c - k
+        return n, extra
+
     def _gap_h(self) -> int:
         """明细收起时大字往下放多少:窗口高的一成多一点,看着在中间偏上。"""
         content = (self.hero.sizeHint().height() + self.card_v.sizeHint().height() + self.b_detail.sizeHint().height() + 40)
@@ -596,6 +634,8 @@ class ApiTab(QWidget):
         elif ok:
             big, tone = f"{ok} 条可以发了", ""
             sub = f"还有 {bad} 条有点小问题,处理好能多发 {bad} 条" if bad else "都检查过了,没有问题"
+            if getattr(self, "_over", 0):
+                sub += f" · 另外 {self._over} 条超过今天的规定条数,发够以后挪到明天"
         elif n + gone and sent + gone >= n + gone:
             big, sub, tone = "这天的都发完了 √", "", "good"
         elif bad:
@@ -694,7 +734,7 @@ class ApiTab(QWidget):
         else:
             self.lab_scope.setText(f"没选:管全部 {len(rows)} 条" if rows else "这天没有视频")
         self.b_clear.setVisible(bool(sel))
-        n = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
+        n, _over = self._quota_cap([i for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED)])
         # 重试:号的密钥坏了的不算(再点也必然失败,体验报告)
         retry = sum(1 for i in rows if self._can_send(i) and self.state.get(i, "").startswith(FAILED)
                     and "密钥" not in self.state.get(i, ""))
@@ -1039,7 +1079,7 @@ class ApiTab(QWidget):
         n = len(self.videos)
         sent = sum(1 for i in range(n) if self.state.get(i, "").startswith("已发"))
         checked = [i for i in range(n) if self.videos[i].checks]
-        ok = sum(1 for i in range(n) if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
+        ok, self._over = self._quota_cap([i for i in range(n) if self._can_send(i) and not self.state.get(i, "").startswith(FAILED)])
         bad = sum(1 for i in checked if checks.problems(self.videos[i]) and not self._sent(i))
         fail = sum(1 for i in range(n) if self.state.get(i, "").startswith(FAILED[:2]))
         accs = {}
@@ -1378,6 +1418,9 @@ class ApiTab(QWidget):
         self._popup = None
         if pop:
             QMessageBox.warning(self, pop[0], pop[1]) if pop[2] else QMessageBox.information(self, pop[0], pop[1])
+        if getattr(self, "_reload_after", False):          # 多的挪到明天了:重读列表(挪走的不在这天了)
+            self._reload_after = False
+            self.load()
 
     def stop(self):
         if self.job and self.job.isRunning():
@@ -1494,7 +1537,7 @@ class ApiTab(QWidget):
         if not rows:
             QMessageBox.information(self, "横屏转竖屏", "这些里没有横屏 / 偏方的(没检查过的先点「检查」)。")
             return
-        if not ask(self, "横屏转竖屏", f"{self._who(rows)}转成标准竖屏(1080×1920)?横屏、偏方(3:4 / 正方形)的都转。\n\n原片挪进同一个文件夹里的「横屏原片」,不删。", "转", "先不"):
+        if not ask(self, "横屏转竖屏", f"{self._who(rows)}转成标准竖屏(1080×1920)?横屏、偏方(3:4 / 正方形)的都转。\n\n转好的用原来的名字放回去,原来的横屏视频直接删掉(转失败的不动)。", "转", "先不"):
             return
         vs = self.videos
         ff = vertical.ffmpeg_path()
@@ -1504,7 +1547,7 @@ class ApiTab(QWidget):
             v = vs[i]
             emit(i, "转竖屏中…")
             try:
-                new, _orig = vertical.to_vertical(v.path, ff, stop=stopped)
+                new, _orig = vertical.to_vertical(v.path, ff, stop=stopped, keep_orig=False)   # 用户 2026-10-20:原片不要了
             except Exception as e:
                 if stopped() or str(e) == "停下了":
                     emit(i, "停下了,没转")
@@ -1939,6 +1982,29 @@ class ApiTab(QWidget):
         by_acc: dict[str, list[int]] = {}
         for i in rows:
             by_acc.setdefault(self.videos[i].account, []).append(i)
+        # 每天规定条数的闸(用户 2026-10-20 PUBG 多发了 21 条):每个号最多发到规定条数;没发成的拿下一条补;
+        # 发够了这个号还没发的挪到明天的文件夹。设置里「开闸」才不管
+        sent0 = self.rec.sent_on(plan.today())
+        left_of = {n: plan.left_today(self.rec, self.st, n, sent=sent0) for n in by_acc}
+        full = [n for n, x in left_of.items() if x == 0]
+        for n in full:
+            by_acc.pop(n)
+        tmr = plan.tomorrow_folder()
+        if not by_acc:
+            moved = sum(self._spill(n) for n in full)
+            QMessageBox.information(self, "发布", f"这些号今天已经发够规定条数了:{'、'.join(full)}。这次不发。" +
+                                    (f"\n\n它们还没发的 {moved} 条挪到了明天的文件夹({tmr})。" if moved else "") +
+                                    "\n\n真要多发:去「设置」里打开「开闸:允许超过每天规定条数」。")
+            if moved:
+                self.load()
+            return
+        plan_n = sum(len(idx) if left_of[n] is None else min(len(idx), left_of[n]) for n, idx in by_acc.items())
+        over = sum(len(idx) for idx in by_acc.values()) - plan_n
+        quota_line = (("⚠ 闸开着:不管每天规定条数,能发的都发。\n" if self.st.get("quota_open", False) else "") +
+                      (f"按每天规定条数:" + "、".join(f"{n} 还能发 {left_of[n]} 条" for n, idx in by_acc.items()
+                                               if left_of[n] is not None and len(idx) > left_of[n]) +
+                       f",多的 {over} 条发够以后挪到明天的文件夹({tmr})。\n" if over else "") +
+                      (f"今天已经发够的号这次不发:{'、'.join(full)}(它们没发的也挪到明天)。\n" if full else ""))
         par = max(1, _num(self.st.get("api_threads"), 1))
         per_acc = max(1, min(5, _num(self.st.get("api_per_acc"), 1)))   # 同一个号一次传几条(用户 2026-10-19,默认 1)
         gap = max(0.0, float(_num(self.st.get("api_interval"), 5)))
@@ -1946,7 +2012,7 @@ class ApiTab(QWidget):
         dest = apisrc.archive_dir(self.st)                 # 按发出去的那天(北京时间)分
         per = "\n".join(f"  · {n}:{len(idx)} 条 · {apiacc.CATEGORIES.get(accs[n].get('category'), accs[n].get('category'))}" +
                         (f" → {apisrc.game_folder(accs[n])}" if by_game else "") for n, idx in by_acc.items())
-        mins = max(1, round(len(rows) * (gap + 25) / 60 / par / min(per_acc, 3)))   # 一条大概传 + 发 25 秒,加上间隔(同时传 3 条以上网就满了)
+        mins = max(1, round(plan_n * (gap + 25) / 60 / par / min(per_acc, 3)))   # 一条大概传 + 发 25 秒,加上间隔(同时传 3 条以上网就满了)
         # 确认框:第一行大白话;号多就写个概要,细节放「显示详细信息」(体验报告:15 行号列表 + 声明细节太长)
         names = [f"{n} {len(idx)}" for n, idx in by_acc.items()]
         brief = "、".join(names) if len(names) <= 5 else "、".join(names[:4]) + f" … 等 {len(names)} 个号"
@@ -1957,7 +2023,7 @@ class ApiTab(QWidget):
         cat_line = "分类:" + "、".join(f"{c} {k} 个号" for c, k in catn.items())
         today = f"{bj_now().month}.{bj_now().day}"
         warn_day = f"⚠ 注意:这是 {d} 的,不是今天({today})!\n\n" if d != today else ""
-        msg = (warn_day + f"发 {d} 的 {len(rows)} 条 · {len(by_acc)} 个号 · 大概 {mins} 分钟\n\n{brief}\n{cat_line}\n\n" +
+        msg = (warn_day + f"发 {d} 的 {plan_n} 条 · {len(by_acc)} 个号 · 大概 {mins} 分钟\n\n{brief}\n{cat_line}\n\n" + quota_line +
                (f"其中 {retry} 条是上次没发成的,再试一次。\n" if retry else "") +
                (f"有问题的 {held} 条这次不发。\n" if held else "") + "\n发吗?")
         from qe import apicover
@@ -1980,7 +2046,7 @@ class ApiTab(QWidget):
         gate = {"last": 0.0}
         glock = threading.Lock()
         upsem = threading.Semaphore(6 if per_acc > 1 else 10 ** 6)       # 所有号加起来同时最多传 6 条(4 个号 × 5 条挤在一起反而慢)
-        stats = {"ok": 0, "fail": 0, "unsure": 0, "skip": 0, "done": 0, "bad_acc": [], "fails": []}
+        stats = {"ok": 0, "fail": 0, "unsure": 0, "skip": 0, "done": 0, "bad_acc": [], "fails": [], "acc_ok": {}}
         slock = threading.Lock()
 
         def bump(k, n=1):
@@ -2002,7 +2068,7 @@ class ApiTab(QWidget):
             bump("done")
             if self.job and self.job._stop.is_set():
                 return
-            emit(PROGRESS, f"正在发 {stats['done']}/{len(rows)} · 成功 {stats['ok']} · 没发成 {stats['fail']}" +
+            emit(PROGRESS, f"正在发 {min(stats['done'], plan_n)}/{plan_n} · 成功 {stats['ok']} · 没发成 {stats['fail']}" +
                  (f" · 结果不明 {stats['unsure']}" if stats["unsure"] else "") + "(点「停」:手上这条做完就停)")
 
         def acc_job(nick, idx, emit, stopped):
@@ -2073,7 +2139,7 @@ class ApiTab(QWidget):
                     emit(-1, f"「{nick}」{v.title}:结果不明 —— 去企鹅号后台看一眼,再右键标「发了 / 没发」")
                     bump("unsure")
                     done_one(emit)
-                    return "next"
+                    return "unsure"                       # 可能已经发了:算进今天的条数(宁可少发也不多发)
                 except Exception as e:
                     raw = redact(str(e)) if isinstance(e, ApiError) else f"{type(e).__name__}: {redact(str(e))}"
                     short, tip = friendly(e)
@@ -2106,7 +2172,7 @@ class ApiTab(QWidget):
                     emit(i, "已发(但没记上,去后台核对)")
                     emit(-1, f"「{v.title}」发出去了,但发布记录写不进去({type(e).__name__}),先不挪文件。软件不会再发它;去后台核对一下")
                     done_one(emit)
-                    return "next"
+                    return "ok"
                 try:
                     old = v.path
                     v.path = apisrc.move_published(v.path, apisrc.archive_dir(self.st, "", a))
@@ -2127,31 +2193,36 @@ class ApiTab(QWidget):
                 bump("skip", len(left))
                 with slock:
                     stats["bad_acc"].append(nick)
-            if per_acc == 1:                                   # 一条一条发(原来的样子)
-                for k, i in enumerate(idx):
-                    r1 = one(k, i)
-                    if r1 == "stop":
-                        return
-                    if r1 == "fatal":
-                        fatal_rest(idx[k + 1:])
-                        return
-                return
+            def run1(ki):
+                with upsem:
+                    return "stop" if stopped() else one(ki[0], ki[1], turn=False)
+            # 用户 2026-10-20:发到这个号今天的规定条数就停(need = 还能发几条;None = 不限),没发成的拿下一条补
             # 用户 2026-10-19:同一个号一次传几条 —— 一组同时传,这组都发完歇「间隔」秒再下一组;所有号加起来同时最多 6 条
-            for g0 in range(0, len(idx), per_acc):
-                if stopped() or not wait_turn(stopped):
-                    return
-                grp = list(enumerate(idx[g0:g0 + per_acc], g0))
-
-                def run1(ki):
-                    with upsem:
-                        return "stop" if stopped() else one(ki[0], ki[1], turn=False)
-                with ThreadPoolExecutor(len(grp)) as ex:
-                    res1 = list(ex.map(run1, grp))
-                if "fatal" in res1:
-                    fatal_rest(idx[g0 + len(grp):])
-                    return
-                if "stop" in res1:
-                    return
+            need = left_of.get(nick)
+            okc, pos = 0, 0
+            try:
+                while pos < len(idx) and (need is None or okc < need):
+                    if stopped():
+                        return
+                    size = per_acc if need is None else min(per_acc, need - okc)
+                    grp = list(enumerate(idx[pos:pos + size], pos))
+                    pos += len(grp)
+                    if per_acc == 1:                           # 一条一条发(原来的样子)
+                        res1 = [one(*grp[0])]
+                    else:
+                        if not wait_turn(stopped):
+                            return
+                        with ThreadPoolExecutor(len(grp)) as ex:
+                            res1 = list(ex.map(run1, grp))
+                    okc += res1.count("ok") + res1.count("unsure")
+                    if "fatal" in res1:
+                        fatal_rest(idx[pos:])
+                        return
+                    if "stop" in res1:
+                        return
+            finally:
+                with slock:
+                    stats["acc_ok"][nick] = okc
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(par) as ex:
@@ -2160,10 +2231,23 @@ class ApiTab(QWidget):
                         f.result()
                     except Exception as e:
                         emit(-1, f"「{n}」发的时候出了没想到的错({type(e).__name__}),这个号后面的先没发;已经发的记着呢")
-            not_run = len(rows) - stats["ok"] - stats["fail"] - stats["unsure"] - stats["skip"]
+            not_run = plan_n - stats["ok"] - stats["unsure"]
+            spilled, short = 0, []
+            if not stopped():
+                for n in list(by_acc) + full:
+                    need = left_of.get(n)
+                    if need is None:
+                        continue
+                    if n in full or stats["acc_ok"].get(n, 0) >= need:
+                        spilled += self._spill(n, emit)            # 发够了:多的挪到明天
+                    else:
+                        short.append(f"{n} 还差 {need - stats['acc_ok'].get(n, 0)} 条")
             summary = (f"发完了:成功 {stats['ok']} · 没发成 {stats['fail']} · 结果不明 {stats['unsure']}" +
                        (f" · 号的密钥坏了没发 {stats['skip']}({'、'.join(stats['bad_acc'])})" if stats["skip"] else "") +
-                       (f" · 停下了没发 {not_run}" if stopped() and not_run > 0 else ""))
+                       (f" · 停下了没发 {not_run}" if stopped() and not_run > 0 else "") +
+                       (f" · 发够了,多的 {spilled} 条挪到明天的文件夹({tmr})" if spilled else "") +
+                       (f" · 没发够(素材不够 / 没发成):{'、'.join(short)}" if short else ""))
+            self._reload_after = bool(spilled)
             bad = stats["fail"] or stats["unsure"] or stats["skip"]
             lst = "".join(f"\n · {t[:26]}:{why}" for t, why in stats["fails"][:6]) + \
                 ("\n · …" if len(stats["fails"]) > 6 else "")
@@ -2172,7 +2256,7 @@ class ApiTab(QWidget):
                                                "会接着发没发的(发过的不会重发)。" if bad else ""), bool(bad))
             self._show_bad_after = bool(bad)
             return summary
-        self._pub_begin(len(rows))
+        self._pub_begin(plan_n)
         self._start(fn, f"开始发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
                     (f",同一个号一次传 {per_acc} 条" if per_acc > 1 else "") + f",间隔 {gap:g} 秒")
 

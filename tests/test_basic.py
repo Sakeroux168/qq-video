@@ -3011,6 +3011,150 @@ def test_quick_review(tmp: Path):
     dlg.close()
 
 
+def test_quota_gate(tmp: Path):
+    print("[每天规定条数的闸(2026-10-20 PUBG 多发了 21 条):不能多发、没发成的补上、多的挪到明天、开闸才不管;转竖屏不留原片]")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, plan, vertical
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    tmr = plan.tomorrow_folder()
+    root = tmp / "api_q"
+    accs = [("CSGO", "CSGO战神君")]
+    apiacc.save([{"nick": n, "source_name": g, "client_id": g, "secret": apiacc.seal("s"), "category": 1604, "enabled": True} for g, n in accs])
+    st = Settings(tmp / "st_q.json")
+    check(st.get("quota_open") is False, "默认闸关着(不能超过每天规定条数)")
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 3}},
+                        {"cat": "教育", "label": "教育总发布量", "accounts": {"家长小天地": 2}}]
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "发布q" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    sent = []
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, **k):
+            if "坏" in title:
+                raise omapi.ApiError("上传视频失败:invalid_file_upload(code 40023)", "40023")
+            if before_publish:
+                before_publish("V")
+            sent.append(title)
+            return {"vid": "V", "article_id": "A" + title, "transaction_id": "P", "status": "成功"}
+    real = (omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning)
+    boxes = []
+    omapi.Client, T.ask = Fake, (lambda *a, **k: True)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda _p, t, x, *a, **k: boxes.append(x) or 0)
+    try:
+        def run(names, rec_name):
+            d = root / "游戏视频" / "CSGO--CSGO战神君" / "10.20"
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True)
+            for nm in names:
+                (d / f"{nm}.mp4").write_bytes(b"x")
+                (d / f"{nm}.jpg").write_bytes(b"j")
+            shutil.rmtree(root / "游戏视频" / "CSGO--CSGO战神君" / tmr, ignore_errors=True)
+            rec = Records(tmp / rec_name)
+            tab = T.ApiTab(st, rec, lambda m: None)
+            tab.set_day("10.20")
+            _wait(app, lambda: not tab.busy() and len(tab.videos) == len(names))
+            for v in tab.videos:
+                v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+            tab._update_scope()
+            tab._update_sum()
+            return tab, rec
+        tab, rec = run(["q1", "q2", "q3", "q4", "q5"], "rq1.sqlite")
+        check(tab.b_pub.text() == "现在发布 3 条" and "超过今天的规定条数" in tab.hero.sub.text(),
+              f"按钮只写规定条数以内的;大字下面写多的发够以后挪到明天 -> {tab.b_pub.text()} / {tab.hero.sub.text()}")
+        sent.clear()
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy(), 30)
+        app.processEvents()
+        moved = sorted(os.listdir(root / "游戏视频" / "CSGO--CSGO战神君" / tmr)) if (root / "游戏视频" / "CSGO--CSGO战神君" / tmr).exists() else []
+        check(sorted(sent) == ["q1", "q2", "q3"] and moved == ["q4.jpg", "q4.mp4", "q5.jpg", "q5.mp4"],
+              f"规定 3 条:发 3 条就停,多的 2 条连封面挪到明天的文件夹({tmr})-> 发了 {sent},挪了 {moved}")
+        tab, rec = run(["q1", "坏2", "q3", "q4", "q5"], "rq2.sqlite")
+        sent.clear()
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy(), 30)
+        app.processEvents()
+        moved = sorted(x for x in os.listdir(root / "游戏视频" / "CSGO--CSGO战神君" / tmr) if x.endswith(".mp4"))
+        check(sorted(sent) == ["q1", "q3", "q4"] and moved == ["q5.mp4", "坏2.mp4"],
+              f"中间一条没发成:拿下一条补上,还是发够 3 条(不少发);没发成的也挪到明天 -> 发了 {sent},挪了 {moved}")
+        boxes.clear()
+        tab, rec2 = run(["q6", "q7"], "rq2.sqlite")               # 同一个记录库:今天已经发够 3 条了
+        sent.clear()
+        tab.run_publish()
+        app.processEvents()
+        moved = sorted(x for x in os.listdir(root / "游戏视频" / "CSGO--CSGO战神君" / tmr) if x.endswith(".mp4"))
+        check(not sent and boxes and "已经发够" in boxes[-1] and moved == ["q6.mp4", "q7.mp4"],
+              f"今天已经发够的号:不发,还没发的挪到明天 -> {boxes[-1][:40] if boxes else ''} {moved}")
+        st["quota_open"] = True
+        tab, rec = run(["q1", "q2", "q3", "q4", "q5"], "rq3.sqlite")
+        sent.clear()
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy(), 30)
+        check(len(sent) == 5 and tab.b_pub.text() != "现在发布 3 条", f"开了闸:能发的都发 -> {sent}")
+        st["quota_open"] = False
+    finally:
+        omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
+    # 教育号:最后一批只摆差的那几条;发够了还没发的挪到明天(文件夹结构不变)
+    import gui.window as GW
+    from qe import folders as F
+    eroot = tmp / "素材q"
+    d = eroot / "10.20" / "小天地" / "张"
+    d.mkdir(parents=True)
+    for t in ("一一一一视频", "二二二二视频", "三三三三视频"):
+        (d / f"{t}.mp4").write_bytes(b"x")
+        _img(d / f"{t}.png", 640, 360)
+    st["material_root"] = str(eroot)
+    rec = Records(tmp / "rq_edu.sqlite")
+    real_dec = GW.C.decide
+
+    def fake_decide(v):
+        v.cover, v.cover_kind, v.cover_why, v.plan, v.warn = v.png, "png", "测试", {}, False
+    GW.C.decide = fake_decide
+    try:
+        w = GW.MainWindow(st, rec)
+        w.c_date.setCurrentIndex(w.c_date.findData("10.20"))
+        from PySide6.QtCore import Qt
+        top = next(w.tree.topLevelItem(k) for k in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(k).text(0) == "家长小天地")
+        top.child(0).setCheckState(0, Qt.CheckState.Checked)
+        _wait(app, lambda: not (w.cover_worker and w.cover_worker.isRunning()))
+        acc, vids = w.next_batch()
+        check(acc == "家长小天地" and len(vids) == 2, f"教育号规定 2 条:一批只摆 2 条 -> {len(vids)}")
+        rec.manual_published(vids[0])
+        acc, vids2 = w.next_batch()
+        check(len(vids2) == 1, f"今天发了 1 条:下一批只摆差的 1 条 -> {len(vids2)}")
+        rec.manual_published(vids2[0])
+        check(w.next_batch()[1] == [] and "发够规定条数" in w._nothing_left(), "发够了:不再摆,写清楚发够了")
+        n = w._edu_spill()
+        left = [p.name for p in (eroot / tmr / "小天地" / "张").glob("*")] if (eroot / tmr).exists() else []
+        rest = next(v.title for v in w.videos if v not in (vids[0], vids2[0]))
+        check(n == 1 and sorted(left) == [f"{rest}.mp4", f"{rest}.png"],
+              f"还没发的连封面挪到明天的文件夹,结构不变(小天地\\张)-> {left}")
+        w.close()
+    finally:
+        GW.C.decide = real_dec
+    # 转竖屏不留原片(16 个号页,用户 2026-10-20)
+    ff = vertical.ffmpeg_path()
+    if ff:
+        import subprocess
+        vd = tmp / "vq"
+        vd.mkdir()
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25", "-t", "1",
+                        "-c:v", "libx264", str(vd / "横.mp4")], check=True)
+        out, orig = vertical.to_vertical(str(vd / "横.mp4"), ff, keep_orig=False)
+        info = vertical.probe(out, ff) if hasattr(vertical, "probe") else None
+        check(orig == "" and os.path.basename(out) == "横.mp4" and not (vd / "横屏原片").exists() and sorted(os.listdir(vd)) == ["横.mp4"]
+              and os.path.getsize(out) > 1024, f"转竖屏不留原片:转好的放回原名,原片删了,不建「横屏原片」-> {os.listdir(vd)}")
+        del info
+
+
 def test_misfire_api(tmp: Path):
     print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
@@ -3561,6 +3705,7 @@ if __name__ == "__main__":
     test_yellow_manual(tmp)
     test_api_per_acc(tmp)
     test_quick_review(tmp)
+    test_quota_gate(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

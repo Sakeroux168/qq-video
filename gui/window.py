@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDi
 
 from qe import cover as C
 from qe import folders as F
+from qe import plan
 from qe.config import APP_VERSION, bj_str, data_dir
 from qe.adjust import Adjustments
 from qe.records import Records
@@ -1179,6 +1180,9 @@ class MainWindow(QMainWindow):
             if vids:
                 big, tone = f"下一步:摆「{acc}」{len(vids)} 条", ""
                 sub = "摆好停在发布前,发布你自己点 · " + counts
+                left = self._edu_left(acc)
+                if left is not None:
+                    sub += f" · 「{acc}」今天还能发 {left} 条"
             elif st.count("") == 0:
                 big, sub, tone = "勾上的都发了 √", counts, "good"
             else:
@@ -1186,13 +1190,73 @@ class MainWindow(QMainWindow):
         self.hero.set(big, sub, tone)
 
     def next_batch(self) -> tuple[str, list]:
-        """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。"""
+        """下一批:勾上的里面还没发 / 没摆的,同一个号的前 10 条(一批只能是一个号)。
+        用户 2026-10-20:每个号最多发到这天的规定条数(家长小天地 54 / 家长研习空间 102),最后一批只摆差的那几条。"""
         todo = self._todo()
         if not todo:
             return "", []
         acc = todo[0].account
         n = max(1, min(10, int(self.st.get("batch_size", 10) or 10)))
+        left = self._edu_left(acc)
+        if left is not None:
+            n = min(n, left)
         return acc, [v for v in todo if v.account == acc][:n]
+
+    def _quota_day(self) -> str:
+        """闸按哪天算:罐头定时发到哪天就算哪天,平时算今天(北京时间)。"""
+        at = getattr(self, "_sched_at", "") if self._unattended else ""
+        return at[:10] if at else plan.today()
+
+    def _edu_left(self, acc: str) -> int | None:
+        """这个号这天还能发几条(已经发出去的 / 罐头定时定到这天的都算);不限 = None。"""
+        return plan.left_today(self.rec, self.st, acc, self._quota_day())
+
+    def _edu_spill(self) -> int:
+        """这天发够规定条数的号:勾上的里面它还没发的视频(连同封面)挪到明天的日期文件夹,文件夹结构不变
+        (小学生教育\10.20\小天地\张\a.mp4 → 小学生教育\10.21\小天地\张\a.mp4)。返回挪了几条。"""
+        if self.worker and self.worker.isRunning() or self.batch_id:
+            return 0
+        root = os.path.normcase(os.path.normpath(self.st["material_root"]))
+        tmr = plan.tomorrow_folder()
+        n, accs = 0, set()
+        for v in self.videos:
+            if self.rec.status_of(v.path) or self.row_note.get(v.path, "").startswith("挪到明天") or not os.path.isfile(v.path):
+                continue
+            if self._edu_left(v.account) != 0:
+                continue
+            day_dir = os.path.dirname(v.path)
+            while day_dir and os.path.normcase(os.path.dirname(day_dir)) != root and os.path.dirname(day_dir) != day_dir:
+                day_dir = os.path.dirname(day_dir)
+            if os.path.normcase(os.path.dirname(day_dir)) != root:
+                continue                               # 不在素材文件夹的日期文件夹下面:不动
+            dst_root = os.path.join(self.st["material_root"], tmr)
+            try:
+                for f in [v.path] + [p for p in (v.png, v.jpg, v.vpng) if p and os.path.isfile(p)
+                                     and os.path.normcase(p).startswith(os.path.normcase(day_dir) + os.sep)]:
+                    rel = os.path.relpath(f, day_dir)
+                    plan.move_noclobber(f, os.path.join(dst_root, os.path.dirname(rel)))
+            except OSError as e:
+                self.say(f"⚠「{v.title[:24]}」挪不到明天的文件夹:{e}")
+                continue
+            n += 1
+            accs.add(v.account)
+            v.skip = f"这天发够规定条数了,挪到明天({tmr})"
+            self.row_note[v.path] = f"挪到明天({tmr})"
+            if v in self.videos:
+                self._fill_row(self.videos.index(v))
+        if n:
+            self.say(f"{'、'.join(sorted(accs))} 这天发够规定条数了:还没发的 {n} 条挪到了明天的文件夹 {tmr}")
+            self._update_scope()
+        return n
+
+    def _edu_short(self) -> str:
+        """勾上的号里这天还没发够、又没得摆了的:「家长小天地 还差 3 条」(不能少发:素材不够要说)。"""
+        out = []
+        for acc in sorted({v.account for v in self.videos}):
+            left = self._edu_left(acc)
+            if left:
+                out.append(f"{acc} 还差 {left} 条")
+        return "、".join(out)
 
     def _todo(self) -> list:
         """勾上的里面能摆、还没发 / 没摆的。"""
@@ -1204,7 +1268,8 @@ class MainWindow(QMainWindow):
         todo = [v for v in todo if not titleclean.ad_problem(v.account, v.title)]
         if self._unattended:                          # 定时发布:还标黄的(人没看过)、这一轮跳过的不摆
             todo = [v for v in todo if not v.warn and v.path not in self._sched_skip]
-        return todo
+        full = {a for a in {v.account for v in todo} if self._edu_left(a) == 0}     # 这天发够规定条数的号不再摆(用户 2026-10-20)
+        return [v for v in todo if v.account not in full]
 
     def _ask(self, title: str, text: str, yes: str, no: str, default_no: bool = False, head: str = "") -> bool:
         import gui.api_tab as A                       # 中文动词按钮的确认框(和接口页同一个);head = 第一行红字
@@ -1243,6 +1308,14 @@ class MainWindow(QMainWindow):
         self._refresh_buttons()
 
     def _nothing_left(self) -> str:
+        """没有能摆的了:前面先写发够规定条数的号 / 没发够的号(用户 2026-10-20:不能多发也不能少发),再写别的原因。"""
+        full = [a for a in sorted({v.account for v in self.videos}) if self._edu_left(a) == 0]
+        short = self._edu_short()
+        head = ((f"这天发够规定条数的号:{'、'.join(full)}(还没发的挪到明天的文件夹)。\n\n" if full else "") +
+                (f"⚠ 还没发够:{short}(素材不够 / 没摆成 / 不能摆,要补的话让员工再放一些)。\n\n" if short else ""))
+        return head + self._nothing_left0()
+
+    def _nothing_left0(self) -> str:
         """没有能摆的了:说清楚是真发完了,还是剩下的缺无字封面(png)。"""
         nocover = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and not v.cover]
         from qe import wmstore
@@ -1284,6 +1357,8 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.information(self, "企鹅号发布助手", busy)
             return
+        if not chained and not self._unattended:
+            self._edu_spill()                          # 发够规定条数的号:还没发的先挪到明天
         acc, vids = self.next_batch()
         if not vids:
             if self._unattended:
@@ -1642,6 +1717,7 @@ class MainWindow(QMainWindow):
         """定时发布结束:why 空 = 都弄完了;有 why = 中途停下了(写清楚停在哪、还剩多少,别说「电脑可以关了」)。
         写总结,恢复让电脑睡。"""
         from gui.schedule import keep_awake
+        self._edu_spill()                              # 发够规定条数的号:还没发的挪到明天(按定时定到的那天算)
         rest = self._todo() if why else []             # 本来要摆、还没摆的(要在 _unattended 关掉之前算:标黄 / 跳过的不算)
         self._unattended = False
         keep_awake("定时-edu-发", False)
@@ -1708,6 +1784,7 @@ class MainWindow(QMainWindow):
     def _after_batch(self):
         for v in self.batch_videos:                   # 这批确认完了:临时状态清掉(没摆成的原因在记录里)
             self.row_note.pop(v.path, None)
+        self._edu_spill()                             # 发够规定条数的号:还没发的挪到明天
         for i in range(len(self.videos)):
             self._fill_row(i)
         self._update_sum()
@@ -2084,6 +2161,12 @@ class MainWindow(QMainWindow):
         f2.addRow("", QLabel("传封面要开着创作罐头(用它登录着的企鹅号传图);没有同名图的、传不上的,平台自己截一帧"))
         f2.addRow("几个号一起发", sp_thr)
         f2.addRow("同一个号一次传几条", sp_per)
+        from PySide6.QtWidgets import QCheckBox as _QCB
+        k_gate = _QCB("开闸:允许超过每天规定条数(教育号、16 个号都管)")
+        k_gate.setChecked(bool(self.st.get("quota_open", False)))
+        k_gate.setToolTip("关着(默认):每个号每天最多发到规定条数(每日汇总里那张表),发够了这个号就停,还没发的挪到明天的文件夹;\n"
+                          "没发成的会拿下一条补,不会少发。\n打开:不管规定条数,能发的都发(小心发多了)。")
+        f2.addRow("每天规定条数", k_gate)
         f2.addRow("每条间隔", sp_gap)
         f2.addRow("", QLabel("1 = 一个号一个号地发,最稳;间隔 = 上一条发完歇几秒再发下一条"))
         b_mig = QPushButton("从旧软件搬账号…")
@@ -2142,7 +2225,7 @@ class MainWindow(QMainWindow):
         self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
                        archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
-                       api_threads=sp_thr.value(), api_per_acc=sp_per.value(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
+                       api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
                        api_archive=api_get() or self.st.get("api_archive", ""),
                        api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or TH.DEFAULT,
                        splash=k_splash.isChecked())

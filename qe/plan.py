@@ -48,6 +48,40 @@ def today() -> str:
     return bj_now().strftime("%Y-%m-%d")
 
 
+def tomorrow_folder() -> str:
+    """明天的日期文件夹名(北京时间),如 10.21:发够规定条数以后多的视频挪进去。"""
+    from datetime import timedelta
+    t = bj_now() + timedelta(days=1)
+    return f"{t.month}.{t.day}"
+
+
+def left_today(rec, st, nick: str, day: str = "", sent: dict | None = None) -> int | None:
+    """这个号这天(默认今天,北京时间)还能发几条 = 规定条数 - 已经发出去的。没规定条数 / 开了闸 = None(不限)。
+    用户 2026-10-20:不能发多、也不能发少;开闸(设置里「允许超过每天规定条数」)才能多发。"""
+    if st.get("quota_open", False):
+        return None
+    q = quota_of(st, nick)
+    if not q:
+        return None
+    got = (sent if sent is not None else rec.sent_on(day or today())).get(nick, 0)
+    return max(0, q - got)
+
+
+def move_noclobber(path: str, dst_dir: str) -> str:
+    """挪到 dst_dir(没有就建),同名的不盖:后面加 (2)。返回新位置。"""
+    import os
+    import shutil
+    os.makedirs(dst_dir, exist_ok=True)
+    stem, ext = os.path.splitext(os.path.basename(path))
+    dst = os.path.join(dst_dir, stem + ext)
+    k = 2
+    while os.path.exists(dst):
+        dst = os.path.join(dst_dir, f"{stem} ({k}){ext}")
+        k += 1
+    shutil.move(path, dst)
+    return dst
+
+
 def day_counts(rec, day: str) -> dict[str, int]:
     """这天(发布时间的北京日期,如 2026-10-16)每个号实际发了几条(同一个视频只算一次)。"""
     return rec.sent_on(day)
