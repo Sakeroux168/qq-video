@@ -369,6 +369,10 @@ class MainWindow(QMainWindow):
         self.b_allok.setToolTip("标黄的封面都在「预览封面」里看过、调好了:点这个,勾上的员工里标黄的封面都算没问题,不再停下来等你。\n"
                                 "(换了封面图的又会标黄;定时发布时还标黄的不发,留给你)")
         self.b_allok.clicked.connect(self.all_covers_ok)
+        self.b_review = QPushButton("快速过封面")         # 用户 2026-10-19 看草图定的:一屏看完所有标黄的,回车 = 没问题
+        self.b_review.setToolTip("一屏铺开勾上的员工里所有标黄的封面,每张带 4 个比例的小图。\n"
+                                 "没问题按回车(去黄、跳下一张);脸被切了的点一下进去拖框;「剩下的都没问题」一下子全去黄。")
+        self.b_review.clicked.connect(self.quick_review)
         self.b_sched = QPushButton("摆好并定时发出…")
         self.b_sched.setObjectName("pill")
         self.b_sched.setMinimumHeight(36)
@@ -397,7 +401,7 @@ class MainWindow(QMainWindow):
         tools = QHBoxLayout()
         tools.setSpacing(8)
         tools.addWidget(self.lab_scope, 1)
-        for b in (self.b_wm, self.b_blur, self.b_allok):
+        for b in (self.b_wm, self.b_blur, self.b_review, self.b_allok):
             tools.addWidget(b)
         tools.addSpacing(6)
         tools.addWidget(self.k_auto)
@@ -1131,7 +1135,7 @@ class MainWindow(QMainWindow):
         self.b_pubgo.setVisible(yellow)
         self.b_stop.setVisible(running)
         # 审查 16:摆的时候 / 摆好等确认时底栏只留要点的,「查水印 / 模糊水印 / 封面都看过了」先藏起来
-        for b in (self.b_wm, self.b_blur, self.b_allok):
+        for b in (self.b_wm, self.b_blur, self.b_allok, self.b_review):
             b.setVisible(not running and not waiting)
         self.b_go.setEnabled(not running and not self.batch_id)
         self.b_stop.setEnabled(running)
@@ -1527,6 +1531,21 @@ class MainWindow(QMainWindow):
                                         "自动发布 / 定时发布不会再为它们停下来。", "都看过了", "还没看完"):
             return
         self._mark_covers_ok(vs)
+
+    def quick_review(self):
+        """快速过封面:勾上的员工里还标黄的,一屏看完。"""
+        vs = [v for v in self.videos if v.warn and v.cover and not self.rec.status_of(v.path) and not v.skip]
+        if not vs:
+            QMessageBox.information(self, "快速过封面", "勾上的员工里现在没有标黄的封面。" if self.videos else "左边先勾上员工。")
+            return
+        from gui.cover_review import QuickReview
+        d = QuickReview(vs, self.adj, self)
+        d.changed.connect(lambda v: v in self.videos and self._fill_row(self.videos.index(v)))
+        d.exec()
+        n = sum(1 for v in vs if not v.warn)
+        if n:
+            self.say(f"快速过封面:{n} 张标黄的封面看过了,不再标黄" + (f"(还有 {len(vs) - n} 张标黄)" if n < len(vs) else ""))
+        self._update_scope()
 
     def _mark_covers_ok(self, vs):
         """这几条标黄的封面记成「人看过了」:不再标黄,自动发布 / 定时发布不会再为它们停下来。"""

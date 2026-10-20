@@ -2971,6 +2971,46 @@ def test_api_per_acc(tmp: Path):
         omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
 
 
+def test_quick_review(tmp: Path):
+    print("[快速过封面(2026-10-19):一屏铺开标黄的、回车 = 没问题跳下一张、剩下的都没问题、脸被切了标出来]")
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    import gui.api_tab as A
+    import gui.cover_review as R
+    from qe.adjust import Adjustments
+    from qe.folders import Video
+    d = tmp / "qr"
+    vs = []
+    for k, fx in enumerate((0.45, 0.5, 0.97)):
+        _img(d / f"q{k}.png", 1600, 900)
+        v = Video(path=str(d / f"q{k}.mp4"), title=f"q{k}", account="家长小天地", employee="甲", date="10.19", png=str(d / f"q{k}.png"))
+        v.cover, v.cover_kind, v.warn, v.cover_why = v.png, "png", True, "看一眼"
+        v.plan = {"cx": 0.5, "cy": 0.35, "faces": [[fx, 0.2, 0.08, 0.2]], "all": [[fx, 0.2, 0.08, 0.2]]}
+        vs.append(v)
+    adj = Adjustments(tmp / "adj_qr.json")
+    dlg = R.QuickReview(vs, adj)
+    got = []
+    dlg.changed.connect(got.append)
+    _wait(app, lambda: len(dlg.cards) == 3, 10)
+    check(len(dlg.cards) == 3 and dlg.cur == 0 and "剩 3" in dlg.lab_n.text(), f"一屏铺开 3 张标黄的 -> {dlg.lab_n.text()}")
+    check(dlg.cards[2].cut and not dlg.cards[0].cut and "脸好像被切了" in dlg.cards[2].why.text(), "脸跑到框外的标出来「脸好像被切了」")
+    dlg.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier))
+    check(not vs[0].warn and adj.is_ok(vs[0].path, vs[0].cover) and dlg.cur == 1 and got == [vs[0]] and "看过 1" in dlg.lab_n.text(),
+          "回车:这张没问题(去黄、记在硬盘上),跳到下一张")
+    dlg.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier))
+    check(dlg.cur == 2, "→:换下一张")
+    real = A.ask
+    A.ask = lambda *a, **k: True
+    try:
+        dlg.all_ok()
+    finally:
+        A.ask = real
+    check(all(not v.warn for v in vs) and "剩 0" in dlg.lab_n.text() and "都看完了" in dlg.tip.text(), "「剩下的都没问题」:全去黄")
+    dlg.close()
+
+
 def test_misfire_api(tmp: Path):
     print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
@@ -3520,6 +3560,7 @@ if __name__ == "__main__":
     test_awake(tmp)
     test_yellow_manual(tmp)
     test_api_per_acc(tmp)
+    test_quick_review(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)
