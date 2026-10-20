@@ -16,6 +16,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 fails = []
 
+from qe import gamecheck as _gc                             # noqa: E402
+AI_GAME_CALLS = []                                           # 这台电脑上有真的百炼 Key:测试里绝不真问 AI(花钱)
+
+
+def _fake_ask_ai(own, titles, key, **k):
+    AI_GAME_CALLS.append((own, list(titles)))
+    return {t: ("PUBG" if "苟分" in t else "") for t in titles}
+
+
+_gc.ask_ai = _fake_ask_ai
+
 
 def check(c, m):
     print(("  OK   " if c else "  FAIL ") + m)
@@ -3011,6 +3022,92 @@ def test_quick_review(tmp: Path):
     dlg.close()
 
 
+def test_game_guard(tmp: Path):
+    print("[游戏号的标题像别的游戏(2026-10-20 和平精英传成了 PUBG):一条不发等确认;3 条以上整批先不发;关键词看不出来问 AI]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, checks, gamecheck
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    check(gamecheck.by_words("CSGO战神君", "今天和嫂子一起打和平精英") == ("和平精英", True), "CSGO 号里「和平精英」→ 像和平精英")
+    check(gamecheck.by_words("CSGO战神君", "下班啦来整一把#英雄联盟#lol") == ("英雄联盟", True), "CSGO 号里「#英雄联盟#lol」→ 像英雄联盟")
+    check(gamecheck.by_words("CSGO战神君", "cs2 急停教学,和平年代也要练") == ("", True), "提到了自己的游戏(cs2)就不算串")
+    check(gamecheck.by_words("LOL玩家聚集地", "云顶之弈新阵容") == ("", True), "英雄联盟 / 云顶之弈算一家")
+    check(gamecheck.by_words("LOLM峡谷日常", "lolm 打野") == ("", True) and gamecheck.hits("lolm 打野") == ["英雄联盟手游"],
+          "英文词要单独出现:「lolm」不算「lol」")
+    check(gamecheck.by_words("电竞情报馆", "和平精英决赛") == ("", True), "电竞情报馆(各种游戏)不查")
+    check(gamecheck.by_words("PUBG突围君", "哈哈哈") == ("", False), "关键词看不出来的 → 要问 AI")
+    root = tmp / "api_gg"
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"),
+                  "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_gg.json")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["quota_open"] = True
+    st["ai_key"] = "fake"
+    d = root / "游戏视频" / "CSGO--CSGO战神君" / "10.20"
+
+    def load(names):
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+        for nm in names:
+            (d / f"{nm}.mp4").write_bytes(b"x")
+        tab = T.ApiTab(st, Records(tmp / "rgg.sqlite"), lambda m: None)
+        tab.set_day("10.20")
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == len(names))
+        tab.run_check()
+        _wait(app, lambda: not tab.busy())
+        for v in tab.videos:
+            v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+        tab._update_scope()
+        tab._update_sum()
+        return tab
+
+    def idx(tab, w):
+        return next(i for i, v in enumerate(tab.videos) if w in v.title)
+    AI_GAME_CALLS.clear()
+    tab = load(["cs2 急停教学", "今天和嫂子一起打和平精英", "G镇六个苟分点", "残局一打三", "大狙甩枪", "沙二A点",
+                "经济局", "道具教学", "残局二", "残局三", "残局四", "残局五"] + [f"日常{k}" for k in range(10)])
+    asked = [t for _o, ts in AI_GAME_CALLS for t in ts]
+    check(AI_GAME_CALLS and AI_GAME_CALLS[0][0] == "CSGO" and "G镇六个苟分点" in asked and "cs2 急停教学" not in asked
+          and "今天和嫂子一起打和平精英" not in asked,
+          f"检查时只把关键词看不出来的问 AI(按号一批)-> {AI_GAME_CALLS[:1]}")
+    a, b, ok = idx(tab, "和平精英"), idx(tab, "苟分"), idx(tab, "急停")
+    check("标题像是《和平精英》的" in checks.problems(tab.videos[a]) and not tab._can_send(a),
+          f"一条像和平精英:标「标题像是《和平精英》的」,不发 -> {checks.problems(tab.videos[a])}")
+    check("标题像是《PUBG》的" in checks.problems(tab.videos[b]) and not tab._can_send(b), "AI 说像 PUBG 的:也不发")
+    check(not tab._blocked and tab._can_send(ok), f"22 条里 2 条(不到一成):不算整批放错,别的照常能发 -> {tab._blocked}")
+    AI_GAME_CALLS.clear()
+    tab.run_check()
+    _wait(app, lambda: not tab.busy())
+    check(not AI_GAME_CALLS, "问过的标题记着,下次检查不再问(不重复花钱)")
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+    tab.tree.clearSelection()
+    tab.set_game_ok(a, True)
+    check(not checks.problems(tab.videos[a]) and tab._can_send(a),
+          f"右键「是这个号的,能发」→ 能发了 -> {checks.problems(tab.videos[a])} {tab._blocked}")
+    tab.set_game_ok(a, False)
+    check(not tab._can_send(a), "再右键「其实不是这个号的」→ 又不发了")
+    tab = load(["cs2 急停教学", "今天和嫂子一起打和平精英", "超体新皮肤", "下班啦来整一把#英雄联盟#lol", "残局一打三", "大狙甩枪",
+                "沙二A点", "经济局", "道具教学", "残局二"])
+    nick = "CSGO战神君"
+    check(tab._blocked.get(nick) == 3 and not any(tab._can_send(i) for i in range(len(tab.videos))),
+          f"一个号 3 条像别的游戏 → 整批先不发 -> {tab._blocked}")
+    g = tab.groups.get(nick) if hasattr(tab, "groups") else None
+    gtext = g.text(2) if g is not None else ""
+    check("放错" in tab.hero.sub.text() and (g is None or "可能放错了 3" in gtext),
+          f"大字下面 / 号那一行写「可能整批放错了」-> {tab.hero.sub.text()[:80]} / {gtext}")
+    check(tab.b_pub.text() == "现在发布 0 条" or not tab.b_pub.isEnabled(), f"发布按钮不算这个号 -> {tab.b_pub.text()}")
+    tab.set_batch_ok(nick, True)
+    ok = idx(tab, "急停")
+    check(not tab._blocked and tab._can_send(ok) and not tab._can_send(idx(tab, "和平精英")),
+          "右键号「这批确认没放错」→ 这批能发了,像别的游戏的那几条还是不发")
+    tab.set_batch_ok(nick, False)
+    check(tab._blocked.get(nick) == 3, "取消确认 → 又整批不发")
+
+
 def test_quota_gate(tmp: Path):
     print("[每天规定条数的闸(2026-10-20 PUBG 多发了 21 条):不能多发、没发成的补上、多的挪到明天、开闸才不管;转竖屏不留原片]")
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -3722,6 +3819,7 @@ if __name__ == "__main__":
     test_api_per_acc(tmp)
     test_quick_review(tmp)
     test_quota_gate(tmp)
+    test_game_guard(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

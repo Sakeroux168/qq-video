@@ -2167,6 +2167,13 @@ class MainWindow(QMainWindow):
         k_gate.setToolTip("关着(默认):每个号每天最多发到规定条数(每日汇总里那张表),发够了这个号就停,还没发的挪到明天的文件夹;\n"
                           "没发成的会拿下一条补,不会少发。\n打开:不管规定条数,能发的都发(小心发多了)。")
         f2.addRow("每天规定条数", k_gate)
+        from qe import gamecheck as GC
+        e_games = QPlainTextEdit("\n".join(f"{g}={'、'.join(ks)}" for g, ks in GC.words().items()))
+        e_games.setMaximumHeight(110)
+        e_games.setToolTip("每行一个游戏:游戏名=关键词、关键词…(英文不分大小写)。\n"
+                           "游戏号的视频标题里有别的游戏的词、又没有自己游戏的词 → 标「标题像是《某游戏》的」,不发;\n"
+                           "一个号这天有 3 条以上(或超过一成)这样的 → 整批先不发。关键词看不出来的检查时问 AI。")
+        f2.addRow("游戏关键词", e_games)
         f2.addRow("每条间隔", sp_gap)
         f2.addRow("", QLabel("1 = 一个号一个号地发,最稳;间隔 = 上一条发完歇几秒再发下一条"))
         b_mig = QPushButton("从旧软件搬账号…")
@@ -2225,7 +2232,9 @@ class MainWindow(QMainWindow):
         self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
                        archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
-                       api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
+                       api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(),
+                       game_words={ln.split("=", 1)[0].strip(): [x.strip() for x in ln.split("=", 1)[1].replace(",", "、").replace("，", "、").split("、") if x.strip()]
+                                   for ln in e_games.toPlainText().splitlines() if "=" in ln and ln.split("=", 1)[0].strip()}, api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
                        api_archive=api_get() or self.st.get("api_archive", ""),
                        api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or TH.DEFAULT,
                        splash=k_splash.isChecked())
@@ -2233,6 +2242,9 @@ class MainWindow(QMainWindow):
         self.st.save()
         from PySide6.QtWidgets import QApplication
         TH.apply(QApplication.instance(), self.st["theme"])
+        from qe import gamecheck as GC2
+        GC2.configure(self.st)
+        self.api_tab._update_sum()
         self._load_dates()
 
     def closeEvent(self, e):

@@ -864,10 +864,11 @@ class ApiTreeDelegate(QStyledItemDelegate):
         elif top and col == 2:
             x = r.left() + 2
             for part in [p for p in text.split(" · ") if p]:
-                m = re.match(r"(有问题|没发成|结果不明) (\d+)", part)
+                m = re.match(r"(有问题|没发成|结果不明|可能放错了) (\d+)", part)
                 if m:
                     label, tone = {"有问题": (f"{m.group(2)} 条要处理", "warn"), "没发成": (f"没发成 {m.group(2)}", "bad"),
-                                   "结果不明": (f"结果不明 {m.group(2)}", "warn")}[m.group(1)]
+                                   "结果不明": (f"结果不明 {m.group(2)}", "warn"),
+                                   "可能放错了": ("可能整批放错了", "bad")}[m.group(1)]
                 else:
                     label, tone = part, "plain"
                 x += draw_pill(painter, x, cy, label, tone, r.right() - x) + 6

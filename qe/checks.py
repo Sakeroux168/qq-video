@@ -77,6 +77,10 @@ def problems(v) -> list[str]:
         out.append(f"{len(c['tags'])} 个话题")
     elif topic.bad_format(v.title):                  # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
         out.append(format_kind(v.title))
+    from . import gamecheck                          # 标题像别的游戏的(用户 2026-10-20:和平精英传成了 PUBG)
+    g = gamecheck.alien(getattr(v, "account", ""), v.title)
+    if g:
+        out.append(f"标题像是《{g}》的")
     if wm_blocks(c.get("wm")):                       # 高级检查查到水印、人还没说「没水印」
         out.append(wm_text(c["wm"]))
     if wm_blocks(c.get("ads")):                      # 查到口播广告、人还没说「不是广告」

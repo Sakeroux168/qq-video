@@ -148,6 +148,9 @@ class ApiTab(QWidget):
         self.job: Job | None = None
         self.ledger = topic.Ledger(data_dir() / "话题改名台账.json")
         self._auto = ""                           # 定时发布:"" / "等检查"(到点了,等自动检查做完)/ "发"(正在发)
+        self._blocked: dict[str, int] = {}        # 这天可能整批放错了的号(像别的游戏的条数),人确认前整批不发
+        from qe import gamecheck
+        gamecheck.configure(st)
         self._build()
         from gui.schedule import Scheduler
         self.sched = Scheduler(self.st, "api", self.say, self._sched_fire, self._sched_changed, self, problem=self._sched_note)
@@ -657,6 +660,10 @@ class ApiTab(QWidget):
             sub = "处理好就能发(用下面的卡片)"
         else:
             big, sub, tone = "没有能发的", "", ""
+        if self._blocked and not self.busy():
+            bl = "、".join(f"{k}({c} 条像别的游戏)" for k, c in self._blocked.items())
+            sub += ("\n" if sub else "") + f"可能整批放错了,这些号先不发:{bl} —— 看一眼,没放错就右键号「确认没放错」"
+            tone = tone or "warn"
         if cats.get("o") and not self.busy():
             sub += ("\n" if sub else "") + f"其中 {cats['o']} 条标题里有别的平台的名字,要你自己改(列表里右键「改标题」)"
         if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)) and sub != self._fun:
@@ -721,7 +728,28 @@ class ApiTab(QWidget):
 
     def _can_send(self, i: int) -> bool:
         v = self.videos[i]
-        return bool(v.checks) and not checks.problems(v) and not self._sent(i)
+        return bool(v.checks) and not checks.problems(v) and not self._sent(i) and not self._blocked.get(v.account)
+
+    def _refresh_blocked(self):
+        """一个号这天有 3 条以上(或超过一成)标题像别的游戏 → 可能整批放错了,人点「确认没放错」前整批不发(用户 2026-10-20)。"""
+        from qe import gamecheck
+        s, day = gamecheck.store(), self.day()
+        by: dict[str, list[int]] = {}
+        for i, v in enumerate(self.videos):
+            if not self._sent(i):
+                by.setdefault(v.account, []).append(i)
+        out = {}
+        for nick, idx in by.items():
+            if not gamecheck.account_game(nick) or s.batch_ok(nick, day):
+                continue
+            n = sum(1 for i in idx if gamecheck.alien(nick, self.videos[i].title))
+            if n >= 3 or (n and n * 10 > len(idx)):
+                out[nick] = n
+        old, self._blocked = self._blocked, out
+        for nick in {k for k in set(old) | set(out) if old.get(k) != out.get(k)}:   # 变了的号:那几行和号那一行重画
+            for i in self.rows_of(nick):
+                self._fill(i, group=False)
+            self._fill_group(nick)
 
     def _update_scope(self):
         if self.busy():
@@ -999,6 +1027,8 @@ class ApiTab(QWidget):
             return st, probs
         if c and probs:
             return "要处理", probs
+        if c and self._blocked.get(v.account):
+            return "要处理", [f"这个号整批先不发({self._blocked[v.account]} 条像别的游戏,可能放错了)"]
         if c and not probs:
             return ("能发(已转竖屏)" if c.get("converted") else "能发"), probs
         return "", probs
@@ -1040,7 +1070,8 @@ class ApiTab(QWidget):
         n = len(rows)
         sent = sum(1 for i in rows if self.state.get(i, "").startswith("已发"))
         checked = [i for i in rows if self.videos[i].checks]
-        bad = sum(1 for i in checked if checks.problems(self.videos[i]) and not self._sent(i))
+        bad = sum(1 for i in checked if (checks.problems(self.videos[i]) or self._blocked.get(self.videos[i].account))
+                  and not self._sent(i))
         fail = sum(1 for i in rows if self.state.get(i, "").startswith(FAILED[:2]))
         unsure = sum(1 for i in rows if self.state.get(i, "") == "结果不明")
         ok = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
@@ -1056,6 +1087,8 @@ class ApiTab(QWidget):
             parts.append(f"没发成 {fail}")
         if unsure:
             parts.append(f"结果不明 {unsure}")
+        if self._blocked.get(nick):
+            parts.insert(0, f"可能放错了 {self._blocked[nick]}")
         g.setText(2, " · ".join(parts))
         base = "发完了" if n and sent == n else (f"能发 {ok}" if checked else "")
         q = self._quota_text(nick)
@@ -1097,11 +1130,13 @@ class ApiTab(QWidget):
         return f"今天还差 {short} 条" if short else "今天都发够了 √"
 
     def _update_sum(self):
+        self._refresh_blocked()
         n = len(self.videos)
         sent = sum(1 for i in range(n) if self.state.get(i, "").startswith("已发"))
         checked = [i for i in range(n) if self.videos[i].checks]
         ok, self._over = self._quota_cap([i for i in range(n) if self._can_send(i) and not self.state.get(i, "").startswith(FAILED)])
-        bad = sum(1 for i in checked if checks.problems(self.videos[i]) and not self._sent(i))
+        bad = sum(1 for i in checked if (checks.problems(self.videos[i]) or self._blocked.get(self.videos[i].account))
+                  and not self._sent(i))
         fail = sum(1 for i in range(n) if self.state.get(i, "").startswith(FAILED[:2]))
         accs = {}
         for i, v in enumerate(self.videos):
@@ -1297,6 +1332,23 @@ class ApiTab(QWidget):
                 m.addAction(f"模糊水印(选中的 {len(sel)} 条)", lambda: self.run_blur(sel)).setEnabled(not busy)
                 m.addAction(f"查口播广告(选中的 {len(sel)} 条)", lambda: self.run_ads(sel)).setEnabled(not busy)
                 m.addAction(f"剪掉口播广告(选中的 {len(sel)} 条)", lambda: self.run_cut(sel)).setEnabled(not busy)
+            from qe import gamecheck
+            if i != -1 and not self._sent(i) and gamecheck.account_game(nick):
+                g0 = gamecheck.by_words(nick, self.videos[i].title)[0] or (gamecheck.store().ai(self.videos[i].title) or "")
+                if gamecheck.store().ok(nick, self.videos[i].title):
+                    m.addSeparator()
+                    m.addAction("其实不是这个号的游戏(先不发)", lambda: self.set_game_ok(i, False)).setEnabled(not busy)
+                elif gamecheck.alien(nick, self.videos[i].title):
+                    m.addSeparator()
+                    m.addAction(f"标题像《{g0}》的:看过了,是这个号的,能发", lambda: self.set_game_ok(i, True)).setEnabled(not busy)
+            if gamecheck.account_game(nick):
+                day = self.day()
+                if self._blocked.get(nick):
+                    m.addSeparator()
+                    m.addAction(f"「{nick}」这批确认没放错,能发", lambda: self.set_batch_ok(nick, True)).setEnabled(not busy)
+                elif gamecheck.store().batch_ok(nick, day):
+                    m.addSeparator()
+                    m.addAction(f"「{nick}」取消「确认没放错」(这批先不发)", lambda: self.set_batch_ok(nick, False)).setEnabled(not busy)
             if i != -1 and not self._sent(i) and titleclean.ad_words(self.videos[i].title):
                 m.addSeparator()
                 if titleclean.store().ok(self.videos[i].account, self.videos[i].title):
@@ -1485,6 +1537,8 @@ class ApiTab(QWidget):
                 list(ex.map(one, rows))
             if stopped():
                 return "检查停下了"
+            if not deep:
+                self._ai_games(rows, emit, stopped)       # 关键词看不出是哪个游戏的:问 AI(问过的记着)
             if deep:
                 self._scan_wm(rows, emit, stopped, ff)
                 if stopped():
@@ -1497,12 +1551,67 @@ class ApiTab(QWidget):
             unread = sum(1 for v in got if v.checks.get("bad_read"))
             ok = sum(1 for v in got if not checks.problems(v))
             wm = sum(1 for v in got if checks.wm_blocks(v.checks.get("wm")))
+            from qe import gamecheck
+            alien = sum(1 for v in got if gamecheck.alien(v.account, v.title))
             return (("高级检查完" if deep else "检查完") + f":{len(got)} 条,能发 {ok};横屏 / 偏方 {land} · 标题有别的平台 {plat}(要你自己改)· "
                     f"多个话题 {many} · 话题写法 / 结尾空格 {fmt}" + (f" · 视频读不出来 {unread}" if unread else "") +
                     (f" · 有水印 {wm}(鼠标放在「要处理的」上看截图;不是水印就右键「没水印,能发」)" if deep else "") +
+                    (f" · 标题像别的游戏 {alien}(是这个号的就右键「是这个号的,能发」)" if alien else "") +
                     ("" if ok == len(got) or deep else "。标题乱码 / @ / 话题问题点「整理标题」一键改"))
         self._start(fn, "" if quiet else (f"高级检查中…({self._who(rows)})" if deep else f"检查中…({self._who(rows)})"),
                     quiet=quiet)
+
+    def _ai_games(self, rows: list[int], emit, stopped) -> int:
+        """关键词看不出是哪个游戏的标题(「哈哈哈」「G镇六个苟分点」),按号一批问 AI(百炼),答案记在 游戏判断.json。
+        没填 Key / 出错:只按关键词查,写一句日志。返回问了几条。"""
+        from qe import gamecheck
+        key = self.st.ai_key() if hasattr(self.st, "ai_key") else ""
+        if not key:
+            return 0
+        vs = self.videos
+        by: dict[str, list[int]] = {}
+        for i in rows:
+            if not self._sent(i) and gamecheck.need_ai(vs[i].account, vs[i].title):
+                by.setdefault(vs[i].account, []).append(i)
+        if by:
+            emit(PROGRESS, f"问 AI 这些标题是哪个游戏的 · {sum(map(len, by.values()))} 条…")
+        n = 0
+        for nick, idx in by.items():
+            for k in range(0, len(idx), 40):
+                if stopped():
+                    return n
+                part = idx[k:k + 40]
+                try:
+                    got = gamecheck.ask_ai(gamecheck.account_game(nick), [vs[i].title for i in part], key)
+                except Exception as e:
+                    emit(-1, f"AI 判断是哪个游戏没成({str(e)[:60]}),这次只按关键词查")
+                    return n
+                gamecheck.store().set_ai(got)
+                n += len(got)
+                for i in part:
+                    emit(i, "")
+        return n
+
+    def set_game_ok(self, i: int, ok: bool):
+        """标题像别的游戏、人看过:是这个号的(能发)/ 其实不是(先不发)。选了好几条一起标。"""
+        from qe import gamecheck
+        rows = self.selected_rows() or [i]
+        for r in rows:
+            gamecheck.store().set_ok(self.videos[r].account, self.videos[r].title, ok)
+            self._fill(r)
+        self.say(f"{len(rows)} 条标成" + ("「是这个号的,能发」" if ok else "「不是这个号的,先不发」"))
+        self._update_scope()
+
+    def set_batch_ok(self, nick: str, ok: bool):
+        """可能整批放错了的号:人看过,确认没放错(这天整批放行)/ 取消确认。"""
+        from qe import gamecheck
+        gamecheck.store().set_batch_ok(nick, self.day(), ok)
+        self.say(f"「{nick}」{self.day()}:" + ("确认没放错,这批能发了" if ok else "取消确认,这批先不发"))
+        self._refresh_blocked()
+        for i in self.rows_of(nick):
+            self._fill(i, group=False)
+        self._fill_group(nick)
+        self._update_scope()
 
     def _scan_wm(self, rows: list[int], emit, stopped, ff: str):
         """查水印(后台线程里):查过、文件没变的不再查;3 条一起查(解码 + 找 logo 吃 CPU)。"""
