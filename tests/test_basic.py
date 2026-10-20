@@ -3091,8 +3091,24 @@ def test_quota_gate(tmp: Path):
         tab.run_publish()
         app.processEvents()
         moved = sorted(x for x in os.listdir(root / "游戏视频" / "CSGO--CSGO战神君" / tmr) if x.endswith(".mp4"))
-        check(not sent and boxes and "已经发够" in boxes[-1] and moved == ["q6.mp4", "q7.mp4"],
+        check(not sent and (not tab.videos or (boxes and "已经发够" in boxes[-1])) and moved == ["q6.mp4", "q7.mp4"],
               f"今天已经发够的号:不发,还没发的挪到明天 -> {boxes[-1][:40] if boxes else ''} {moved}")
+        # 打开 / 刷新页面时:今天已经发够的号,今天日期文件夹里没发的自动挪到明天(名字差个空格的封面也跟着)
+        from qe.config import bj_now
+        today_md = f"{bj_now().month}.{bj_now().day}"
+        td = root / "游戏视频" / "CSGO--CSGO战神君" / today_md
+        td.mkdir(parents=True, exist_ok=True)
+        (td / "今天的.mp4").write_bytes(b"x")
+        (td / "今天的 .jpg").write_bytes(b"j")
+        st["api_picked"] = {"10.20": {"CSGO战神君": str(td)}}
+        tab = T.ApiTab(st, Records(tmp / "rq2.sqlite"), lambda m: None)   # 这个记录库里 CSGO 今天已经发够 3 条
+        tab.set_day("10.20")
+        _wait(app, lambda: not tab.busy(), 30)
+        app.processEvents()
+        moved = sorted(os.listdir(root / "游戏视频" / "CSGO--CSGO战神君" / tmr))
+        check("今天的.mp4" in moved and "今天的 .jpg" in moved and not os.listdir(td) and not tab.videos,
+              f"打开页面:今天发够的号,今天文件夹里没发的自动挪到明天(差个空格的封面也挪)-> {[m for m in moved if '今天' in m]}")
+        st["api_picked"] = {}
         st["quota_open"] = True
         tab, rec = run(["q1", "q2", "q3", "q4", "q5"], "rq3.sqlite")
         sent.clear()

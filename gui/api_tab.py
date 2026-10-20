@@ -510,21 +510,24 @@ class ApiTab(QWidget):
             from gui.widgets import Confetti
             Confetti(self.hero)                         # 发完撒一把彩带
 
-    def _spill(self, nick: str, emit=None) -> int:
+    def _spill(self, nick: str, emit=None, only_day: str = "") -> int:
         """这个号今天发够了:列表里它还没发的(没发过 / 没发成的)连同同名封面挪到明天的日期文件夹(没有就建,和这天的放一起)。
-        手选的文件夹(名字不是日期)不挪,明天接着从那里发。返回挪了几条。"""
+        手选的文件夹(名字不是日期)不挪,明天接着从那里发。only_day = 只挪这个日期文件夹里的(打开页面时自动挪用)。返回挪了几条。"""
         tmr = plan.tomorrow_folder()
         n = 0
         for i, v in enumerate(self.videos):
             if v.account != nick or self.state.get(i, "").startswith("已发") or self.rec.status_of(v.path) or not os.path.isfile(v.path):
                 continue
             d = os.path.dirname(v.path)
-            if not apisrc.date_key(os.path.basename(d)):
+            dk = apisrc.date_key(os.path.basename(d))
+            if not dk or (only_day and dk != only_day) or os.path.basename(d) == tmr:
                 continue
             dst = os.path.join(os.path.dirname(d), tmr)
             try:
-                stem = os.path.splitext(v.path)[0]
-                for f in [v.path] + [stem + e for e in (".jpg", ".jpeg", ".png", ".webp") if os.path.isfile(stem + e)]:
+                stem = os.path.splitext(os.path.basename(v.path))[0].strip()
+                covers = [os.path.join(d, x) for x in os.listdir(d)          # 同名封面:名字前后多个空格也认(2026-10-20 实测有)
+                          if os.path.splitext(x)[1].lower() in (".jpg", ".jpeg", ".png", ".webp") and os.path.splitext(x)[0].strip() == stem]
+                for f in [v.path] + covers:
                     plan.move_noclobber(f, dst)
                 n += 1
                 if emit:
@@ -534,6 +537,17 @@ class ApiTab(QWidget):
         if n:
             (emit or (lambda _i, m: self.say(m)))(-1, f"「{nick}」今天发够规定条数了,还没发的 {n} 条挪到明天的文件夹 {tmr}")
         return n
+
+    def _auto_spill(self) -> bool:
+        """打开 / 刷新时:今天已经发够规定条数的号,它在今天日期文件夹里还没发的,自动挪到明天(用户 2026-10-20:
+        「pubg 这里面剩的咋还没放到下一个文件夹里面」—— 原来只有点了发布才挪)。挪了返回 True(要重读列表)。"""
+        if self.st.get("quota_open", False) or self.busy() or getattr(self, "_spilling", False):
+            return False
+        from qe.config import bj_now
+        today_md = f"{bj_now().month}.{bj_now().day}"
+        sent = getattr(self, "today_sent", None) or {}
+        full = sorted({v.account for v in self.videos if plan.left_today(self.rec, self.st, v.account, sent=sent) == 0})
+        return sum(self._spill(n, only_day=today_md) for n in full) > 0
 
     def _quota_cap(self, idxs) -> tuple[int, int]:
         """这些能发的里,按每个号今天还能发几条,真正会发几条;多出来几条(发够以后挪到明天)。"""
@@ -881,6 +895,13 @@ class ApiTab(QWidget):
             missing = [n for n in apiacc.nicks() if n not in accs]
             self.say(f"接口发 {d}:{len(self.videos)} 条,{len(accs)} 个号" +
                      (f";这天没找到视频的号:{'、'.join(missing)}" if missing else "") + "。")
+            if self._auto_spill():                    # 今天发够的号:今天文件夹里没发的先挪到明天,再重读
+                self._spilling = True
+                try:
+                    self.load()
+                finally:
+                    self._spilling = False
+                return
             if todo:
                 self.run_check(todo, quiet=True)          # 新出现的自动检查(审查:原来每次刷新都要重新点「检查」)
 
