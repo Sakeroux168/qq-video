@@ -1940,12 +1940,13 @@ class ApiTab(QWidget):
         for i in rows:
             by_acc.setdefault(self.videos[i].account, []).append(i)
         par = max(1, _num(self.st.get("api_threads"), 1))
+        per_acc = max(1, min(5, _num(self.st.get("api_per_acc"), 1)))   # 同一个号一次传几条(用户 2026-10-19,默认 1)
         gap = max(0.0, float(_num(self.st.get("api_interval"), 5)))
         by_game = bool(self.st.get("api_archive_by_game", True))
         dest = apisrc.archive_dir(self.st)                 # 按发出去的那天(北京时间)分
         per = "\n".join(f"  · {n}:{len(idx)} 条 · {apiacc.CATEGORIES.get(accs[n].get('category'), accs[n].get('category'))}" +
                         (f" → {apisrc.game_folder(accs[n])}" if by_game else "") for n, idx in by_acc.items())
-        mins = max(1, round(len(rows) * (gap + 25) / 60 / par))          # 一条大概传 + 发 25 秒,加上间隔
+        mins = max(1, round(len(rows) * (gap + 25) / 60 / par / min(per_acc, 3)))   # 一条大概传 + 发 25 秒,加上间隔(同时传 3 条以上网就满了)
         # 确认框:第一行大白话;号多就写个概要,细节放「显示详细信息」(体验报告:15 行号列表 + 声明细节太长)
         names = [f"{n} {len(idx)}" for n, idx in by_acc.items()]
         brief = "、".join(names) if len(names) <= 5 else "、".join(names[:4]) + f" … 等 {len(names)} 个号"
@@ -1966,7 +1967,8 @@ class ApiTab(QWidget):
                     f"封面:{ncov} 条有同名封面会传上去({cmode})" + (f",{len(rows) - ncov} 条没有,平台自己截" if ncov < len(rows) else ""))
         msg = msg.replace("\n\n发吗?", f"\n{cov_line}\n\n发吗?")
         detail = (f"每个号:\n{per}\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;{cov_line}。\n"
-                  f"{'一条一条发' if par == 1 else f'{par} 个号一起发'},上一条发完歇 {gap:g} 秒再发下一条。\n"
+                  f"{'一条一条发' if par == 1 else f'{par} 个号一起发'}" + (f",同一个号一次传 {per_acc} 条,这组发完歇 {gap:g} 秒再下一组。\n" if per_acc > 1 else
+                                                                             f",上一条发完歇 {gap:g} 秒再发下一条。\n") +
                   f"发成了挪到:{dest}" + ("\\游戏名" if by_game else "") + "(同名封面跟着挪)")
         if auto:
             self.say("⏰ 定时发布:" + msg.replace("\n", " ").replace("发吗?", "").strip())
@@ -1977,6 +1979,7 @@ class ApiTab(QWidget):
         vs = self.videos
         gate = {"last": 0.0}
         glock = threading.Lock()
+        upsem = threading.Semaphore(6 if per_acc > 1 else 10 ** 6)       # 所有号加起来同时最多传 6 条(4 个号 × 5 条挤在一起反而慢)
         stats = {"ok": 0, "fail": 0, "unsure": 0, "skip": 0, "done": 0, "bad_acc": [], "fails": []}
         slock = threading.Lock()
 
@@ -2021,15 +2024,16 @@ class ApiTab(QWidget):
                 emit(-1, f"「{nick}」的分类不对({a.get('category')!r}),先不发 —— 去「设置」里重新「从旧软件搬账号…」")
                 bump("fail", len(idx))
                 return
-            for k, i in enumerate(idx):
+            def one(k, i, turn=True):
+                """发一条:返回 "ok" / "next"(这条跳过或没发成,接着下一条)/ "stop"(停了)/ "fatal"(号的密钥坏了,这个号后面的别发)。"""
                 if stopped():
-                    return
+                    return "stop"
                 v = vs[i]
                 if self.rec.blocked(v.path):              # 防重发:已发 / 结果不明都不发
                     emit(i, self.rec.status_of(v.path))
-                    continue
-                if not wait_turn(stopped):
-                    return
+                    return "next"
+                if turn and not wait_turn(stopped):
+                    return "stop"
                 rid = {}
 
                 def begin(vid, v=v, rid=rid):
@@ -2051,12 +2055,12 @@ class ApiTab(QWidget):
                                 log=lambda m, i=i: emit(i, m + "…"))
                 except Stopped:
                     emit(i, "停下了,没发")
-                    return
+                    return "stop"
                 except _Taken:                            # 别的号刚发过 / 正在发同一个文件:这条不发
                     emit(i, self.rec.status_of(v.path) or "已发")
                     emit(-1, f"「{nick}」{v.title}:这个文件别的号已经发了 / 正在发,这次不发")
                     done_one(emit)
-                    continue
+                    return "next"
                 except Unknown as e:                      # 发布请求发出去了没收到回话:可能发了,不能自动再发
                     if "id" in rid:
                         self.rec.api_finish(rid["id"], "结果不明", str(e))
@@ -2069,7 +2073,7 @@ class ApiTab(QWidget):
                     emit(-1, f"「{nick}」{v.title}:结果不明 —— 去企鹅号后台看一眼,再右键标「发了 / 没发」")
                     bump("unsure")
                     done_one(emit)
-                    continue
+                    return "next"
                 except Exception as e:
                     raw = redact(str(e)) if isinstance(e, ApiError) else f"{type(e).__name__}: {redact(str(e))}"
                     short, tip = friendly(e)
@@ -2085,15 +2089,8 @@ class ApiTab(QWidget):
                     bump("fail")
                     done_one(emit)
                     if getattr(e, "fatal", False):        # 换不到 token:这个号后面的都别试了,标出来
-                        left = idx[k + 1:]
-                        for j in left:
-                            self.rec.api_result(vs[j], "没发成", "没发:号的密钥坏了(没轮到)")
-                            emit(j, "没发:号的密钥坏了")
-                        bump("skip", len(left))
-                        with slock:
-                            stats["bad_acc"].append(nick)
-                        return
-                    continue
+                        return "fatal"
+                    return "next"
                 apicover.cleanup(cimg, src)
                 note = f"article_id={r['article_id']} vid={r['vid']}" + ("" if r["status"] == "成功" else "(平台还在处理)") + \
                     (f";封面{r.get('cover')}" if r.get("cover") else "")
@@ -2109,7 +2106,7 @@ class ApiTab(QWidget):
                     emit(i, "已发(但没记上,去后台核对)")
                     emit(-1, f"「{v.title}」发出去了,但发布记录写不进去({type(e).__name__}),先不挪文件。软件不会再发它;去后台核对一下")
                     done_one(emit)
-                    continue
+                    return "next"
                 try:
                     old = v.path
                     v.path = apisrc.move_published(v.path, apisrc.archive_dir(self.st, "", a))
@@ -2121,6 +2118,40 @@ class ApiTab(QWidget):
                     pass
                 emit(i, "已发" if r["status"] == "成功" else "已发(平台处理中)")
                 done_one(emit)
+                return "ok"
+
+            def fatal_rest(left):
+                for j in left:
+                    self.rec.api_result(vs[j], "没发成", "没发:号的密钥坏了(没轮到)")
+                    emit(j, "没发:号的密钥坏了")
+                bump("skip", len(left))
+                with slock:
+                    stats["bad_acc"].append(nick)
+            if per_acc == 1:                                   # 一条一条发(原来的样子)
+                for k, i in enumerate(idx):
+                    r1 = one(k, i)
+                    if r1 == "stop":
+                        return
+                    if r1 == "fatal":
+                        fatal_rest(idx[k + 1:])
+                        return
+                return
+            # 用户 2026-10-19:同一个号一次传几条 —— 一组同时传,这组都发完歇「间隔」秒再下一组;所有号加起来同时最多 6 条
+            for g0 in range(0, len(idx), per_acc):
+                if stopped() or not wait_turn(stopped):
+                    return
+                grp = list(enumerate(idx[g0:g0 + per_acc], g0))
+
+                def run1(ki):
+                    with upsem:
+                        return "stop" if stopped() else one(ki[0], ki[1], turn=False)
+                with ThreadPoolExecutor(len(grp)) as ex:
+                    res1 = list(ex.map(run1, grp))
+                if "fatal" in res1:
+                    fatal_rest(idx[g0 + len(grp):])
+                    return
+                if "stop" in res1:
+                    return
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(par) as ex:
@@ -2143,7 +2174,7 @@ class ApiTab(QWidget):
             return summary
         self._pub_begin(len(rows))
         self._start(fn, f"开始发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
-                    f",间隔 {gap:g} 秒")
+                    (f",同一个号一次传 {per_acc} 条" if per_acc > 1 else "") + f",间隔 {gap:g} 秒")
 
     # ---------------- 定时发布(到点自己点「发布」,发到完为止) ----------------
     def _sched_changed(self):

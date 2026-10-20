@@ -2881,6 +2881,96 @@ def test_yellow_manual(tmp: Path):
     dlg.close()
 
 
+def test_api_per_acc(tmp: Path):
+    print("[同一个号一次传几条(2026-10-19):一组同时传、组间歇间隔;默认 1 = 一条一条;号的密钥坏了后面的不发]")
+    import threading
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    root = tmp / "api_pa"
+    apiacc.save([{"nick": n, "source_name": g, "client_id": g, "secret": apiacc.seal("s"), "category": 1604, "enabled": True}
+                 for g, n in (("CSGO", "CSGO战神君"), ("PUBG", "PUBG突围君"))])
+    st = Settings(tmp / "st_pa.json")
+    check(st.get("api_per_acc") == 1, "默认同一个号一次传 1 条(一条一条发)")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "发布pa" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    lock = threading.Lock()
+    live = {"now": 0, "max": {}, "starts": []}
+
+    class Slow:
+        def __init__(self, cid, sec, **k):
+            self.cid = cid
+
+        def send(self, path, title, cat, before_publish=None, **k):
+            if self.cid == "PUBG" and live.get("bad_pubg"):
+                raise omapi.ApiError("换 token 失败", "40001", fatal=True)
+            with lock:
+                live["now"] += 1
+                live["max"][self.cid] = max(live["max"].get(self.cid, 0), live["now"])
+                live["starts"].append((time.time(), title))
+            time.sleep(0.3)
+            with lock:
+                live["now"] -= 1
+            if before_publish:
+                before_publish("V")
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+    real = (omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning)
+    omapi.Client, T.ask = Slow, (lambda *a, **k: True)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: 0)
+    try:
+        def run(per, threads, only=None):
+            st["api_per_acc"], st["api_threads"] = per, threads
+            for g, n in (("CSGO", "CSGO战神君"), ("PUBG", "PUBG突围君")):    # 每轮一份新视频(发完会挪走)
+                d = root / "游戏视频" / f"{g}--{n}" / "10.18"
+                d.mkdir(parents=True, exist_ok=True)
+                for k in range(7 if g == "CSGO" else 3):
+                    (d / f"{g}{k}_{per}_{threads}.mp4").write_bytes(b"x")
+                for old in d.glob("*.mp4"):
+                    if not old.stem.endswith(f"_{per}_{threads}"):
+                        old.unlink()
+            rec = Records(tmp / f"rec_pa_{per}_{threads}_{bool(only)}.sqlite")
+            tab = T.ApiTab(st, rec, lambda m: None)
+            tab.set_day("10.18")
+            _wait(app, lambda: not tab.busy() and len(tab.videos) == 10)
+            for v in tab.videos:
+                v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+            tab._update_scope()
+            live["max"], live["starts"] = {}, []
+            tab.run_publish(only=[i for i, v in enumerate(tab.videos) if only is None or v.account == only])
+            _wait(app, lambda: not tab.busy(), 60)
+            app.processEvents()
+            return tab, rec
+        tab, rec = run(1, 1, only="CSGO战神君")
+        check(live["max"].get("CSGO") == 1 and sum(1 for v in tab.videos if rec.status_of(v.path) == "已发") == 7,
+              f"一次传 1 条:一条一条发,7 条都发了 -> 同时最多 {live['max']}")
+        tab, rec = run(3, 1, only="CSGO战神君")
+        t = sorted(x for x, _ in live["starts"])
+        groups = [len([x for x in t if t[g] <= x < t[g] + 0.2]) for g in (0, 3, 6)]
+        check(live["max"].get("CSGO") == 3 and groups == [3, 3, 1] and sum(1 for v in tab.videos if rec.status_of(v.path) == "已发") == 7,
+              f"一次传 3 条:3 + 3 + 1 一组组发,7 条都发了 -> 同时最多 {live['max']},每组 {groups}")
+        live["bad_pubg"] = True
+        tab, rec = run(5, 2)
+        pubg = [i for i, v in enumerate(tab.videos) if v.account == "PUBG突围君"]
+        sts = [tab.state.get(i, "") for i in pubg]
+        check(all(x.startswith(("没发成", "没发:")) for x in sts) and all(not rec.status_of(tab.videos[i].path) for i in pubg)
+              and sum(1 for v in tab.videos if rec.status_of(v.path) == "已发") == 7 and live["max"].get("CSGO", 0) <= 6,
+              f"号的密钥坏了:这个号这组 + 后面的都不发,别的号照发 -> {sts}")
+        live["bad_pubg"] = False
+        tab, rec = run(5, 1)
+        check(sum(1 for v in tab.videos if rec.status_of(v.path) == "已发") == 10 and len(live["starts"]) == 10,
+              "一次传 5 条:全部一条不落、每条只发一次")
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy(), 30)
+        check(len(live["starts"]) == 10, "再点一次发布:发过的不再发(防重发照旧)")
+    finally:
+        omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
+
+
 def test_misfire_api(tmp: Path):
     print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
@@ -3429,6 +3519,7 @@ if __name__ == "__main__":
     test_pub_progress(tmp)
     test_awake(tmp)
     test_yellow_manual(tmp)
+    test_api_per_acc(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

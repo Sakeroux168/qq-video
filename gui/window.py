@@ -2039,6 +2039,14 @@ class MainWindow(QMainWindow):
         sp_thr.setRange(1, 5)
         from gui.api_tab import _num
         sp_thr.setValue(_num(self.st.get("api_threads"), 1))
+        sp_per = QSpinBox()
+        sp_per.setRange(1, 5)
+        sp_per.setSuffix(" 条")
+        sp_per.setValue(max(1, min(5, _num(self.st.get("api_per_acc"), 1))))
+        sp_per.setToolTip("一个号一次同时传几条:1 = 一条一条发(原来的样子)。\n"
+                          "只剩一个号在发的时候特别慢(每分钟 2 条左右),设成 3 能快一倍多;3 条以上网差不多就满了。\n"
+                          "一组同时传,这组都发完歇「每条间隔」秒再下一组;所有号加起来同时最多传 6 条。\n"
+                          "平台要是报「太频繁」之类的没发成,就改回 1(没发成的点「再发一次没发成的」补发)。")
         sp_gap = QSpinBox()
         sp_gap.setRange(0, 600)
         sp_gap.setSuffix(" 秒")
@@ -2056,6 +2064,7 @@ class MainWindow(QMainWindow):
         f2.addRow("封面(视频旁边的同名图)", c_cov)
         f2.addRow("", QLabel("传封面要开着创作罐头(用它登录着的企鹅号传图);没有同名图的、传不上的,平台自己截一帧"))
         f2.addRow("几个号一起发", sp_thr)
+        f2.addRow("同一个号一次传几条", sp_per)
         f2.addRow("每条间隔", sp_gap)
         f2.addRow("", QLabel("1 = 一个号一个号地发,最稳;间隔 = 上一条发完歇几秒再发下一条"))
         b_mig = QPushButton("从旧软件搬账号…")
@@ -2114,7 +2123,7 @@ class MainWindow(QMainWindow):
         self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
                        archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
-                       api_threads=sp_thr.value(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
+                       api_threads=sp_thr.value(), api_per_acc=sp_per.value(), api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
                        api_archive=api_get() or self.st.get("api_archive", ""),
                        api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or TH.DEFAULT,
                        splash=k_splash.isChecked())
