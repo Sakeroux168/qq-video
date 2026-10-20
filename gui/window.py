@@ -127,9 +127,10 @@ class BatchWorker(QThread):
     finished_batch = Signal(object, str, str)      # (结果列表 or None, 出错说明, 自动发布:""没发 / "ok"发了 / 其它 = 为什么没发)
 
     def __init__(self, account, videos, shot_dir, parent=None, auto_publish: bool = False, unattended: bool = False,
-                 sched_at: str = ""):
+                 sched_at: str = "", publish_only: bool = False):
         super().__init__(parent)
         self.account, self.videos, self.shot_dir = account, videos, shot_dir
+        self.publish_only = publish_only          # 这批已经摆好了(因为标黄停下来),人说「封面看过了」:只点「全部发布」
         self.auto_publish = auto_publish or unattended
         self.unattended = unattended              # 定时发布(没人看着):没摆好的再试一次,还不行关掉不发,其它照发
         self.sched_at = sched_at                  # 北京时间:点「全部定时发布」定到这个点(不点「全部发布」)
@@ -143,6 +144,14 @@ class BatchWorker(QThread):
         r = None
         try:
             r = Runner(log=self.log.emit, stopped=lambda: self._stop, shot_dir=self.shot_dir)
+            if self.publish_only:
+                r.open_account(self.account)
+                try:
+                    pub = r.publish_all([v.title for v in self.videos])
+                except PrepError as e:
+                    pub = f"自动发布停下了:{e}"
+                self.finished_batch.emit([(v, True, "") for v in self.videos], "", pub)
+                return
             res = r.prepare_batch(self.account, self.videos, on_one=lambda v, ok, why: self.one.emit(v, ok, why),
                                   retry=self.unattended)
             pub = ""
@@ -324,6 +333,13 @@ class MainWindow(QMainWindow):
                                "有一条没摆好、或者有标黄的,就停下来叫你。点完发布弹出没见过的框也停下来。")
         self.k_auto.setChecked(False)                  # 每次打开都不勾(审查 2026-10-18:记住了容易忘,一点「摆下一批」就真发了)
         self.k_auto.toggled.connect(self._auto_toggled)
+        self.b_pubgo = QPushButton("封面看过了,接着自动发布")
+        self.b_pubgo.setObjectName("primary")
+        self.b_pubgo.setMinimumHeight(40)
+        self.b_pubgo.setToolTip("这批因为有封面标黄停下来了:在罐头里 / 预览里看过没问题,点这个 → 软件自己点「全部发布」,接着摆下一批")
+        self.b_pubgo.clicked.connect(self.continue_publish)
+        self.b_pubgo.hide()
+        self._yellow_stop = False
         self.b_drop = QPushButton("这批不要了")
         self.b_drop.setToolTip("这批没发(在罐头里删了):记录作废,下次还会再摆这些视频。")
         self.b_drop.clicked.connect(self.batch_dropped)
@@ -375,7 +391,7 @@ class MainWindow(QMainWindow):
         self.lab_sched.setObjectName("warnText")
         bar.addWidget(self.lab_sched)
         bar.addSpacing(28)
-        for b in (self.b_drop, self.b_sent, self.b_go, self.b_stop):
+        for b in (self.b_drop, self.b_sent, self.b_pubgo, self.b_go, self.b_stop):
             bar.addWidget(b)
         # 工具那一排:这次摆几条(绿字)+ 查水印 / 模糊水印 / 封面都看过了 / 自动点发布
         tools = QHBoxLayout()
@@ -1093,7 +1109,8 @@ class MainWindow(QMainWindow):
     def _refresh_buttons(self):
         running = bool(self.worker and self.worker.isRunning())
         waiting = bool(self.batch_id) and not running
-        for b, main in ((self.b_go, not waiting), (self.b_sent, waiting)):
+        yellow = waiting and getattr(self, "_yellow_stop", False)
+        for b, main in ((self.b_go, not waiting), (self.b_sent, waiting and not yellow)):
             if (b.objectName() == "primary") != main:
                 b.setObjectName("primary" if main else "")
                 b.style().unpolish(b)
@@ -1111,6 +1128,7 @@ class MainWindow(QMainWindow):
         self.b_go.setVisible(not waiting)
         self.b_sent.setVisible(bool(self.batch_id))
         self.b_drop.setVisible(bool(self.batch_id))
+        self.b_pubgo.setVisible(yellow)
         self.b_stop.setVisible(running)
         # 审查 16:摆的时候 / 摆好等确认时底栏只留要点的,「查水印 / 模糊水印 / 封面都看过了」先藏起来
         for b in (self.b_wm, self.b_blur, self.b_allok):
@@ -1144,6 +1162,10 @@ class MainWindow(QMainWindow):
             acc = self.batch_videos[0].account if self.batch_videos else ""
             big, tone = (f"「{acc}」这批 {nb} 条摆好了" if acc else f"这批 {nb} 条摆好了"), "good"
             sub = "去罐头里检查,点「发布 → 全部发布」→ 回来点「这批发好了」(不要了就在罐头里删掉,点「这批不要了」)"
+            if getattr(self, "_yellow_stop", False):
+                ny = sum(1 for v in self.batch_videos if v.warn)
+                big, tone = f"「{acc}」这批摆好了,{ny} 条封面标黄" if ny else big, "warn"
+                sub = "看过没问题就点「封面看过了,接着自动发布」,软件自己点发布、接着摆下一批;要改就去罐头里改好再点"
         elif not self.c_date.currentData():
             big, sub, tone = "先选要发哪天的", PICK_DAY, ""
         elif not n:
@@ -1183,6 +1205,38 @@ class MainWindow(QMainWindow):
     def _ask(self, title: str, text: str, yes: str, no: str, default_no: bool = False, head: str = "") -> bool:
         import gui.api_tab as A                       # 中文动词按钮的确认框(和接口页同一个);head = 第一行红字
         return A.ask(self, title, text, yes, no, default_no=default_no, head=head)
+
+    def _ask_yellow(self, n: int, how: dict) -> bool:
+        """A:勾了「摆好后自动点发布」、勾上的员工里有标黄的封面 → 问一次。True = 都看过了(去黄,一路自动发);
+        how["stop"] = 还没看(照旧,有标黄的那批停下来叫人);都不是 = 先不摆。"""
+        import gui.api_tab as A
+        return A.ask(self, "摆下一批", f"勾上的员工里有 {n} 条封面标黄(软件拿不准框得对不对)。\n\n"
+                                    "都在「预览封面」里看过、没问题了吗?\n"
+                                    "· 都看过了:它们不再标黄,这次一路自动发到底,中间不再停\n"
+                                    "· 还没看:照旧摆,摆到有标黄的那批就停下来叫你",
+                     "都看过了,一路自动发", "先不摆", extra="还没看,停下来叫我", on_extra=lambda: how.update(stop=True))
+
+    def continue_publish(self):
+        """B:这批因为封面标黄停下来了,人看过了 → 软件在罐头里点「全部发布」,然后接着摆下一批。"""
+        if not self.batch_id or (self.worker and self.worker.isRunning()):
+            return
+        vids = list(self.batch_videos)
+        acc = vids[0].account if vids else ""
+        ylw = [v for v in vids if v.warn]
+        if not self._ask("接着自动发布", f"「{acc}」这批 {len(vids)} 条已经摆好了" + (f",其中 {len(ylw)} 条封面标黄" if ylw else "") + "。\n\n"
+                         "封面都看过了、没问题?点「看过了,发布」以后软件在罐头里点「全部发布」,"
+                         + ("然后接着摆下一批。" if self.k_auto.isChecked() else "发完就停。"),
+                         "看过了,发布", "先不", default_no=True, head="这次会自动点发布:马上发出去(不是定时)"):
+            return
+        self._mark_covers_ok(ylw)
+        self._yellow_stop = False
+        shots = str(data_dir() / "截图" / bj_str()[:10])
+        self.worker = BatchWorker(acc, vids, shots, self, auto_publish=True, publish_only=True)
+        self.worker.log.connect(self.say)
+        self.worker.finished_batch.connect(self._batch_done)
+        self.worker.start()
+        self.say(f"封面看过了:软件在罐头里给「{acc}」这批点「全部发布」…")
+        self._refresh_buttons()
 
     def _nothing_left(self) -> str:
         """没有能摆的了:说清楚是真发完了,还是剩下的缺无字封面(png)。"""
@@ -1247,6 +1301,18 @@ class MainWindow(QMainWindow):
                                     f"这批里有 {len(gone)} 条视频文件找不到了(员工改名 / 挪走了?),比如「{gone[0].title[:24]}」。\n\n"
                                     "点「刷新」重新读一遍文件夹再摆。")
             return
+        if self.k_auto.isChecked() and not chained and not self._unattended:
+            # 用户 2026-10-19:不定时的时候标黄的去不掉,每批都停下来叫我手动发 → 开始前问一次(和定时那边一样)
+            ylw = [v for v in self.videos if v.warn and v.cover and not self.rec.status_of(v.path) and not v.skip]
+            if ylw:
+                how = {}
+                yes = self._ask_yellow(len(ylw), how)
+                if how.get("stop"):
+                    pass                                    # 还没看:照旧,有标黄的那批停下来叫人
+                elif not yes:
+                    return
+                else:
+                    self._mark_covers_ok(ylw)
         warn = [v for v in vids if v.warn]
         # 没有无字封面(png)的不摆,跳过(审查:原来一条没 png 就挡住这个号后面所有的)
         nocover = [v for v in self.videos if not self.rec.status_of(v.path) and (v.cover_kind or v.cover_why) and not v.cover]
@@ -1338,6 +1404,7 @@ class MainWindow(QMainWindow):
             elif self.k_auto.isChecked():
                 QMessageBox.information(self, "发完了", self._nothing_left())
             return
+        self._yellow_stop = bool(pub) and "标黄" in pub and not err and bool(ok) and not bad
         if pub:
             self.say(f"⚠ {pub}")
         if err:
@@ -1356,6 +1423,8 @@ class MainWindow(QMainWindow):
             self.say(f"摆好 {len(ok)} 条,等你在罐头里点发布")
             if pub:
                 text = f"{pub}。\n\n" + text
+            if self._yellow_stop:
+                text += "\n\n封面看过了没问题的话,点上面的「封面看过了,接着自动发布」,软件自己点发布、接着摆下一批。"
             QMessageBox.information(self, "摆好了", text)
         self._refresh_buttons()
         self._update_sum()
@@ -1457,13 +1526,20 @@ class MainWindow(QMainWindow):
         if not self._ask("封面都看过了", f"勾上的员工里有 {len(vs)} 条封面标黄。\n\n都在「预览封面」里看过、调好了?点了以后它们不再标黄,"
                                         "自动发布 / 定时发布不会再为它们停下来。", "都看过了", "还没看完"):
             return
+        self._mark_covers_ok(vs)
+
+    def _mark_covers_ok(self, vs):
+        """这几条标黄的封面记成「人看过了」:不再标黄,自动发布 / 定时发布不会再为它们停下来。"""
         for v in vs:
             self.adj.set_ok(v.path, v.cover)
             v.warn = False
             if "人看过" not in v.cover_why:
                 v.cover_why += "(人看过了)"
-            self._fill_row(self.videos.index(v))
-        self.say(f"{len(vs)} 条标黄的封面记成「人看过了」,不再标黄")
+            if v in self.videos:
+                self._fill_row(self.videos.index(v))
+        if vs:
+            self.say(f"{len(vs)} 条标黄的封面记成「人看过了」,不再标黄")
+        self._update_scope()
 
     def _sched_fire(self, date: str, at: str = ""):
         """选这天、勾上所有员工、开始一批一批摆 + 自己点「全部发布」;at(北京时间)= 每批点「全部定时发布」定到这个点。"""
@@ -1589,6 +1665,7 @@ class MainWindow(QMainWindow):
                          "都发了,记下", "还没", default_no=True):
             return
         n = self.rec.mark_batch_published(self.batch_id)
+        self._yellow_stop = False
         self.say(f"记下:这批 {n} 条发了({bj_str()})")
         bad = self.rec.failed_in_batch(self.batch_id)
         if bad and self._ask("这批发好了", f"这批里还有 {len(bad)} 条软件没摆成(比如「{bad[0]['title'][:20]}」)。\n\n"
@@ -1604,6 +1681,7 @@ class MainWindow(QMainWindow):
         if not self._ask("这批不要了", "这批没发(在罐头里删掉了)?记录作废,下次这些视频还会再摆。", "不要了", "先留着"):
             return
         n = self.rec.drop_batch(self.batch_id)
+        self._yellow_stop = False
         self.say(f"这批 {n} 条作废了")
         self.batch_id = ""
         self._after_batch()

@@ -135,7 +135,9 @@ class CoverDialog(QDialog):
             f" QToolButton#ratio:hover {{ border-color:{t['dim']}; }}"
             f" QToolButton#ratio:checked {{ background:{t['acc_bg']}; border:2px solid {t['acc']}; color:{t['acc']}; }}"
             f" QLabel#counter {{ background:{t['acc_bg']}; color:{t['acc']}; border-radius:11px; padding:2px 10px; font-weight:bold; }}"
-            f" QLabel#toast {{ color:{t['ok']}; font-weight:bold; }}")
+            f" QLabel#toast {{ color:{t['ok']}; font-weight:bold; }}"
+            f" QPushButton#okBtn {{ background:{t['ok_bg']}; color:{t['ok']}; border:1px solid {t['ok']}; font-weight:bold; border-radius:8px; }}"
+            f" QPushButton#okBtn:hover {{ background:{t['ok']}; color:#ffffff; }}")
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 14)
         v.setSpacing(12)
@@ -231,6 +233,10 @@ class CoverDialog(QDialog):
         self.b_ai.clicked.connect(self.toggle_ai)
         self.b_again = QPushButton("重新扩一张")
         self.b_again.clicked.connect(self.ai_again)
+        self.b_okc = QPushButton("✓ 这张没问题")
+        self.b_okc.setObjectName("okBtn")
+        self.b_okc.setToolTip("这条封面标黄(软件拿不准):你看过了、框得没问题 → 点这个,不再标黄,自动发布 / 定时发布不会再为它停下来")
+        self.b_okc.clicked.connect(self.mark_ok)
         self.b_pick = QPushButton("更换封面…")
         self.b_pick.setToolTip("封面配错了:自己选一张图换上(png / jpg)。软件记着,摆的时候用你选的")
         self.b_pick.clicked.connect(self.pick_cover)
@@ -248,6 +254,8 @@ class CoverDialog(QDialog):
         b_ok = QPushButton("关闭")
         b_ok.setObjectName("primary")
         b_ok.clicked.connect(self.accept)
+        bar.addWidget(self.b_okc)
+        bar.addSpacing(6)
         bar.addWidget(self.b_pick)
         bar.addWidget(self.b_unpick)
         bar.addWidget(self.b_auto)
@@ -320,6 +328,7 @@ class CoverDialog(QDialog):
         self.lab_title.setText(f"视频:{v.title}")
         self.lab_why.setText(v.cover_why)
         self.b_unpick.setVisible(bool(self.adj.own_cover(v.path)))
+        self.b_okc.setVisible(bool(v.warn and v.cover))
         self.b_prev.setEnabled(self.i > 0)
         self.b_next.setEnabled(self.i < len(self.videos) - 1)
         self.refresh()
@@ -498,6 +507,20 @@ class CoverDialog(QDialog):
         C.decide(v)
         C.note_wide(v)
         self.show_video()
+        self.changed.emit(self.i)
+
+    def mark_ok(self):
+        """C:这张标黄的封面人看过了,没问题 → 不再标黄(和「封面都看过了」一样,只管这一条)。"""
+        v = self.v
+        if not v.cover:
+            return
+        self.adj.set_ok(v.path, v.cover)
+        v.warn = False
+        if "人看过" not in v.cover_why:
+            v.cover_why += "(人看过了)"
+        self.lab_why.setText(v.cover_why)
+        self.b_okc.hide()
+        self._toast("记下了:这张不再标黄")
         self.changed.emit(self.i)
 
     def go(self, d):

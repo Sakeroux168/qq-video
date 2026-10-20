@@ -2751,6 +2751,136 @@ def test_awake(tmp: Path):
     check(isinstance(winfix.czgt_windows(), list), "能找罐头窗口(找不到就是空的)")
 
 
+def test_yellow_manual(tmp: Path):
+    print("[教育号不定时也能去掉标黄(2026-10-19):A 开始前问一次 / B 停下来能接着自动发布 / C 预览里「这张没问题」]")
+    from PySide6.QtCore import QObject, QTimer, Signal
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    import gui.api_tab as A
+    import gui.window as GW
+    from qe.adjust import Adjustments
+    from qe.config import Settings
+    from qe.records import Records
+    root = tmp / "素材yellow"
+    for emp, ts in (("张", ("黄的一条视频", "好的一条视频")), ("李", ("黄的三条视频", "好的三条视频"))):
+        d = root / "10.18" / "小天地" / emp
+        d.mkdir(parents=True)
+        for t in ts:
+            (d / f"{t}.mp4").write_bytes(b"x")
+            _img(d / f"{t}.png", 640, 360)
+    calls = []
+
+    class FakeBW(QObject):
+        log = Signal(str)
+        one = Signal(object, bool, str)
+        finished_batch = Signal(object, str, str)
+
+        def __init__(self, acc, vids, shots, parent=None, auto_publish=False, unattended=False, sched_at="", publish_only=False):
+            super().__init__(parent)
+            self.vids, self.auto, self.only = vids, auto_publish, publish_only
+            calls.append(("只点发布" if publish_only else "摆", [v.title for v in vids]))
+
+        def isRunning(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def start(self):
+            def go():
+                if self.only:
+                    self.finished_batch.emit([(v, True, "") for v in self.vids], "", "ok")
+                    return
+                res = []
+                for v in self.vids:
+                    self.one.emit(v, True, "")
+                    res.append((v, True, ""))
+                ylw = [v for v in self.vids if v.warn]
+                pub = ("ok" if not ylw else f"有 {len(ylw)} 条封面标黄(要人看一眼),没自动发布") if self.auto else ""
+                self.finished_batch.emit(res, "", pub)
+            QTimer.singleShot(0, go)
+
+    def fake_decide(v):
+        v.cover, v.cover_kind, v.cover_why, v.plan = v.png, "png", "测试", {}
+        v.warn = "黄" in v.title
+    real = (GW.BatchWorker, GW.C.decide, GW.C.note_wide, QMessageBox.information, A.ask)
+    boxes, asked = [], []
+    GW.BatchWorker, GW.C.decide, GW.C.note_wide = FakeBW, fake_decide, (lambda v: None)
+    QMessageBox.information = staticmethod(lambda _p, t, x, *a, **k: boxes.append(x))
+    try:
+        rec = Records(tmp / "r_yellow.sqlite")
+        st = Settings(tmp / "s_yellow.json")
+        st["material_root"] = str(root)
+        st["api_roots"] = [str(tmp / "api_none")]
+        st["ai_key"] = "test"
+        st["batch_size"] = 2
+        w = GW.MainWindow(st, rec)
+        w.c_date.setCurrentIndex(w.c_date.findData("10.18"))
+        from PySide6.QtCore import Qt
+        top = next(w.tree.topLevelItem(k) for k in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(k).text(0) == "家长小天地")
+        kids = {top.child(k).data(0, Qt.ItemDataRole.UserRole + 3): top.child(k) for k in range(top.childCount())}
+        kids["张"].setCheckState(0, Qt.CheckState.Checked)
+        _wait(app, lambda: not (w.cover_worker and w.cover_worker.isRunning()))
+        w.k_auto.setChecked(True)
+        w._ask = lambda *a, **k: True
+
+        # A「还没看」:照旧摆,摆到有标黄的那批停下来
+        def not_yet(*a, **k):
+            asked.append(a[1])
+            k["on_extra"]()
+            return False
+        A.ask = not_yet
+        w.start_batch()
+        _wait(app, lambda: bool(boxes), 10)
+        y1 = next(v for v in w.videos if v.title == "黄的一条视频")
+        check(asked and asked[0] == "摆下一批" and calls == [("摆", ["好的一条视频", "黄的一条视频"])] and y1.warn,
+              f"A:勾了自动发布、有标黄 → 开始前问一次;选「还没看」照旧摆 -> {calls}")
+        check(w._yellow_stop and not w.b_pubgo.isHidden() and "标黄" in w.hero.big.text()
+              and "接着自动发布" in boxes[-1], f"摆好了因为标黄停下来:大字写标黄,露出「封面看过了,接着自动发布」-> {w.hero.big.text()}")
+        # B:点「封面看过了,接着自动发布」→ 软件只点全部发布,记成已发,不再标黄
+        A.ask = real[4]
+        w.continue_publish()
+        _wait(app, lambda: not w.batch_id, 10)
+        st_ = {v.title: rec.status_of(v.path) for v in w.videos}
+        check(calls[-1] == ("只点发布", ["好的一条视频", "黄的一条视频"]) and st_["黄的一条视频"] == "已发" and st_["好的一条视频"] == "已发"
+              and not y1.warn and Adjustments(tmp / "封面调整.json").is_ok(y1.path, y1.cover) and w.b_pubgo.isHidden(),
+              f"B:接着自动发布 = 只点「全部发布」、这批记成已发、封面记成看过了 -> {calls[-1]} {st_}")
+        # A「都看过了」:开始前就去黄,一路发,不停
+        w.k_auto.setChecked(False)
+        kids["李"].setCheckState(0, Qt.CheckState.Checked)
+        _wait(app, lambda: not (w.cover_worker and w.cover_worker.isRunning()))
+        w.k_auto.setChecked(True)
+        A.ask = lambda *a, **k: asked.append(a[1]) or True
+        boxes.clear()
+        w.start_batch()
+        _wait(app, lambda: not w.batch_id and calls[-1][0] == "摆", 10)
+        app.processEvents()
+        y3 = next(v for v in w.videos if v.title == "黄的三条视频")
+        check(not y3.warn and rec.status_of(y3.path) == "已发" and not w._yellow_stop,
+              f"A:选「都看过了」→ 去黄、这批自动发出去,中间不停 -> {calls[-1]} {rec.status_of(y3.path)}")
+        w.k_auto.setChecked(False)
+        w.close()
+    finally:
+        GW.BatchWorker, GW.C.decide, GW.C.note_wide, QMessageBox.information, A.ask = real
+    # C:预览里「这张没问题」
+    from gui.cover_dialog import CoverDialog
+    from qe.folders import Video
+    d = tmp / "yc"
+    _img(d / "这条.png", 640, 360)
+    (d / "这条.mp4").write_bytes(b"x")
+    v = Video(path=str(d / "这条.mp4"), title="这条", account="号", employee="甲", date="10.18", png=str(d / "这条.png"))
+    v.cover, v.cover_kind, v.cover_why, v.plan, v.warn = v.png, "png", "没认出人,框放中间(看一眼)", {}, True
+    adj = Adjustments(tmp / "adj_yc.json")
+    dlg = CoverDialog([v], 0, adj)
+    got = []
+    dlg.changed.connect(got.append)
+    vis0 = not dlg.b_okc.isHidden()
+    dlg.mark_ok()
+    check(vis0 and not v.warn and adj.is_ok(v.path, v.cover) and got == [0] and dlg.b_okc.isHidden() and "人看过" in v.cover_why,
+          "C:标黄的封面在预览里点「这张没问题」→ 不再标黄、记在硬盘上")
+    dlg.close()
+
+
 def test_misfire_api(tmp: Path):
     print("[防误发 · 16 个号(改进清单 A1 A2):按钮叫「现在发布 N 条」、定时挪开;确认框默认「先不发」、红字写现在马上发、能改成定时]")
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
@@ -3298,6 +3428,7 @@ if __name__ == "__main__":
     test_ui_g(tmp)
     test_pub_progress(tmp)
     test_awake(tmp)
+    test_yellow_manual(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)
