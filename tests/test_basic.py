@@ -1204,9 +1204,9 @@ def test_daily_plan(tmp: Path):
     from qe.records import Records
     from gui.daily_tab import DailyTab
     st = Settings(tmp / "plan_st.json")
-    check(plan.quota_of(st, "和平精英上分君") == 80 and plan.quota_of(st, "国漫解说馆z") == 50 and plan.quota_of(st, "家长小天地") == 0,
-          "每个号每天规定条数(教育不分号)")
-    check([plan.cat_total(g) for g in plan.plan(st)] == [380, 106, 200], "游戏 380 / 教育 106 / 动漫 200")
+    check(plan.quota_of(st, "和平精英上分君") == 80 and plan.quota_of(st, "国漫解说馆z") == 50 and plan.quota_of(st, "家长小天地") == 54
+          and plan.quota_of(st, "家长研习空间") == 102, "每个号每天规定条数(教育 2026-10-19 定了:小天地 54、研习空间 102)")
+    check([plan.cat_total(g) for g in plan.plan(st)] == [380, 156, 200], "游戏 380 / 教育 156 / 动漫 200")
     rec = Records(tmp / "plan.sqlite")
 
     class V:
@@ -1222,13 +1222,13 @@ def test_daily_plan(tmp: Path):
     rec.manual_published(type("E", (), {"date": "10.14", "account": "家长小天地", "employee": "张三", "title": "e1",
                                         "path": str(tmp / "e1.mp4"), "cover_kind": ""}))
     s1 = plan.summary(rec, st, day)
-    check(s1["rows"] == [("游戏总发布量", 380, 3), ("教育总发布量", 106, 1), ("动漫总发布量", 200, 1)] and s1["total"] == (686, 5),
+    check(s1["rows"] == [("游戏总发布量", 380, 3), ("教育总发布量", 156, 1), ("动漫总发布量", 200, 1)] and s1["total"] == (736, 5),
           f"按发出去的日期数(素材文件夹 10.14 / 10.15 都算今天发的)-> {s1['rows']}")
     tsv = plan.as_tsv(s1).splitlines()
-    check(tsv[0].split("\t") == [plan.short_day(day), "发布企鹅号视频", "游戏总发布量", "380", "3"] and tsv[3].split("\t")[2:] == ["总发布量", "686", "5"],
+    check(tsv[0].split("\t") == [plan.short_day(day), "发布企鹅号视频", "游戏总发布量", "380", "3"] and tsv[3].split("\t")[2:] == ["总发布量", "736", "5"],
           "复制的文字:日期 / 工作内容 / 品类 / 规定 / 实际,和企业微信表一样")
     short = plan.short_list(s1)
-    check(short[0][0] == "和平精英上分君" and all(n != "家长小天地" for n, _q, _a in short), "没达标的号:差得多的排前面;教育不算")
+    check(short[0][0] == "家长研习空间" and ("家长小天地", 54, 1) in short, f"没达标的号:差得多的排前面;教育也按号算 -> {short[:3]}")
     dt = DailyTab(st, rec)
     check("3 / 380" in dt.cards.vals["游戏"].text() and dt.t.rowCount() == 18, "每日汇总页:卡片和每个号的表")
     dt.copy_day()
@@ -2632,7 +2632,7 @@ def test_ui_g(tmp: Path):
     w = GW.MainWindow(st2, Records(tmp / "rec_g2.sqlite"))
     check(w.stack.currentWidget() is w.today and w.nav.button(0).text() == "今天", "打开先看「今天」页")
     w.today.refresh(animate_=False)
-    check("今天还差" in w.today.big.text() and "686" in w.today.lab_sent.text(), f"今天页写还差多少 -> {w.today.big.text()}")
+    check("今天还差" in w.today.big.text() and "736" in w.today.lab_sent.text(), f"今天页写还差多少 -> {w.today.big.text()}")
     check(w.today.next_v.count() >= 1, "「下一步」至少有一条")
     w.goto("api")
     check(w.stack.currentWidget() is w.api_tab, "跳到 16 个号页")

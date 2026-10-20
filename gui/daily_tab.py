@@ -88,7 +88,7 @@ class DailyTab(QWidget):
         self.t.setColumnHidden(2, True)                   # 规定条数写在进度条旁边了(列还在,复制用)
         self.t.setHorizontalHeaderLabels(["品类", "号", "规定条数", "这天发了 / 规定", "还差"])
         v.addWidget(self.t, 1)
-        foot = QLabel("说明:只数用这个软件发出去的(旧软件发的、自己在后台手动发的不算);教育每个号各多少还没定,只看两个号加起来够不够 106。")
+        foot = QLabel("说明:只数用这个软件发出去的(旧软件发的、自己在后台手动发的不算)。")
         foot.setObjectName("muted")
         foot.setWordWrap(True)
         v.addWidget(foot)
