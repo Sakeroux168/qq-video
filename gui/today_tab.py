@@ -65,8 +65,7 @@ class TodayTab(QWidget):
             card.setCursor(Qt.CursorShape.PointingHandCursor)
             card.setToolTip("点这里:去「每日汇总」看每个号")
             card.setMinimumHeight(92)
-            card.setStyleSheet(f"QPushButton#ringCard{{background:{tok()['card']};border:1px solid {tok()['line']};border-radius:16px;"
-                               f"text-align:left;}} QPushButton#ringCard:hover{{border-color:{tok()['acc']};}}")
+            # 卡片的底色 / 边框放在主题 QSS 里(原来写死在这:开着软件换深色,卡片还是白底、字变白,看不见)
             card.clicked.connect(lambda: self.main.goto("daily"))
             h = QHBoxLayout(card)
             h.setContentsMargins(16, 12, 16, 12)
@@ -98,6 +97,8 @@ class TodayTab(QWidget):
                 w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             rl.addWidget(card, 1)
             self.rings[cat] = (ring, num, left, card)
+            card.setProperty("colkey", colkey)
+            ic.setProperty("colkey", colkey)
         v.addWidget(self.rings_w)
 
         two = QHBoxLayout()
@@ -142,6 +143,17 @@ class TodayTab(QWidget):
                 TodayTab._clear(it.layout())
 
     # ---------------- 数据 ----------------
+    def retheme(self):
+        """换了颜色:圆环、小图标跟着换(卡片底色在 QSS 里,自己会换)。"""
+        for ring, _num, _left, card in self.rings.values():
+            ring.color = tok()[card.property("colkey")]
+            ring.update()
+        for lab in self.findChildren(QLabel):
+            ck = lab.property("colkey")
+            if ck:
+                lab.setStyleSheet(f"font-family:'{ICON_FONT}';font-size:15px;color:{tok()[ck]};")
+        self.refresh(animate_=False)
+
     def refresh(self, animate_: bool = True):
         t = tok()
         now = bj_now()
@@ -250,6 +262,10 @@ class TodayTab(QWidget):
                              lambda: m.goto("api"), "去发"))
         elif not d:
             rows.append(("game", t["acc"], t["acc_bg"], "16 个号:先选要发哪天的", "", lambda: m.goto("api"), ""))
+        prev = getattr(api, "_prev", None)
+        if prev and d == f"{bj_now().month}.{bj_now().day}":                  # 今天的排前面;昨天剩的另起一行
+            rows.append(("game", t["orange"], t["warn_bg"], f"16 个号:昨天 {prev[0]} 还剩 {prev[1]} 条没发", "点一下切过去看",
+                         lambda: (m.goto("api"), api.set_day(prev[0])), ""))
         if n_bad:
             rows.append(("warn", t["orange"], t["warn_bg"], f"{tag}:{n_bad} 条有点小问题", "横屏 / 话题 / 水印 … 处理完能多发",
                          lambda: (m.goto("api"), api.k_bad.setChecked(True)), ""))

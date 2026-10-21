@@ -488,7 +488,7 @@ class Ring(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self._w / 2 + 1, self._w / 2 + 1, self.width() - self._w - 2, self.height() - self._w - 2)
-        pen = QPen(QColor(t["soft"]), self._w)
+        pen = QPen(QColor(t.get("track") or t["soft"]), self._w)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.drawArc(r, 0, 360 * 16)
@@ -542,17 +542,17 @@ def tone_of(text: str) -> str:
         return "bad"
     if s.startswith(("不确定", "结果不明", "要处理", "不发:", "有水印", "跳过", "有问题", "还差")):
         return "warn"
-    if s.startswith(("已发", "发完")):
-        return "done"
-    if s.startswith(("能发", "够了")):
+    if s.startswith(("已发", "发完", "够了")):
         return "ok"
+    if s.startswith("能发"):
+        return "acc"
     if s.startswith(("摆好", "正在", "发布中", "排队", "等", "检查中", "转")):
         return "acc"
     return "plain"
 
 
 class PillDelegate(QStyledItemDelegate):
-    """把某一列的状态画成彩色小胶囊(「能发」绿、「要处理」橙、「没发成」红、「已发」灰)。有子项的行(号那一行)照常画字。"""
+    """把某一列的状态画成彩色小胶囊(「能发」蓝、「要处理」橙、「没发成」红、「已发」绿)。有子项的行(号那一行)照常画字。"""
 
     def __init__(self, col: int, parent=None):
         super().__init__(parent)
@@ -621,6 +621,7 @@ def shell(pages: list[tuple[str, str, QWidget]], on_settings, version: str = "")
     top = QHBoxLayout()
     top.setSpacing(8)
     logo = QLabel(GLYPH["send"])
+    logo.setObjectName("logo")
     logo.setFixedSize(28, 28)
     logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
     logo.setStyleSheet(f"background:{t['acc']};color:#ffffff;border-radius:8px;font-family:'{ICON_FONT}';font-size:15px;")
@@ -644,6 +645,7 @@ def shell(pages: list[tuple[str, str, QWidget]], on_settings, version: str = "")
         b.setCheckable(True)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         if icon in GLYPH:
+            b.setProperty("glyph", icon)
             b.setIcon(glyph_icon(icon, t["mu"], t["acc"], 16))
             b.setIconSize(QSize(16, 16))
         bl = QHBoxLayout(b)
@@ -667,6 +669,7 @@ def shell(pages: list[tuple[str, str, QWidget]], on_settings, version: str = "")
     sv.addStretch(1)
     b = QPushButton("设置")
     b.setObjectName("nav")
+    b.setProperty("glyph", "settings")
     b.setIcon(glyph_icon("settings", t["mu"], t["acc"], 16))
     b.setIconSize(QSize(16, 16))
     b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -691,7 +694,23 @@ def set_badge(group, k: int, text: str):
     b = getattr(group, "badges", {}).get(k)
     if b is not None:
         b.setText(text)
+        from PySide6.QtGui import QFont, QFontMetrics
+        f = QFont(b.font())
+        f.setPixelSize(11)
+        f.setBold(True)
+        b.setFixedWidth(max(18, QFontMetrics(f).horizontalAdvance(text) + 12))   # 两位数不再被切成「1(」(设计师试用)
         b.setVisible(bool(text))
+
+
+def retheme_shell(root):
+    """换了颜色:左边导航的图标、logo 跟着重画(原来要关掉软件再打开)。"""
+    t = tok()
+    for b in root.findChildren(QPushButton, "nav"):
+        icon = b.property("glyph")
+        if icon:
+            b.setIcon(glyph_icon(icon, t["mu"], t["acc"], 16))
+    for lab in root.findChildren(QLabel, "logo"):
+        lab.setStyleSheet(f"background:{t['acc']};color:#ffffff;border-radius:8px;font-family:'{ICON_FONT}';font-size:15px;")
 
 
 # ---------------- 开场动画 ----------------
@@ -793,7 +812,7 @@ def draw_pill(painter, x: float, cy: float, text: str, tone: str, maxw: float = 
 def draw_bar(painter, x: float, cy: float, w: float, frac: float, color: str, h: int = 6):
     t = tok()
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(t["soft"]))
+    painter.setBrush(QColor(t.get("track") or t["soft"]))
     painter.drawRoundedRect(QRectF(x, cy - h / 2, w, h), h / 2, h / 2)
     if frac > 0:
         painter.setBrush(QColor(color))
@@ -802,7 +821,10 @@ def draw_bar(painter, x: float, cy: float, w: float, frac: float, color: str, h:
 
 def avatar_colors(name: str) -> tuple[str, str]:
     t = tok()
-    pairs = [(t["acc_bg"], t["acc"]), (t["ok_bg"], t["ok"]), (t["warn_bg"], t["warn"]), (t["bad_bg"], t["bad"])]
+    dark = QColor(t["bg"]).lightness() < 128
+    purple = ("#2a2342", "#b9a7ff") if dark else ("#efeafe", "#5b3fc4")
+    teal = ("#16302e", "#5fd3c4") if dark else ("#e0f4f1", "#0f6e62")
+    pairs = [(t["acc_bg"], t["acc"]), purple, teal, (t["soft"], t["tx2"])]
     return pairs[sum(map(ord, name or "?")) % len(pairs)]
 
 
@@ -887,7 +909,7 @@ class ApiTreeDelegate(QStyledItemDelegate):
                     x += draw_text(painter, QRectF(x, r.top(), r.right() - x, r.height()), p, t["mu"], 12) + 8
                     continue
                 n = re.match(r"能发 (\d+)", p)
-                tone = "ok" if n and int(n.group(1)) else "done" if p.startswith("发完") else "plain"
+                tone = "acc" if n and int(n.group(1)) else "ok" if p.startswith("发完") else "plain"
                 x += draw_pill(painter, x, cy, p, tone, r.right() - x) + 10
             if q:
                 a, qq = q
@@ -1326,7 +1348,7 @@ class PubStrip(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         self.spd_w = QFrame()
-        self.spd_w.setObjectName("chip")
+        self.spd_w.setObjectName("chipBox")
         sh = QHBoxLayout(self.spd_w)
         sh.setContentsMargins(12, 3, 12, 3)
         sh.setSpacing(8)

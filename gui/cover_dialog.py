@@ -128,7 +128,11 @@ class CoverDialog(QDialog):
         self.ratio_i = 0
         self._src_path = ""
         self.setWindowTitle("封面预览")
-        self.resize(1180, 760)
+        scr = (parent.screen() if parent is not None else None) or self.screen()
+        ag = scr.availableGeometry() if scr else None
+        # 小屏(1366×768 扣掉任务栏只剩 ~728 高):四个比例两两一行、小图小一点,窗口按屏幕能放下的大小来(设计师试用)
+        self._small = bool(ag) and ag.height() < 860
+        self.resize(min(1180, ag.width() - 40) if ag else 1180, min(760, ag.height() - 40) if ag else 760)
         self.setStyleSheet(
             f"QToolButton#ratio {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:12px; padding:8px 6px 6px 6px;"
             f" color:{t['tx']}; font-weight:bold; }}"
@@ -203,15 +207,18 @@ class CoverDialog(QDialog):
         hint.setObjectName("muted")
         side.addWidget(hint)
         self.r_btns = []
+        rg = QGridLayout()
+        rg.setSpacing(8)
+        side.addLayout(rg)
         for k, (tag, _r) in enumerate(C.RATIOS):
             b = QToolButton()
             b.setObjectName("ratio")
             b.setCheckable(True)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            b.setMinimumWidth(176)
+            b.setMinimumWidth(120 if self._small else 176)
             b.clicked.connect(lambda _c=False, k=k: self.pick_ratio(k))
-            side.addWidget(b)
+            rg.addWidget(b, *((k // 2, k % 2) if self._small else (k, 0)))
             self.r_btns.append(b)
         note = QLabel("(有的号只用前两个比例)")
         note.setObjectName("muted")
@@ -435,7 +442,8 @@ class CoverDialog(QDialog):
             b.setText(tag + ("  ✎" if C.rkey(_r) in (self.v.plan or {}).get("manual", {}) else ""))
             if not self.pm.isNull():
                 x, y, w, h = self.rect_for(k)
-                th = self.pix_for(k).copy(int(x), int(y), int(w), int(h)).scaled(150, 110, Qt.AspectRatioMode.KeepAspectRatio,
+                tw, tht = (110, 62) if self._small else (150, 110)
+                th = self.pix_for(k).copy(int(x), int(y), int(w), int(h)).scaled(tw, tht, Qt.AspectRatioMode.KeepAspectRatio,
                                                                           Qt.TransformationMode.SmoothTransformation)
                 b.setIcon(th)
                 b.setIconSize(th.size())

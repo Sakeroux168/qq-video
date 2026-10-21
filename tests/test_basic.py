@@ -26,6 +26,8 @@ def _fake_ask_ai(own, titles, key, **k):
 
 
 _gc.ask_ai = _fake_ask_ai
+import gui.api_tab as _api_mod                               # noqa: E402
+_REAL_ASK = _api_mod.ask                                     # 有的测试会换掉 ask():留一份真的
 
 
 def check(c, m):
@@ -431,7 +433,7 @@ def _settle(tab):
 
 def test_api_tab(tmp: Path):
     print("[接口发页:手选文件夹(旧软件的「选择」)/ 一条一条发、间隔 / 发完挪走、记录]")
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
     QApplication.instance() or QApplication([])
     from qe import apiacc, apisrc, omapi
     from qe.config import Settings
@@ -874,7 +876,7 @@ def test_audit_r2(tmp: Path):
 
 def test_ui_r1(tmp: Path):
     print("[界面审查修的:没发成说人话 / 号密钥坏了剩下的标「没轮到」/ 发完总结 / 结尾空格单独说 / 窗口能缩窄]")
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QPushButton
     QApplication.instance() or QApplication([])
     from qe import apiacc, checks, omapi, topic
     from qe.config import Settings
@@ -941,7 +943,8 @@ def test_ui_r1(tmp: Path):
     tab.tree.clearSelection()
     tab.groups["号A"].setSelected(True)
     QApplication.processEvents()
-    check(tab.minimumSizeHint().width() <= 1000, f"接口页选中号以后最小宽度 {tab.minimumSizeHint().width()} ≤ 1000")
+    check(tab.minimumSizeHint().width() <= 1000, f"接口页选中号以后最小宽度 {tab.minimumSizeHint().width()} ≤ 1000 -> "
+          + str([(x.text()[:14], x.minimumSizeHint().width()) for x in tab.hero.findChildren(QPushButton) if x.isVisibleTo(tab)]))
 
 
 def test_squarish(tmp: Path):
@@ -2633,8 +2636,8 @@ def test_ui_g(tmp: Path):
     tab.k_bad.setChecked(False)
     check(tab.seg.key() == "all" and len([1 for it in tab.items.values() if not it.isHidden()]) == 3, "取消「只看有问题的」:回到全部")
     from gui.widgets import tone_of
-    check([tone_of(x) for x in ("能发", "要处理", "没发成:平台不收", "已发", "结果不明", "")] == ["ok", "warn", "bad", "done", "warn", ""],
-          "状态胶囊的颜色:能发绿 / 要处理橙 / 没发成红 / 已发灰")
+    check([tone_of(x) for x in ("能发", "要处理", "没发成:平台不收", "已发", "结果不明", "")] == ["acc", "warn", "bad", "ok", "warn", ""],
+          "状态胶囊的颜色:能发蓝 / 要处理橙 / 没发成红 / 已发绿")
     # 主窗口:「今天」页在最前面,下一步能跳过去
     import gui.window as GW
     st2 = Settings(tmp / "st_g2.json")
@@ -3039,8 +3042,9 @@ def test_game_guard(tmp: Path):
     check(gamecheck.by_words("电竞情报馆", "和平精英决赛") == ("", True), "电竞情报馆(各种游戏)不查")
     check(gamecheck.by_words("PUBG突围君", "哈哈哈") == ("", False), "关键词看不出来的 → 要问 AI")
     root = tmp / "api_gg"
-    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"),
-                  "category": 1604, "enabled": True}])
+    apiacc.save([{"nick": n, "source_name": g, "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}
+                 for g, n in (("CSGO", "CSGO战神君"), ("和平精英", "和平精英上分君"))])
+    (root / "游戏视频" / "和平精英--和平精英上分君").mkdir(parents=True, exist_ok=True)
     st = Settings(tmp / "st_gg.json")
     st["api_roots"] = [str(root / "游戏视频")]
     st["quota_open"] = True
@@ -3106,6 +3110,105 @@ def test_game_guard(tmp: Path):
           "右键号「这批确认没放错」→ 这批能发了,像别的游戏的那几条还是不发")
     tab.set_batch_ok(nick, False)
     check(tab._blocked.get(nick) == 3, "取消确认 → 又整批不发")
+    # 真放错了:右键「放错了:挪到「和平精英上分君」的 10.20」→ 视频连同名封面挪过去(新员工试用 2026-10-21)
+    (d / "今天和嫂子一起打和平精英 .jpg").write_bytes(b"j")
+    check(tab._game_home("和平精英") and tab._game_home("和平精英")[0] == "和平精英上分君", "找得到和平精英的号和文件夹")
+    tab.tree.clearSelection()
+    tab.move_to_game(idx(tab, "和平精英"))
+    _wait(app, lambda: not tab.busy())
+    hp = root / "游戏视频" / "和平精英--和平精英上分君" / "10.20"
+    got = sorted(os.listdir(hp)) if hp.exists() else []
+    check("今天和嫂子一起打和平精英.mp4" in got and "今天和嫂子一起打和平精英 .jpg" in got
+          and not any("嫂子" in v.title for v in tab.videos if v.account == nick),
+          f"放错了的视频和封面挪到和平精英号同一天的文件夹,列表里没了 -> {got}")
+    check(tab._blocked.get(nick) == 2 or not tab._blocked.get(nick), f"挪走以后少了一条像别的游戏的 -> {tab._blocked}")
+
+
+def test_ux_fixes(tmp: Path):
+    print("[五个人试用后改的(2026-10-21):会真发的确认框默认「先不」、选中了按钮写明白、默认选今天、卡片别假装没事、角标两位数]")
+    import datetime
+    import inspect
+    from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    import gui.api_tab as T
+    import gui.window as GW
+    # A1:会真发出去的确认框:回车 = 先不,「好」那个画红
+    seen = []
+    real_exec = QMessageBox.exec
+    QMessageBox.exec = lambda self: seen.append((self.defaultButton().text(), [b.objectName() for b in self.buttons()
+                                                                               if b.text() == "开始摆,并自动发布"])) or 0
+    try:
+        _REAL_ASK(None, "摆下一批", "x", "开始摆,并自动发布", "先不", default_no=True, danger=True)
+    finally:
+        QMessageBox.exec = real_exec
+    check(seen and seen[0] == ("先不", ["danger"]), f"自动点发布的确认框:默认「先不」、开始按钮红 -> {seen}")
+    src = inspect.getsource(GW.MainWindow)
+    check('"开始摆,并自动发布" if auto else "开始摆"' in src and "default_no=auto, danger=auto" in src,
+          "教育号勾了「摆好后自动点发布」:摆下一批的确认框默认「先不」(原来回车就真发)")
+    # B1:今天的文件夹在就默认选今天;昨天还剩的单独说
+    today = f"{bj_now().month}.{bj_now().day}"
+    y = bj_now() - datetime.timedelta(days=1)
+    yday = f"{y.month}.{y.day}"
+    root = tmp / "api_ux" / "游戏视频" / "CSGO--CSGO战神君"
+    for dd, names in ((today, ["今天一", "今天二"]), (yday, ["昨天剩一", "昨天剩二"])):
+        (root / dd).mkdir(parents=True, exist_ok=True)
+        for nm in names:
+            (root / dd / f"{nm}.mp4").write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"),
+                  "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_ux.json")
+    st["api_roots"] = [str(tmp / "api_ux" / "游戏视频")]
+    st["api_last_date"] = yday
+    st["quota_open"] = True
+    tab = T.ApiTab(st, Records(tmp / "r_ux.sqlite"), lambda m: None)
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    check(tab.day() == today, f"打开就选今天(上次选的是昨天也一样)-> {tab.day()}")
+    check(tab._prev == (yday, 2) and tab.b_prev.isVisibleTo(tab) and "还剩 2 条" in tab.b_prev.text(),
+          f"昨天还剩的单独写一行 -> {tab._prev} / {tab.b_prev.text()}")
+    # A2:选中了几条:大按钮写「只发选中的」、旁边「✕ 取消选中」、大字下面写清楚
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+    tab._update_sum()
+    tab._update_scope()
+    check(tab.b_pub.text() == "现在发布 2 条" and not tab.b_unsel.isVisibleTo(tab), f"没选:照旧 -> {tab.b_pub.text()}")
+    tab.items[0].setSelected(True)
+    app.processEvents()
+    check(tab.b_pub.text() == "只发选中的 1 条" and tab.b_pub.property("sel") and tab.b_unsel.isVisibleTo(tab)
+          and "选中了 1 条" in tab.hero.sub.text() and tab.b_vert.text() == "转标准竖屏(选中 1 条)",
+          f"选了 1 条:按钮写「只发选中的 1 条」换颜色,旁边能取消 -> {tab.b_pub.text()} / {tab.hero.sub.text()[:30]}")
+    tab.b_unsel.click()
+    check(not tab.selected_rows() and tab.b_pub.text() == "现在发布 2 条", "点「✕ 取消选中」回到全部")
+    tab.items[0].setSelected(True)
+    tab._seg_changed("ok")
+    check(not tab.selected_rows(), "切「全部 / 要处理 / 能发…」自动取消选中")
+    tab._seg_changed("all")
+    tab.items[0].setSelected(True)
+    real_get = QInputDialog.getText
+    QInputDialog.getText = staticmethod(lambda *a, **k: ("改过的标题", True))
+    try:
+        tab.edit_title(0)
+    finally:
+        QInputDialog.getText = real_get
+    check(not tab.selected_rows(), "F2 改完标题自动取消选中")
+    tab._seg_changed("bad")
+    check(tab.b_pub.text() == "点「全部」再发", f"看「要处理」时按钮说清楚为什么不能发 -> {tab.b_pub.text()}")
+    tab._seg_changed("all")
+    # D:没视频的日子:卡片不打绿勾;角标两位数不被切
+    st2 = Settings(tmp / "st_ux2.json")
+    st2["api_roots"] = [str(tmp / "api_ux_empty")]                # 别去读真的素材盘
+    (tmp / "api_ux_empty").mkdir(exist_ok=True)
+    empty = T.ApiTab(st2, Records(tmp / "r_ux2.sqlite"), lambda m: None)
+    _wait(app, lambda: not empty.busy())
+    check("还没查" in empty.card_v.title.text() and "还没查" in empty.card_t.title.text(),
+          f"没视频 / 没检查:卡片写「还没查」,不打绿勾 -> {empty.card_v.title.text()}")
+    from gui.widgets import set_badge, shell
+    from PySide6.QtWidgets import QWidget
+    root_w, grp, _stk = shell([("today", "今天", QWidget())], lambda: None)
+    set_badge(grp, 0, "12")
+    check(grp.badges[0].width() >= 24, f"角标两位数够宽 -> {grp.badges[0].width()}")
 
 
 def test_quota_gate(tmp: Path):
@@ -3430,15 +3533,17 @@ def test_misfire_edu(tmp: Path):
         _wait(app, lambda: not (w.cover_worker and w.cover_worker.isRunning()))
         asks = []
 
-        def rec_ask(title, text, yes, no, default_no=False, head=""):
-            asks.append({"title": title, "text": text, "yes": yes, "default_no": default_no, "head": head})
+        def rec_ask(title, text, yes, no, default_no=False, head="", danger=False):
+            asks.append({"title": title, "text": text, "yes": yes, "default_no": default_no, "head": head, "danger": danger})
             return False
         w._ask = rec_ask
         w.start_batch()
         check(asks and "这次会自动点发布" in asks[-1]["head"] and not calls, f"勾着自动发布:确认框第一行红字写「这次会自动点发布」-> {asks[-1]['head'] if asks else ''}")
+        check(asks[-1]["default_no"] is True and asks[-1]["danger"] and asks[-1]["yes"] == "开始摆,并自动发布",
+              f"勾着自动发布:默认「先不」(回车不会真发),开始按钮红、写「并自动发布」-> {asks[-1]['yes']}")
         w.k_auto.setChecked(False)
         w.start_batch()
-        check(asks[-1]["head"] == "", "没勾:没有那行红字")
+        check(asks[-1]["head"] == "" and asks[-1]["default_no"] is False and asks[-1]["yes"] == "开始摆", "没勾:没有那行红字,照旧")
         # A4:「这批发好了」默认「还没」
         w.batch_id = "假的一批"
         w.batch_sent()
@@ -3604,8 +3709,12 @@ def test_cd_items(tmp: Path):
         st["ai_key"] = "test"
         rec = Records(tmp / "r_cd.sqlite")
         w = GW.MainWindow(st, rec)
-        # 13:刚打开是空白 → 告诉人先选日期
-        check(w.lab_sum.text() == GW.PICK_DAY and w.lab_scope.text() == GW.PICK_DAY, f"13 刚打开提示先选日期 -> {w.lab_sum.text()}")
+        # 刚打开:今天的文件夹有东西就选今天(试用 2026-10-21);没有就是空白 → 13:告诉人先选日期
+        from qe import folders as F
+        has_today = any(F.day_of(d) == today and w._date_has_files(str(root), d) for d in F.list_dates(str(root)))
+        check(w.c_date.currentData() == (today if has_today else ""), f"刚打开:今天有素材就选今天 -> {w.c_date.currentData()}")
+        w.c_date.setCurrentIndex(0)
+        check(w.lab_sum.text() == GW.PICK_DAY and w.lab_scope.text() == GW.PICK_DAY, f"13 没选日期提示先选日期 -> {w.lab_sum.text()}")
         # 15:最新的在上面、今天标出来、没视频的灰掉
         ds = [w.c_date.itemData(i) for i in range(1, w.c_date.count())]
         check(ds == newest_first(ds) and ds.index("10.21") < ds.index("9.30") and w.c_date.itemText(0) == "(选一天)",
@@ -3617,7 +3726,8 @@ def test_cd_items(tmp: Path):
             check("今天" in w.c_date.itemText(i) and "没视频" in w.c_date.itemText(i) and fg is not None,
                   f"15 今天标出来、空的灰掉 -> {w.c_date.itemText(i)}")
         i = w.c_date.findData("10.21")
-        check(w.c_date.itemText(i) == "10.21" and w.c_date.itemData(i, Qt.ItemDataRole.ForegroundRole) is None, "15 有视频的正常显示")
+        check(w.c_date.itemText(i) in ("10.21", "10.21(今天)") and w.c_date.itemData(i, Qt.ItemDataRole.ForegroundRole) is None,
+              "15 有视频的正常显示")
         # 10:没选日期 / 没勾员工点「摆下一批」
         w.start_batch()
         check(boxes and "左上角" in boxes[-1], f"10 没选日期:提示先选日期 -> {boxes[-1:]}")
@@ -3732,7 +3842,7 @@ def test_cd_items(tmp: Path):
             if not dlg:
                 return
             got["warn"] = [x.text() for x in dlg.findChildren(QLabel) if "没有 {month}" in x.text()]
-            got["tpl"] = [x.text() for x in dlg.findChildren(QLabel) if x.text().startswith("\\{month}")]
+            got["tpl"] = [x.text().split("后面自动接上:")[-1] for x in dlg.findChildren(QLabel) if x.text().startswith("后面自动接上:")]
             ed = [x for x in dlg.findChildren(QLineEdit) if x.text() == r"X:\知乎视频\内容查看"]
             got["n"] = len(ed)
             if ed:
@@ -3820,6 +3930,7 @@ if __name__ == "__main__":
     test_quick_review(tmp)
     test_quota_gate(tmp)
     test_game_guard(tmp)
+    test_ux_fixes(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

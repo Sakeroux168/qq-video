@@ -142,7 +142,9 @@ class QuickReview(QDialog):
         t = tok()
         self.vs, self.adj, self.cur = videos, adj, 0
         self.setWindowTitle("快速过封面")
-        self.resize(1080, 760)
+        scr = (parent.screen() if parent is not None else None) or self.screen()
+        ag = scr.availableGeometry() if scr else None
+        self.resize(min(1080, ag.width() - 40) if ag else 1080, min(760, ag.height() - 40) if ag else 760)   # 小屏别顶出屏幕
         self.setStyleSheet(
             f"QFrame#rvCard {{ background:{t['card']}; border:2px solid {t['line2']}; border-radius:14px; }}"
             f" QFrame#rvCard[st='todo'] {{ border-color:{t['line']}; }}"

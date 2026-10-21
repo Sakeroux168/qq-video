@@ -17,6 +17,7 @@ THEMES = {
         "ok": "#1a7a33", "ok_bg": "#e3f5e8", "warn": "#b42f00", "warn_bg": "#fff0e0",
         "bad": "#c4231a", "bad_bg": "#fdeceb", "danger": "#d92d20", "danger_h": "#b42318",
         "orange": "#e8590c", "green": "#1f9d4c", "sel": "#dce9ff", "alt": "#fafbfc",
+        "acc_btn": "#0066d6", "danger_btn": "#d92d20", "badge": "#e8590c", "track": "#dde1e8",
         "rows": {"yellow": "#fffaf0", "red": "#fff4f2", "green": "#f3faf5", "orange": "#fff5e8", "ready": "#eef4ff"},
     },
     "深色": {
@@ -28,6 +29,7 @@ THEMES = {
         "ok": "#4ade80", "ok_bg": "#16321f", "warn": "#ffa94d", "warn_bg": "#3a2a14",
         "bad": "#ff7b72", "bad_bg": "#3d1c1c", "danger": "#e5484d", "danger_h": "#f2555a",
         "orange": "#ff922b", "green": "#40c463", "sel": "#22385c", "alt": "#202128",
+        "acc_btn": "#1f6fe0", "danger_btn": "#c9302c", "badge": "#d9480f", "track": "#3a3c47",
         "rows": {"yellow": "#2c2717", "red": "#331d1d", "green": "#18291e", "orange": "#33261a", "ready": "#1c2a40"},
     },
 }
@@ -60,7 +62,7 @@ QPushButton#nav {{ text-align:left; padding:9px 12px; border:none; border-radius
     font-size:14px; color:{t['tx2']}; }}
 QPushButton#nav:hover {{ background:{t['soft']}; }}
 QPushButton#nav:checked {{ background:{t['acc_bg']}; color:{t['acc']}; font-weight:bold; }}
-QLabel#navBadge {{ background:{t['orange']}; color:#ffffff; border-radius:9px; padding:0 5px; font-size:11px; font-weight:bold; }}
+QLabel#navBadge {{ background:{t['badge']}; color:#ffffff; border-radius:9px; padding:0 5px; font-size:11px; font-weight:bold; }}
 
 /* 大字区(每页最上面) */
 QFrame#hero {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:16px; }}
@@ -77,6 +79,7 @@ QFrame#hero[open="false"] QLabel {{ font-size:14px; }}
 QFrame#hero[open="false"] QLabel#heroBig {{ letter-spacing:-1px; }}
 QFrame#hero[open="false"] QComboBox {{ border:none; background:{t['soft']}; border-radius:15px; padding:5px 14px; font-size:14px; }}
 QFrame#hero[open="false"] QPushButton#primary {{ font-size:16px; padding:12px 38px; border-radius:25px; }}
+QFrame#hero[open="false"] QPushButton#danger {{ font-size:16px; padding:12px 38px; border-radius:25px; }}
 QFrame#hero[open="false"] QPushButton#pill {{ font-size:14px; padding:11px 24px; border-radius:23px; }}
 QLabel#pageTitle {{ font-size:20px; font-weight:bold; color:{t['tx']}; }}
 QLabel#muted {{ color:{t['mu']}; font-size:12px; }}
@@ -116,11 +119,15 @@ QPushButton:hover {{ background:{t['soft']}; border-color:{t['dim']}; }}
 QPushButton:pressed {{ background:{t['soft_h']}; }}
 QPushButton:disabled {{ color:{t['dim']}; background:{t['soft']}; border-color:{t['soft']}; }}
 QPushButton::menu-indicator {{ subcontrol-position:right center; right:6px; }}
-QPushButton#primary {{ background:{t['acc']}; color:#ffffff; border:1px solid {t['acc']}; font-weight:bold; font-size:14px;
+QPushButton#primary {{ background:{t['acc_btn']}; color:#ffffff; border:1px solid {t['acc_btn']}; font-weight:bold; font-size:14px;
     padding:9px 24px; border-radius:19px; }}
 QPushButton#primary:hover {{ background:{t['acc_h']}; border-color:{t['acc_h']}; }}
+QPushButton#ringCard {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:16px; text-align:left; }}
+QPushButton#ringCard:hover {{ border-color:{t['acc']}; }}
+QPushButton#primary[sel="true"] {{ background:{t['warn']}; border-color:{t['warn']}; }}
+QPushButton#selChip {{ background:{t['warn_bg']}; color:{t['warn']}; border:1px solid {t['warn']}; border-radius:15px; padding:5px 12px; font-weight:bold; }}
 QPushButton#primary:disabled {{ background:{t['soft']}; color:{t['dim']}; border-color:{t['soft']}; }}
-QPushButton#danger {{ background:{t['danger']}; color:#ffffff; border:1px solid {t['danger']}; font-weight:bold; border-radius:16px; padding:7px 18px; }}
+QPushButton#danger {{ background:{t['danger_btn']}; color:#ffffff; border:1px solid {t['danger_btn']}; font-weight:bold; border-radius:16px; padding:7px 18px; }}
 QPushButton#danger:hover {{ background:{t['danger_h']}; }}
 QPushButton#danger:disabled {{ background:{t['soft']}; color:{t['dim']}; border-color:{t['soft']}; }}
 QPushButton#pill {{ background:{t['soft']}; border:none; border-radius:16px; padding:7px 16px; color:{t['tx']}; }}
@@ -169,8 +176,8 @@ QSplitter::handle {{ background:transparent; width:10px; }}
 
 QLabel#scope {{ color:{t['ok']}; font-weight:bold; padding:2px 0; }}
 QLabel#scope[sel="true"] {{ background:{t['acc_bg']}; color:{t['acc']}; border-radius:8px; padding:4px 10px; }}
-QFrame#chip, QLabel#chip {{ background:{t['soft']}; border:none; border-radius:13px; padding:4px 12px; color:{t['tx2']}; font-size:12px; }}
-QFrame#chip {{ padding:0; }}
+QFrame#chipBox {{ background:{t['soft']}; border:none; border-radius:13px; padding:0; }}
+QLabel#chip {{ background:{t['soft']}; border:none; border-radius:13px; padding:4px 12px; color:{t['tx2']}; font-size:12px; }}
 QLabel#chipText {{ color:{t['tx']}; font-size:12px; font-weight:bold; background:transparent; }}
 QLabel#warnPill {{ background:{t['warn_bg']}; color:{t['warn']}; border-radius:13px; padding:4px 12px; font-weight:bold; }}
 QLabel#warnPill[tone="good"] {{ background:{t['ok_bg']}; color:{t['ok']}; }}

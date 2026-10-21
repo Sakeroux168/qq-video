@@ -96,10 +96,10 @@ def _retry(fn, n: int = 3):
 
 
 def ask(parent, title: str, text: str, yes: str = "好", no: str = "先不", detail: str = "", default_no: bool = False,
-        head: str = "", extra: str = "", on_extra=None) -> bool:
+        head: str = "", extra: str = "", on_extra=None, danger: bool = False) -> bool:
     """中文按钮的确认框(审查:Yes / No 是英文)。detail = 点「显示详细信息」才看得到的细节(确认框别太长)。
     head = 第一行红字加粗(要人一眼看到的:「现在马上发出去」「这次会自动点发布」);
-    extra = 第三个按钮(比如「改成定时…」),点了调 on_extra(),返回 False。"""
+    extra = 第三个按钮(比如「改成定时…」),点了调 on_extra(),返回 False;danger = 「好」那个按钮画红(会真发出去的)。"""
     box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.NoButton, parent)
     if head:
         import html
@@ -108,6 +108,8 @@ def ask(parent, title: str, text: str, yes: str = "好", no: str = "先不", det
         box.setText(f'<p style="color:{cur()["danger"]};font-weight:bold">{html.escape(head)}</p>'
                     + html.escape(text).replace("\n", "<br>"))
     b_yes = box.addButton(yes, QMessageBox.ButtonRole.YesRole)
+    if danger:
+        b_yes.setObjectName("danger")
     b_extra = box.addButton(extra, QMessageBox.ButtonRole.ActionRole) if extra else None
     b_no = box.addButton(no, QMessageBox.ButtonRole.NoRole)
     if detail:
@@ -193,6 +195,12 @@ class ApiTab(QWidget):
                      "选了以后这个号这天只发那个文件夹里的视频,不再自动找。右键列表里的号 / 视频也能选 / 取消。")
         b.clicked.connect(lambda: self.pick_folder())
         m.addWidget(b)
+        self.b_prev = b = QPushButton("")                # 「昨天 10.20 还剩 6 条没发 · 看看」(打开默认选今天以后,昨天剩的单独说)
+        b.setObjectName("link")
+        b.setProperty("tone", "warn")
+        b.clicked.connect(lambda: self.set_day(self._prev[0]) if getattr(self, "_prev", None) else None)
+        b.hide()
+        m.addWidget(b)
         # 大按钮那一排:定时离「现在发布」远一点(用户 2026-10-17 想定时点成了发布,10 条提前发出去只能去后台删)
         a = self.hero.acts
         self.b_sched = QPushButton("到点自动发…")
@@ -206,6 +214,12 @@ class ApiTab(QWidget):
         self.lab_sched.setObjectName("warnText")
         a.addWidget(self.lab_sched)
         a.addSpacing(28)
+        self.b_unsel = QPushButton("")                  # 选中了东西时出来:「选中 1 条 × 取消选中」(老手 / 新员工试用 2026-10-21)
+        self.b_unsel.setObjectName("selChip")
+        self.b_unsel.setToolTip("现在只管选中的;点一下(或按 Esc)取消选中,按钮回到管全部")
+        self.b_unsel.clicked.connect(lambda: self.tree.clearSelection())
+        self.b_unsel.hide()
+        a.addWidget(self.b_unsel)
         self.b_pub = QPushButton("现在发布")
         self.b_pub.setMinimumHeight(40)
         self.b_pub.setObjectName("primary")          # 主题里给它主色(gui/theme.py)
@@ -313,7 +327,7 @@ class ApiTab(QWidget):
         self.e_find.setPlaceholderText("搜标题…(Ctrl+F)")
         self.e_find.setClearButtonEnabled(True)
         self.e_find.setMaximumWidth(220)
-        self.e_find.textChanged.connect(lambda _t: self._apply_filter())
+        self.e_find.textChanged.connect(lambda t: (None if t.strip() else self.tree.clearSelection(), self._apply_filter()))
         view.addWidget(self.e_find)
         self.b_more = MenuButton("更多")
         self.b_more.setToolTip("不常用的:全部展开 / 收起、批量改话题、撤销上次改名")
@@ -609,6 +623,7 @@ class ApiTab(QWidget):
     def _seg_changed(self, k: str):
         """「全部 / 要处理 / 能发 / 已发」:要处理 = 原来的「只看有问题的」。"""
         self._segk = k if k in ("ok", "sent") else "all"
+        self.tree.clearSelection()                       # 换了看哪些:原来选中的多半看不见了,别留着悄悄管按钮
         self.k_bad.blockSignals(True)
         self.k_bad.setChecked(k == "bad")
         self.k_bad.blockSignals(False)
@@ -638,16 +653,18 @@ class ApiTab(QWidget):
             prog = self.lab_scope.text()
             big = "正在发布…" if prog.startswith("正在发") else (getattr(self, "_job_title", "") or "正在处理…")
             sub, tone = prog, ""
+        elif not n and not gone and not apiacc.nicks():
+            big, sub, tone = "还没有号", "去左下角「设置」→「从旧软件搬账号…」把号搬过来", ""
         elif not n and not gone:
             big, sub, tone = "这天没有视频", "换一天看看,或者点「给号选文件夹…」", ""
-        elif checked < n:
-            big, sub, tone = f"正在检查 {n} 条…", f"检查完 {checked} / {n} 条,马上就好", ""
         elif fail:
             big, tone = f"{fail} 条没发成", "bad"
             sub = "点「再发一次没发成的」再试;为什么没发成:列表里鼠标放在状态上看"
         elif unsure:
             big, tone = f"{unsure} 条不确定发没发", "warn"
             sub = "去企鹅号后台看一眼,回来在列表里双击它标「发了 / 没发」"
+        elif checked < n:
+            big, sub, tone = f"正在检查 {n} 条…", f"检查完 {checked} / {n} 条,马上就好", ""
         elif ok:
             big, tone = f"{ok} 条可以发了", ""
             sub = f"还有 {bad} 条有点小问题,处理好能多发 {bad} 条" if bad else "都检查过了,没有问题"
@@ -660,17 +677,24 @@ class ApiTab(QWidget):
             sub = "处理好就能发(用下面的卡片)"
         else:
             big, sub, tone = "没有能发的", "", ""
+        sel = self.selected_rows() if self.day() and not self.busy() else []
+        if sel:
+            sub = f"现在选中了 {len(sel)} 条 —— 旁边的按钮只管这 {len(sel)} 条(按 Esc 或点「× 取消选中」回到全部)" + ("\n" + sub if sub else "")
         if self._blocked and not self.busy():
             bl = "、".join(f"{k}({c} 条像别的游戏)" for k, c in self._blocked.items())
-            sub += ("\n" if sub else "") + f"可能整批放错了,这些号先不发:{bl} —— 看一眼,没放错就右键号「确认没放错」"
+            sub += ("\n" if sub else "") + (f"可能整批放错了,这些号先不发:{bl} —— 先看一眼:放错了右键那条「放错了:挪到…」;"
+                                             "真没放错才右键号「这批确认没放错」")
             tone = tone or "warn"
         if cats.get("o") and not self.busy():
             sub += ("\n" if sub else "") + f"其中 {cats['o']} 条标题里有别的平台的名字,要你自己改(列表里右键「改标题」)"
         if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)) and sub != self._fun:
             sub = (sub + " · " if sub else "") + quota
         self.hero.set(big, sub, tone)
-        self.card_v.set(f"{cats['v']} 条横屏 / 偏方" if cats["v"] else "没有横屏 / 偏方", "warn" if cats["v"] else "done")
-        self.card_t.set(f"{cats['t']} 条标题 / 话题要整理" if cats["t"] else "标题 / 话题都没问题", "warn" if cats["t"] else "done")
+        idle = not n or checked < n or not self.day()
+        self.card_v.set(f"{cats['v']} 条横屏 / 偏方" if cats["v"] else ("横屏 / 偏方:还没查" if idle else "没有横屏 / 偏方"),
+                        "warn" if cats["v"] else ("" if idle else "done"))
+        self.card_t.set(f"{cats['t']} 条标题 / 话题要整理" if cats["t"] else ("标题 / 话题:还没查" if idle else "标题 / 话题都没问题"),
+                        "warn" if cats["t"] else ("" if idle else "done"))
         self.card_w.set(f"{cats['w']} 条有水印 / 广告" if cats["w"] else "查水印 / 口播广告", "warn" if cats["w"] else "")
         for k, text in (("all", f"全部 {n}"), ("bad", f"要处理 {bad + fail + unsure}"), ("ok", f"能发 {ok}"), ("sent", f"已发 {sent}")):
             self.seg.set_text(k, text)
@@ -712,6 +736,8 @@ class ApiTab(QWidget):
         self.b_stop.setEnabled(on)
         self.b_stop.setVisible(on and not quiet)        # 「停」只在干活的时候出来(大红按钮)
         self.b_pub.setVisible(not (on and not quiet))   # 干活的时候灰掉的「现在发布」先藏起来,只留「停」
+        if on and not quiet:
+            self.b_unsel.hide()
         if not on:
             self._update_scope()
         if hasattr(self, "hero"):
@@ -772,7 +798,7 @@ class ApiTab(QWidget):
             who = accs[0] if len(accs) == 1 else f"{len(accs)} 个号"
             self.lab_scope.setText(f"只管选中的:{who} {len(sel)} 条(按钮都只管这些;Esc 取消选择)")
         elif self.filtering():
-            self.lab_scope.setText(f"过滤中:只管看得见的 {len(rows)} 条(要管全部:取消「只看有问题的」/ 清空搜索)")
+            self.lab_scope.setText(f"过滤中:只管看得见的 {len(rows)} 条(要管全部:点上面「全部」/ 清空搜索)")
         else:
             self.lab_scope.setText(f"没选:管全部 {len(rows)} 条" if rows else "这天没有视频")
         self.b_clear.setVisible(bool(sel))
@@ -780,10 +806,25 @@ class ApiTab(QWidget):
         # 重试:号的密钥坏了的不算(再点也必然失败,体验报告)
         retry = sum(1 for i in rows if self._can_send(i) and self.state.get(i, "").startswith(FAILED)
                     and "密钥" not in self.state.get(i, ""))
-        self.b_pub.setText(f"现在发布 {n} 条" + (f" + 再发一次没发成的 {retry} 条" if retry else "") if n else
-                           (f"再发一次没发成的 {retry} 条" if retry else "没有能发的"))
+        if sel:                                          # 选中了:大按钮写「只发选中的」、换颜色(原来悄悄变成只管 1 条,试用的人都被坑)
+            self.b_pub.setText(f"只发选中的 {n} 条" + (f" + 重发 {retry} 条" if retry else "") if n else
+                               (f"选中的重发 {retry} 条" if retry else "选中的没有能发的"))
+        elif self.filtering() and not n and not retry:
+            self.b_pub.setText("点「全部」再发")
+        else:
+            self.b_pub.setText(f"现在发布 {n} 条" + (f" + 再发一次没发成的 {retry} 条" if retry else "") if n else
+                               (f"再发一次没发成的 {retry} 条" if retry else "没有能发的"))
         self.b_pub.setEnabled(bool(n or retry) and not self.busy())
+        from gui.widgets import repolish
+        repolish(self.b_pub, sel=bool(sel))
+        self.b_pub.setMinimumWidth(min(240, self.b_pub.sizeHint().width()))   # 收起时字被切(「在发布 393」);太长的照旧能缩
+        self.b_unsel.setText("× 取消选中")
+        self.b_unsel.setVisible(bool(sel) and not self.b_pub.isHidden())
+        for b, base in ((self.b_vert, "转标准竖屏"), (self.b_topic, "整理标题")):
+            b.setText(f"{base}(选中 {len(sel)} 条)" if sel else base)
         self.b_settopic.setText("批量改话题…" if sel else "批量改话题…(先选)")
+        if getattr(self, "_hero_args", None):
+            self._hero_update(*self._hero_args)
 
     def roots(self) -> list[str]:
         return list(self.st.get("api_roots") or apisrc.DEFAULT_ROOTS)
@@ -799,18 +840,38 @@ class ApiTab(QWidget):
             self.job.wait()
         if self.busy():
             return
-        # 记住上次选的日期(用户 2026-10-15「可以记住」;教育页那边仍然不自动选)
-        cur = self.day() or str(self.st.get("api_last_date") or "")
         from gui.widgets import fill_dates, newest_first
         ds = apisrc.dates(self.roots(), self.known())
         has = set(ds) | {k for k, v in (self.st.get("api_picked") or {}).items() if v}
         today = f"{bj_now().month}.{bj_now().day}"
+        # 刚打开:今天的文件夹在就选今天(试用的人早上打开都停在昨天);没有才回到上次选的那天
+        cur = self.day() or (today if today in has else str(self.st.get("api_last_date") or ""))
+        self._prev = self._leftover(ds, has, today)
         for x in list((self.st.get("api_picked") or {}).keys()) + [today]:   # 手选过文件夹的日子、今天:没有日期文件夹也能选
             if x and x not in ds:
                 ds.append(x)
         # 和教育号页一样:最新的在上面、今天标出来、没日期文件夹的(今天还没建)灰掉(审查 15)
         fill_dates(self.c_date, newest_first(ds), cur, empty={d for d in ds if d not in has})
         self.load()
+
+    def _leftover(self, ds, has, today) -> tuple[str, int] | None:
+        """今天之前最近的那天还剩几条没发(文件夹里还在、记录里不是已发的)。没有 / 读不了 = None。"""
+        from qe.folders import day_of
+
+        def k(d):
+            x = day_of(d)
+            return (int(x.split(".")[0]), int(x.split(".")[1])) if x else (0, 0)
+        t = k(today)
+        older = [d for d in ds if d in has and (0, 0) < k(d) < t]
+        if not older:
+            return None
+        d = max(older, key=k)
+        try:
+            vs = apisrc.videos(self.roots(), d, self.known(), (self.st.get("api_picked") or {}).get(d))
+        except OSError:
+            return None
+        n = sum(1 for v in vs if not str(self.rec.status_of(v.path) or "").startswith("已发"))
+        return (d, n) if n else None
 
     def day(self) -> str:
         """现在选的是哪天(「10.19」;下拉里的字可能多了「(今天)」,日期存在数据里)。"""
@@ -826,6 +887,14 @@ class ApiTab(QWidget):
             return False
         self.c_date.setCurrentIndex(i)
         return True
+
+    def _show_prev(self):
+        p = getattr(self, "_prev", None)
+        on = bool(p) and self.day() == f"{bj_now().month}.{bj_now().day}"
+        if on:
+            self.b_prev.setText(f"昨天还剩 {p[1]} 条 ›")
+            self.b_prev.setToolTip(f"{p[0]} 的文件夹里还有 {p[1]} 条没发出去;点一下切过去看")
+        self.b_prev.setVisible(on)
 
     def _show_source(self, d: str):
         """上面那行:素材到底从哪来(短说;完整的放鼠标悬停里)。"""
@@ -869,6 +938,7 @@ class ApiTab(QWidget):
             self.cache[pkey(v.path)] = (sig, dict(v.checks))
 
     def load(self):
+        self._show_prev()
         if not self.busy() and hasattr(self, "pub_strip"):   # 换日期 / 刷新:上一轮的发布进度收起来
             self.hero._extra_w.hide()
             self._pub = None
@@ -1134,6 +1204,7 @@ class ApiTab(QWidget):
         n = len(self.videos)
         sent = sum(1 for i in range(n) if self.state.get(i, "").startswith("已发"))
         checked = [i for i in range(n) if self.videos[i].checks]
+        n_done = sum(1 for i in range(n) if self.videos[i].checks or self._sent(i))
         ok, self._over = self._quota_cap([i for i in range(n) if self._can_send(i) and not self.state.get(i, "").startswith(FAILED)])
         bad = sum(1 for i in checked if (checks.problems(self.videos[i]) or self._blocked.get(self.videos[i].account))
                   and not self._sent(i))
@@ -1147,7 +1218,7 @@ class ApiTab(QWidget):
         done = sum(1 for xs in accs.values() if all(xs))
         unsure = sum(1 for i in range(n) if self.state.get(i, "") == "结果不明")
         gone = sum(arch.values())
-        self.lab_sum.setText("" if len(checked) >= n or not n else f"{n - len(checked)} 条还没检查完…")
+        self.lab_sum.setText("" if n_done >= n or not n else f"{n - n_done} 条还没检查完…")
         subs = [x for x in ((f"不确定发没发 {unsure}" if unsure else ""), (f"没发成 {fail}" if fail else ""),
                             (f"有问题 {bad}" if bad else "")) if x]
         self.cards.set(all=n + gone, ok=(ok, "good" if ok else ""), bad=(bad + fail + unsure, "warn" if bad + fail + unsure else ""),
@@ -1168,7 +1239,8 @@ class ApiTab(QWidget):
                 cats["w"] += 1
             if any(p.startswith("标题有「") and "要删" not in p for p in ps):
                 cats["o"] += 1
-        self._hero_update(n, sent, len(checked), ok, bad, fail, unsure, gone, cats)
+        self._hero_args = (n, sent, n_done, ok, bad, fail, unsure, gone, cats)
+        self._hero_update(*self._hero_args)
 
     def _hidden(self, i: int) -> bool:
         key = self.e_find.text().strip().lower()
@@ -1339,8 +1411,15 @@ class ApiTab(QWidget):
                     m.addSeparator()
                     m.addAction("其实不是这个号的游戏(先不发)", lambda: self.set_game_ok(i, False)).setEnabled(not busy)
                 elif gamecheck.alien(nick, self.videos[i].title):
+                    # 新员工试用 2026-10-21:原来只有「能发」一条路,真放错了没地方点。放错了排第一个
                     m.addSeparator()
-                    m.addAction(f"标题像《{g0}》的:看过了,是这个号的,能发", lambda: self.set_game_ok(i, True)).setEnabled(not busy)
+                    m.addAction(f"标题像《{g0}》的").setEnabled(False)
+                    home = self._game_home(g0)
+                    if home:
+                        d = os.path.basename(os.path.dirname(self.videos[i].path))
+                        m.addAction(f"放错了:挪到「{home[0]}」的 {d}", lambda: self.move_to_game(i)).setEnabled(not busy)
+                    m.addAction("先不发,留在这", lambda: self.set_game_ok(i, False)).setEnabled(not busy)
+                    m.addAction("看过了,是这个号的,能发…", lambda: self.confirm_game_ok(i)).setEnabled(not busy)
             if gamecheck.account_game(nick):
                 day = self.day()
                 if self._blocked.get(nick):
@@ -1591,6 +1670,54 @@ class ApiTab(QWidget):
                 for i in part:
                     emit(i, "")
         return n
+
+    def _game_home(self, game: str) -> tuple[str, str] | None:
+        """这个游戏的号和它的素材文件夹(「三角洲行动」→(三角洲密探君, …\三角洲行动--三角洲密探君));没有就 None。"""
+        from qe import gamecheck
+        folders = apisrc.account_folders(self.roots(), self.known())
+        for nick, g in gamecheck.ACCOUNT_GAME.items():
+            if g == game and folders.get(nick):
+                return nick, folders[nick]
+        return None
+
+    def move_to_game(self, i: int):
+        """标题像别的游戏、真放错了:视频连同名封面挪到那个游戏号同一天的文件夹(没有就建)。选了好几条就挪选中的里像别的游戏的。"""
+        from qe import gamecheck
+        rows = [r for r in (self.selected_rows() or [i]) if not self._sent(r)]
+        moved, miss = [], []
+        for r in rows:
+            v = self.videos[r]
+            g = gamecheck.alien(v.account, v.title)
+            home = self._game_home(g) if g else None
+            if not home:
+                miss.append(v.title)
+                continue
+            d = os.path.dirname(v.path)
+            dst = os.path.join(home[1], os.path.basename(d))
+            stem = os.path.splitext(os.path.basename(v.path))[0].strip()
+            try:
+                covers = [os.path.join(d, x) for x in os.listdir(d)
+                          if os.path.splitext(x)[1].lower() in (".jpg", ".jpeg", ".png", ".webp") and os.path.splitext(x)[0].strip() == stem]
+                for f in [v.path] + covers:
+                    plan.move_noclobber(f, dst)
+                moved.append(f"{v.title[:20]} → {home[0]}")
+            except OSError as e:
+                miss.append(f"{v.title[:20]}({e})")
+        if moved:
+            self.say(f"放错了的挪走了 {len(moved)} 条:" + ";".join(moved[:5]) + ("…" if len(moved) > 5 else ""))
+        if miss:
+            QMessageBox.warning(self, "挪走", f"{len(miss)} 条没挪(找不到那个游戏的号的文件夹 / 挪不动):\n" + "\n".join(miss[:8]))
+        if moved:
+            self.tree.clearSelection()
+            self.load()
+
+    def confirm_game_ok(self, i: int):
+        """「看过了,是这个号的,能发」:再问一次(点错了就会发到错的号上)。"""
+        rows = self.selected_rows() or [i]
+        names = "\n".join(f"· {self.videos[r].title[:30]}" for r in rows[:6]) + ("\n…" if len(rows) > 6 else "")
+        if ask(self, "是这个号的", f"这 {len(rows)} 条标题像别的游戏的,你确认就是「{self.videos[i].account}」的?\n\n{names}\n\n"
+                                    "放错了的话选「先不」,再右键「放错了:挪到…」。", "是这个号的,能发", "先不", default_no=True):
+            self.set_game_ok(i, True)
 
     def set_game_ok(self, i: int, ok: bool):
         """标题像别的游戏、人看过:是这个号的(能发)/ 其实不是(先不发)。选了好几条一起标。"""
@@ -1968,6 +2095,7 @@ class ApiTab(QWidget):
         if not t or t == v.title:
             return
         self._rename_rows([i], lambda _old: t, "改标题")
+        self.tree.clearSelection()                       # 改完别留着选中(老手试用:按钮一直只管这 1 条)
 
     def run_topic(self, only: list[int] | None = None):
         """整理标题:先删乱码尾巴 / @ 那段(titleclean,不用 AI);话题写法不对的按固定规矩改;挂了好几个话题的 AI 留一个。"""
@@ -2170,7 +2298,7 @@ class ApiTab(QWidget):
             self.say("⏰ 定时发布:" + msg.replace("\n", " ").replace("发吗?", "").strip())
         elif not ask(self, "现在发布", msg, "现在发出去", "先不发", detail=detail, default_no=True,   # 默认永远「先不发」
                      head="现在马上发出去(不是定时),发了只能去后台删",
-                     extra="改成定时…", on_extra=self.schedule_clicked):
+                     extra="改成定时…", on_extra=self.schedule_clicked, danger=True):
             return
         vs = self.videos
         gate = {"last": 0.0}

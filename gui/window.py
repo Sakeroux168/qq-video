@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDi
 from qe import cover as C
 from qe import folders as F
 from qe import plan
-from qe.config import APP_VERSION, bj_str, data_dir
+from qe.config import APP_VERSION, bj_now, bj_str, data_dir
 from qe.adjust import Adjustments
 from qe.records import Records
 from gui.theme import cur as _tok
@@ -594,8 +594,13 @@ class MainWindow(QMainWindow):
         self.lab_root.setToolTip(root)
         from gui.widgets import fill_dates, newest_first
         dates = newest_first(F.list_dates(root))        # 审查 15:和 16 个号页一样,最新的在上面
-        cur = self.c_date.currentData() or self.st.get("last_date", "")
-        fill_dates(self.c_date, dates, cur, "(选一天)", empty={d for d in dates if not self._date_has_files(root, d)})
+        empty = {d for d in dates if not self._date_has_files(root, d)}
+        cur = self.c_date.currentData()
+        if not cur:                                     # 刚打开:今天的文件夹有东西就选今天(试用 2026-10-21:每次都停在「选一天」)
+            from qe.folders import day_of
+            today = f"{bj_now().month}.{bj_now().day}"
+            cur = next((d for d in dates if day_of(d) == today and d not in empty), "") or self.st.get("last_date", "")
+        fill_dates(self.c_date, dates, cur, "(选一天)", empty=empty)
         if not dates:
             self.say(f"素材文件夹里没有日期文件夹:{root}(网络盘连上了吗?)")
         self._load_tree()
@@ -1271,9 +1276,10 @@ class MainWindow(QMainWindow):
         full = {a for a in {v.account for v in todo} if self._edu_left(a) == 0}     # 这天发够规定条数的号不再摆(用户 2026-10-20)
         return [v for v in todo if v.account not in full]
 
-    def _ask(self, title: str, text: str, yes: str, no: str, default_no: bool = False, head: str = "") -> bool:
+    def _ask(self, title: str, text: str, yes: str, no: str, default_no: bool = False, head: str = "",
+             danger: bool = False) -> bool:
         import gui.api_tab as A                       # 中文动词按钮的确认框(和接口页同一个);head = 第一行红字
-        return A.ask(self, title, text, yes, no, default_no=default_no, head=head)
+        return A.ask(self, title, text, yes, no, default_no=default_no, head=head, danger=danger)
 
     def _ask_yellow(self, n: int, how: dict) -> bool:
         """A:勾了「摆好后自动点发布」、勾上的员工里有标黄的封面 → 问一次。True = 都看过了(去黄,一路自动发);
@@ -1283,7 +1289,8 @@ class MainWindow(QMainWindow):
                                     "都在「预览封面」里看过、没问题了吗?\n"
                                     "· 都看过了:它们不再标黄,这次一路自动发到底,中间不再停\n"
                                     "· 还没看:照旧摆,摆到有标黄的那批就停下来叫你",
-                     "都看过了,一路自动发", "先不摆", extra="还没看,停下来叫我", on_extra=lambda: how.update(stop=True))
+                     "都看过了,一路自动发", "先不摆", extra="还没看,停下来叫我", on_extra=lambda: how.update(stop=True),
+                     default_no=True, danger=True)        # 会真发出去:回车 = 先不摆(新员工试用 2026-10-21)
 
     def continue_publish(self):
         """B:这批因为封面标黄停下来了,人看过了 → 软件在罐头里点「全部发布」,然后接着摆下一批。"""
@@ -1295,7 +1302,7 @@ class MainWindow(QMainWindow):
         if not self._ask("接着自动发布", f"「{acc}」这批 {len(vids)} 条已经摆好了" + (f",其中 {len(ylw)} 条封面标黄" if ylw else "") + "。\n\n"
                          "封面都看过了、没问题?点「看过了,发布」以后软件在罐头里点「全部发布」,"
                          + ("然后接着摆下一批。" if self.k_auto.isChecked() else "发完就停。"),
-                         "看过了,发布", "先不", default_no=True, head="这次会自动点发布:马上发出去(不是定时)"):
+                         "看过了,发布", "先不", default_no=True, head="这次会自动点发布:马上发出去(不是定时)", danger=True):
             return
         self._mark_covers_ok(ylw)
         self._yellow_stop = False
@@ -1407,8 +1414,9 @@ class MainWindow(QMainWindow):
         auto = self.k_auto.isChecked()
         msg += ("\n\n摆好后软件自己点「全部发布」,接着摆下一批(有标黄 / 没摆好的会停下来叫你)。" if auto else
                 "\n\n软件只摆好,不点发布。") + "摆的时候别在罐头里切到别的号。开始吗?"
-        if not chained and not self._ask("摆下一批", msg, "开始摆", "先不",
-                                         head="这次会自动点发布:摆好就马上发出去(不是定时)" if auto else ""):
+        if not chained and not self._ask("摆下一批", msg, "开始摆,并自动发布" if auto else "开始摆", "先不",
+                                         head="这次会自动点发布:摆好就马上发出去(不是定时)" if auto else "",
+                                         default_no=auto, danger=auto):   # 自动点发布 = 真发:回车 = 先不(新员工试用 2026-10-21)
             return
         if chained:
             if (self.c_date.currentData(), sorted(self.checked_dirs())) != getattr(self, "_chain_key", None):
@@ -2043,13 +2051,14 @@ class MainWindow(QMainWindow):
         d = QDialog(self)
         d.setWindowTitle("设置")
         from PySide6.QtWidgets import QScrollArea
-        d.resize(780, 640)
+        d.resize(860, 680)
         avail = self.screen().availableGeometry().height() if self.screen() else 900
         d.setMaximumHeight(max(480, avail - 60))
         dv = QVBoxLayout(d)
         sa = QScrollArea()
         sa.setWidgetResizable(True)
         sa.setFrameShape(QScrollArea.Shape.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)   # 设计师试用:右边被切、多一条横滚动条
         inner = QWidget()
         inner.setObjectName("page")
         outer = QVBoxLayout(inner)
@@ -2062,7 +2071,7 @@ class MainWindow(QMainWindow):
             h = QHBoxLayout(w)
             h.setContentsMargins(0, 0, 0, 0)
             e = QLineEdit(text)
-            e.setMinimumWidth(460)
+            e.setMinimumWidth(260)
             b = QPushButton("选…")
 
             def pick():
@@ -2090,18 +2099,24 @@ class MainWindow(QMainWindow):
             vv = QVBoxLayout(w0)
             vv.setContentsMargins(0, 0, 0, 0)
             w1, e1 = path_row(pre)
-            e1.setMinimumWidth(300)
-            lab = QLabel("\\" + suf)
+            lab = QLabel("后面自动接上:\\" + suf)              # 放到框下面(原来夹在框和「选…」中间,把窗口撑出去了)
             lab.setObjectName("muted")
+            lab.setWordWrap(True)
             lab.setToolTip("这半截是按月份 / 日期自动换的({month} = 月份,{date} = 日期),不能改")
-            w1.layout().insertWidget(1, lab)
             vv.addWidget(w1)
+            vv.addWidget(lab)
             if broken:
                 warn = QLabel(f"原来填的「{text}」里没有 {{month}},每个月都会挪到同一个地方 —— 已经换回按月份的,点「确定」才存")
                 warn.setObjectName("warnText")
                 warn.setWordWrap(True)
                 vv.addWidget(warn)
             return w0, e1, lambda: (os.path.join(e1.text().strip().rstrip("\\/") + "\\", suf) if e1.text().strip() else "")
+
+        def note(text: str) -> QLabel:
+            x = QLabel(text)
+            x.setObjectName("muted")
+            x.setWordWrap(True)
+            return x
 
         g1 = QGroupBox("教育号(在创作罐头里摆,人点发布)")
         f = QFormLayout(g1)
@@ -2158,7 +2173,7 @@ class MainWindow(QMainWindow):
             c_cov.addItem({"原样": "原样(文件夹里什么样就传什么样)", "不传": "不传(平台自己截一帧)"}.get(m, f"裁成 {m}"), m)
         c_cov.setCurrentIndex(max(0, c_cov.findData(self.st.get("api_cover", "原样"))))
         f2.addRow("封面(视频旁边的同名图)", c_cov)
-        f2.addRow("", QLabel("传封面要开着创作罐头(用它登录着的企鹅号传图);没有同名图的、传不上的,平台自己截一帧"))
+        f2.addRow("", note("传封面要开着创作罐头(用它登录着的企鹅号传图);没有同名图的、传不上的,平台自己截一帧"))
         f2.addRow("几个号一起发", sp_thr)
         f2.addRow("同一个号一次传几条", sp_per)
         from PySide6.QtWidgets import QCheckBox as _QCB
@@ -2175,7 +2190,7 @@ class MainWindow(QMainWindow):
                            "一个号这天有 3 条以上(或超过一成)这样的 → 整批先不发。关键词看不出来的检查时问 AI。")
         f2.addRow("游戏关键词", e_games)
         f2.addRow("每条间隔", sp_gap)
-        f2.addRow("", QLabel("1 = 一个号一个号地发,最稳;间隔 = 上一条发完歇几秒再发下一条"))
+        f2.addRow("", note("1 = 一个号一个号地发,最稳;间隔 = 上一条发完歇几秒再发下一条"))
         b_mig = QPushButton("从旧软件搬账号…")
         b_mig.setToolTip("从旧软件「企鹅号批量发布」的数据库(qepm.db)把 16 个号搬过来。密钥加密存在这台电脑上,不显示。")
         b_mig.clicked.connect(self.api_tab.migrate)
@@ -2205,7 +2220,6 @@ class MainWindow(QMainWindow):
         k_splash = QCheckBox("打开软件时放「Hi,欢迎使用本工作台」开场动画")
         k_splash.setChecked(bool(self.st.get("splash", True)))
         f4.addRow("", k_splash)
-        f4.addRow("", QLabel("颜色换了以后关掉软件再打开,图标颜色才全换过来"))
         outer.addWidget(g4)
         g3 = QGroupBox("AI(两边共用)")
         f3 = QFormLayout(g3)
@@ -2213,8 +2227,13 @@ class MainWindow(QMainWindow):
         e_key.setEchoMode(QLineEdit.EchoMode.Password)
         e_key.setPlaceholderText("空着就用百家号发布助手里填的" + ("(找到了)" if self.st.ai_key() else "(没找到)"))
         f3.addRow("阿里百炼 Key", e_key)
-        f3.addRow("", QLabel("教育:大头照的 2.35:1 封面 AI 扩图;接口:「整理话题」里挂好几个话题的让 AI 挑一个"))
+        f3.addRow("", note("教育:大头照的 2.35:1 封面 AI 扩图;接口:「整理话题」里挂好几个话题的让 AI 挑一个"))
         outer.addWidget(g3)
+        labs = [fl.itemAt(r, QFormLayout.ItemRole.LabelRole).widget() for fl in (f, f2, f4, f3) for r in range(fl.rowCount())
+                if fl.itemAt(r, QFormLayout.ItemRole.LabelRole) and fl.itemAt(r, QFormLayout.ItemRole.LabelRole).widget()]
+        lw = max((x.sizeHint().width() for x in labs), default=0)
+        for x in labs:                                   # 四组的左边标签一样宽:输入框左边对齐(设计师试用)
+            x.setMinimumWidth(lw)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(d.accept)
         bb.rejected.connect(d.reject)
@@ -2242,6 +2261,10 @@ class MainWindow(QMainWindow):
         self.st.save()
         from PySide6.QtWidgets import QApplication
         TH.apply(QApplication.instance(), self.st["theme"])
+        from gui.widgets import retheme_shell
+        retheme_shell(self)                              # 换颜色当场生效(原来要关掉重开,设计师 / 买家试用)
+        if hasattr(self, "today"):
+            self.today.retheme()
         from qe import gamecheck as GC2
         GC2.configure(self.st)
         self.api_tab._update_sum()
