@@ -78,9 +78,9 @@ QFrame#hero[open="false"] QLabel#heroSub {{ font-size:15px; }}
 QFrame#hero[open="false"] QLabel {{ font-size:14px; }}
 QFrame#hero[open="false"] QLabel#heroBig {{ letter-spacing:-1px; }}
 QFrame#hero[open="false"] QComboBox {{ border:none; background:{t['soft']}; border-radius:15px; padding:5px 14px; font-size:14px; }}
-QFrame#hero[open="false"] QPushButton#primary {{ font-size:16px; padding:12px 38px; border-radius:25px; }}
-QFrame#hero[open="false"] QPushButton#danger {{ font-size:16px; padding:12px 38px; border-radius:25px; }}
-QFrame#hero[open="false"] QPushButton#pill {{ font-size:14px; padding:11px 24px; border-radius:23px; }}
+QFrame#hero[open="false"] QPushButton#primary {{ font-size:16px; padding:12px 38px; border-radius:25px; min-height:24px; }}
+QFrame#hero[open="false"] QPushButton#danger {{ font-size:16px; padding:12px 38px; border-radius:25px; min-height:24px; }}
+QFrame#hero[open="false"] QPushButton#pill {{ font-size:14px; padding:11px 24px; border-radius:23px; min-height:24px; }}
 QLabel#pageTitle {{ font-size:20px; font-weight:bold; color:{t['tx']}; }}
 QLabel#muted {{ color:{t['mu']}; font-size:12px; }}
 QLabel#warnText {{ color:{t['danger']}; font-weight:bold; }}
@@ -120,7 +120,7 @@ QPushButton:pressed {{ background:{t['soft_h']}; }}
 QPushButton:disabled {{ color:{t['dim']}; background:{t['soft']}; border-color:{t['soft']}; }}
 QPushButton::menu-indicator {{ subcontrol-position:right center; right:6px; }}
 QPushButton#primary {{ background:{t['acc_btn']}; color:#ffffff; border:1px solid {t['acc_btn']}; font-weight:bold; font-size:14px;
-    padding:9px 24px; border-radius:19px; }}
+    padding:9px 24px; border-radius:19px; min-height:20px; }}
 QPushButton#primary:hover {{ background:{t['acc_h']}; border-color:{t['acc_h']}; }}
 QPushButton#ringCard {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:16px; text-align:left; }}
 QPushButton#ringCard:hover {{ border-color:{t['acc']}; }}
@@ -129,12 +129,14 @@ QLabel#badTitle {{ color:{t['bad']}; font-weight:bold; font-size:15px; backgroun
 QLabel#helpDot {{ background:{t['soft']}; color:{t['mu']}; border:1px solid {t['line']}; border-radius:8px; font-size:11px; font-weight:bold; }}
 QLabel#heroSub[tone="warn"] {{ color:{t['warn']}; font-weight:bold; }}
 QPushButton#primary[sel="true"] {{ background:{t['warn']}; border-color:{t['warn']}; }}
-QPushButton#selChip {{ background:{t['warn_bg']}; color:{t['warn']}; border:1px solid {t['warn']}; border-radius:15px; padding:5px 12px; font-weight:bold; }}
+QPushButton#pill[sel="true"] {{ background:{t['warn_bg']}; color:{t['warn']}; font-weight:bold; }}
+QPushButton#pill[sel="true"]:hover {{ background:{t['warn_bg']}; color:{t['tx']}; }}
 QPushButton#primary:disabled {{ background:{t['soft']}; color:{t['dim']}; border-color:{t['soft']}; }}
-QPushButton#danger {{ background:{t['danger_btn']}; color:#ffffff; border:1px solid {t['danger_btn']}; font-weight:bold; border-radius:16px; padding:7px 18px; }}
+QPushButton#danger {{ background:{t['danger_btn']}; color:#ffffff; border:1px solid {t['danger_btn']}; font-weight:bold; border-radius:16px; padding:7px 22px;
+    min-height:18px; min-width:24px; }}
 QPushButton#danger:hover {{ background:{t['danger_h']}; }}
 QPushButton#danger:disabled {{ background:{t['soft']}; color:{t['dim']}; border-color:{t['soft']}; }}
-QPushButton#pill {{ background:{t['soft']}; border:none; border-radius:16px; padding:7px 16px; color:{t['tx']}; }}
+QPushButton#pill {{ background:{t['soft']}; border:none; border-radius:16px; padding:7px 16px; color:{t['tx']}; min-height:18px; }}
 QPushButton#pill:hover {{ background:{t['soft_h']}; }}
 QPushButton#pill:disabled {{ color:{t['dim']}; }}
 QPushButton#link, QPushButton#toggle {{ border:none; background:transparent; color:{t['acc']}; padding:4px 8px; }}

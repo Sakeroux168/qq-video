@@ -215,7 +215,8 @@ class ApiTab(QWidget):
         a.addWidget(self.lab_sched)
         a.addSpacing(28)
         self.b_unsel = QPushButton("")                  # 选中了东西时出来:「选中 1 条 × 取消选中」(老手 / 新员工试用 2026-10-21)
-        self.b_unsel.setObjectName("selChip")
+        self.b_unsel.setObjectName("pill")              # 和「到点自动发…」一样的圆胶囊,橙色字
+        self.b_unsel.setProperty("sel", True)
         self.b_unsel.setToolTip("现在只管选中的;点一下(或按 Esc)取消选中,按钮回到管全部")
         self.b_unsel.clicked.connect(lambda: self.tree.clearSelection())
         self.b_unsel.hide()

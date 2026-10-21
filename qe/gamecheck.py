@@ -113,7 +113,7 @@ class Store:
                 self.d = json.load(f)
         except (OSError, ValueError):
             self.d = {}
-        for k in ("ai", "ok", "batch_ok"):
+        for k in (AI_KEY, "ok", "batch_ok"):
             self.d.setdefault(k, {})
 
     @staticmethod
@@ -122,7 +122,7 @@ class Store:
         return norm_name(title) or str(title)
 
     def ai(self, title: str):
-        return self.d["ai"].get(self.tkey(title))
+        return self.d[AI_KEY].get(self.tkey(title))
 
     def ok(self, nick: str, title: str) -> bool:
         return bool(self.d["ok"].get(f"{nick}|{self.tkey(title)}"))
@@ -139,7 +139,7 @@ class Store:
     def set_ai(self, got: dict):
         with _LOCK:
             for t, g in got.items():
-                self.d["ai"][self.tkey(t)] = g
+                self.d[AI_KEY][self.tkey(t)] = g
             self._save()
 
     def set_ok(self, nick: str, title: str, on: bool = True):
@@ -162,6 +162,7 @@ class Store:
 
 
 _STORE = None
+AI_KEY = "ai2"           # 第 2 版问法(要说出标题里哪个词是别的游戏独有的);第 1 版的答案(「ai」)不再用
 
 
 def store() -> Store:
@@ -195,17 +196,27 @@ def need_ai(nick: str, title: str) -> bool:
 
 def ask_ai(own: str, titles: list[str], key: str, model: str = "qwen-plus",
            base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1", timeout: int = 60) -> dict:
-    """问 AI 这些标题各是哪个游戏。返回 {标题: 游戏名};看不出来的是 ""。出错抛 RuntimeError。"""
+    """问 AI 这些标题各是哪个游戏。返回 {标题: 游戏名};看不出来的是 ""。出错抛 RuntimeError。
+    问两遍,两遍说的一样才算(10-21 实测:同一条一遍说是别的游戏、一遍说看不出;宁可漏,别冤枉)。"""
+    a = _ask_once(own, titles, key, model, base_url, timeout)
+    b = _ask_once(own, titles, key, model, base_url, timeout)
+    return {t: (g if g and b.get(t) == g else "") for t, g in a.items()}
+
+
+def _ask_once(own: str, titles: list[str], key: str, model: str, base_url: str, timeout: int) -> dict:
     import requests
     if not key:
         raise RuntimeError("要用 AI 判断游戏,先在「设置」里填阿里百炼 Key")
     names = list(_WORDS)
     lines = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(titles))
-    prompt = (f"下面这些短视频标题,是要发到一个《{own}》游戏号上的。请判断每条标题讲的是哪个游戏。\n"
-              f"只能从这些里选:{'、'.join(names)};标题里看不出是哪个游戏(比如只是「哈哈哈」)就写「看不出」。\n"
-              "注意:很多游戏都有「海岛」「吃鸡」「决赛圈」这种说法;PUBG 和和平精英的枪、地图、道具大多一样(M416、AWM、三级头、"
-              "G港、P城、海岛、雨林),光凭这些分不出是哪个,就写「看不出」。拿不准就写「看不出」,别乱猜。\n"
-              '只回一个 JSON 数组,每项 {"i": 序号, "game": "游戏名或看不出"},不要别的字。\n\n' + lines)
+    prompt = (f"下面这些短视频标题,是要发到一个《{own}》游戏号上的,默认它们就是《{own}》的。\n"
+              "请只挑出明确是别的游戏的:标题里出现了别的游戏独有的东西(游戏名、英雄 / 角色名、只有那个游戏才有的地图 / 模式 / 道具名)。\n"
+              f"别的游戏只能从这些里选:{'、'.join(names)}。\n"
+              f"射击类游戏(《{own}》、PUBG、和平精英、三角洲行动、暗区突围、CSGO、穿越火线 …)的枪名、地图、玩法说法很多是通用的"
+              "(比如 M416、VSS、海岛、雨林、冰河、无限火力、彩蛋、淘汰、苟分、跳伞、决赛圈、3v3),光凭这些不算;"
+              f"《{own}》自己有的地图、模式、活动名更不算。拿不准一律写「看不出」。\n"
+              '只回一个 JSON 数组,每项 {"i": 序号, "game": "游戏名或看不出", "word": "标题里证明是那个游戏的原词(看不出就空)"},不要别的字。\n\n'
+              + lines)
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 1200}
     if "dashscope" in base_url:
         body["enable_thinking"] = False
@@ -228,7 +239,11 @@ def ask_ai(own: str, titles: list[str], key: str, model: str = "qwen-plus",
             continue
         if 0 <= k < len(titles):
             g = str(x.get("game") or "").strip()
-            out[titles[k]] = g if g in names else ""
+            w = str(x.get("word") or "").strip().lower()
+            # 要说得出标题里哪个词:说不出、那个词标题里没有、或者是这个号自己游戏的词 → 不算(10-21 误判了好几条)
+            ok = g in names and g != own and len(w) >= 2 and w in titles[k].lower() \
+                and not any(w in k2.lower() or k2.lower() in w for k2 in _WORDS.get(own, []))
+            out[titles[k]] = g if ok else ""
     if not out:
         raise RuntimeError("AI 回的读不出来,下次检查再试")
     return out

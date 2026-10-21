@@ -3123,6 +3123,42 @@ def test_game_guard(tmp: Path):
           and not any("嫂子" in v.title for v in tab.videos if v.account == nick),
           f"放错了的视频和封面挪到和平精英号同一天的文件夹,列表里没了 -> {got}")
     check(tab._blocked.get(nick) == 2 or not tab._blocked.get(nick), f"挪走以后少了一条像别的游戏的 -> {tab._blocked}")
+    # AI 的判断要「说得出标题里哪个词」、两遍一样才算(10-21 和平精英号「3v3无限火力」「冰河禁区」被误判)
+    import json as _json
+    import requests
+    replies = iter([
+        [{"i": 1, "game": "英雄联盟", "word": ""}, {"i": 2, "game": "暗区突围", "word": "冰河"},
+         {"i": 3, "game": "王者荣耀", "word": "鲁班七号"}, {"i": 4, "game": "无畏契约", "word": "卡德尔"},
+         {"i": 5, "game": "英雄联盟", "word": "亚索"}],
+        [{"i": 1, "game": "英雄联盟", "word": ""}, {"i": 2, "game": "暗区突围", "word": "冰河"},
+         {"i": 3, "game": "王者荣耀", "word": "鲁班七号"}, {"i": 4, "game": "看不出", "word": ""},
+         {"i": 5, "game": "英雄联盟", "word": "不在标题里"}]])
+
+    class _R:
+        status_code, text = 200, ""
+
+        def __init__(self, arr):
+            self.arr = arr
+
+        def json(self):
+            return {"choices": [{"message": {"content": _json.dumps(self.arr, ensure_ascii=False)}}]}
+    real_post = requests.post
+    requests.post = lambda *a, **k: _R(next(replies))
+    try:
+        ts = ["3v3无限火力最新彩蛋密码", "不是吧冰河禁区提前进", "鲁班七号一套带走", "AMR淘汰卡德尔需要多少发子弹", "亚索快乐风男"]
+        got = gamecheck._ask_once("和平精英", ts, "k", "m", "https://x", 5)
+        got2 = {t: "" for t in ts}
+        requests.post = lambda *a, **k: _R(next(replies))
+        got2 = gamecheck._ask_once("和平精英", ts, "k", "m", "https://x", 5)
+    finally:
+        requests.post = real_post
+    both = {t: (g if g and got2.get(t) == g else "") for t, g in got.items()}
+    check(not got[ts[0]] and got[ts[2]] == "王者荣耀" and got[ts[4]] == "英雄联盟",
+          f"说不出是哪个词的不算,说得出的算 -> {got}")
+    check({t: g for t, g in both.items() if g} == {ts[1]: "暗区突围", ts[2]: "王者荣耀"} or
+          {t: g for t, g in both.items() if g} == {ts[2]: "王者荣耀"},
+          f"两遍一样才算:「卡德尔」一遍说是一遍说看不出 → 不算 -> {both}")
+    check(gamecheck.AI_KEY == "ai2" and gamecheck.store().ai("任何标题") is None, "旧版 AI 答案(ai)不再用,换了新问法重新问")
 
 
 def test_ux_fixes(tmp: Path):
