@@ -36,7 +36,15 @@ class DailyTab(QWidget):
         n = bj_now()
         self.d.setDate(QDate(n.year, n.month, n.day))
         self.d.dateChanged.connect(lambda _d: self.refresh())
+        b = QPushButton("‹ 前一天")
+        b.setObjectName("link")
+        b.clicked.connect(lambda: self.d.setDate(self.d.date().addDays(-1)))
+        top.addWidget(b)
         top.addWidget(self.d)
+        b = QPushButton("后一天 ›")
+        b.setObjectName("link")
+        b.clicked.connect(lambda: self.d.setDate(self.d.date().addDays(1)))
+        top.addWidget(b)
         b = QPushButton("今天")
         b.clicked.connect(self._today)
         top.addWidget(b)
@@ -107,8 +115,8 @@ class DailyTab(QWidget):
         self._s = s
         for lab, q, a in s["rows"]:
             key = lab.replace("总发布量", "")
-            self.cards.set(**{key: (f"{a} / {q}", "good" if a >= q else ""),
-                              f"{key}_sub": "够了 √" if a >= q else f"还差 {q - a} 条"})
+            self.cards.set(**{key: (f"{a} / {q}", "warn" if q and a > q else "good" if a >= q else ""),
+                              f"{key}_sub": f"多发 {a - q} 条" if q and a > q else "够了 √" if a >= q else f"还差 {q - a} 条"})
             self.cards.set_ring(key, a / q if q else 0)
         tq, ta = s["total"]
         self.cards.set(总=(f"{ta} / {tq}", "good" if ta >= tq else ""),
@@ -127,18 +135,22 @@ class DailyTab(QWidget):
             self.hint.setToolTip("")
             self.hint_more.hide()
             repolish(self.hint, tone="good")
-        accs = s["accounts"]
+        # 同一个品类里:没发够的排前面(差得多的在上)、再多发的、再够了的(老板试用:没发够的散在 18 行里要往下滚)
+        order = {c: k for k, c in enumerate(dict.fromkeys(x[0] for x in s["accounts"]))}
+        accs = sorted(s["accounts"], key=lambda x: (order[x[0]], 0 if x[2] and x[3] < x[2] else 1 if x[2] and x[3] > x[2] else 2,
+                                                     -(x[2] - x[3]) if x[2] else 0))
         self.t.setRowCount(len(accs))
         from gui.theme import cur
         red, green = QBrush(QColor(cur()["rows"]["red"])), QBrush(QColor(cur()["rows"]["green"]))
+        yellow = QBrush(QColor(cur()["rows"]["yellow"]))
         for i, (cat, n, q, a) in enumerate(accs):
-            diff = "" if not q else ("够了 √" if a >= q else f"还差 {q - a}")
+            diff = "" if not q else (f"多发 {a - q}" if a > q else "够了 √" if a >= q else f"还差 {q - a}")
             for c, txt in enumerate([cat, n, str(q) if q else "—", str(a), diff]):
                 it = QTableWidgetItem(txt)
                 if c >= 2:
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if q:
-                    it.setBackground(green if a >= q else red)
+                    it.setBackground(yellow if a > q else green if a >= q else red)
                 self.t.setItem(i, c, it)
 
     def copy_day(self):

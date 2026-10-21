@@ -220,6 +220,7 @@ class MainWindow(QMainWindow):
         if ob:
             b = ob[-1]
             self.batch_id = b["batch"]
+            self._batch_acc = b["account"]
             self.say(f"上次摆好的一批还没确认:「{b['account']}」{b['n']} 条({b['at']})。在罐头里发了就点「这批发好了」,不要了就点「这批不要了」。")
         self._refresh_buttons()
 
@@ -270,6 +271,7 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderLabels(["号 / 员工", "条数"])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.itemChanged.connect(self._tree_changed)
+        self.tree.itemClicked.connect(self._top_clicked)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
         self.tree.setIndentation(18)
@@ -396,16 +398,22 @@ class MainWindow(QMainWindow):
         self.lab_sched.setObjectName("warnText")
         bar.addWidget(self.lab_sched)
         bar.addSpacing(28)
+        from gui.widgets import help_dot
         for b in (self.b_drop, self.b_sent, self.b_pubgo, self.b_go, self.b_stop):
             bar.addWidget(b)
+            if b is self.b_go:
+                bar.addWidget(help_dot("摆"))
         # 工具那一排:这次摆几条(绿字)+ 查水印 / 模糊水印 / 封面都看过了 / 自动点发布
         tools = QHBoxLayout()
         tools.setSpacing(8)
         tools.addWidget(self.lab_scope, 1)
         for b in (self.b_wm, self.b_blur, self.b_review, self.b_allok):
             tools.addWidget(b)
+            if b is self.b_review:
+                tools.addWidget(help_dot("标黄"))
         tools.addSpacing(6)
         tools.addWidget(self.k_auto)
+        tools.addWidget(help_dot("自动点发布"))
         v.addLayout(tools)
         v.addWidget(sp, 1)
         for b in (self.b_open, self.b_move):          # 次要的放上面一行右边;「标成已发」「预览封面」在列表右键里
@@ -469,6 +477,11 @@ class MainWindow(QMainWindow):
         self.c_rec_date = QComboBox()
         self.c_rec_date.currentIndexChanged.connect(self.refresh_records)
         rh.addWidget(self.c_rec_date)
+        from PySide6.QtWidgets import QCheckBox as _QCB2
+        self.k_rec_bad = _QCB2("只看出问题的")
+        self.k_rec_bad.setToolTip("下面「每一条」只列没发成、不确定发没发、摆好了还没确认的")
+        self.k_rec_bad.toggled.connect(lambda _on: self.refresh_records())
+        rh.addWidget(self.k_rec_bad)
         rh.addStretch(1)
         b = QPushButton("刷新")
         b.clicked.connect(self.refresh_records)
@@ -634,6 +647,7 @@ class MainWindow(QMainWindow):
             for acc, dirs in F.account_dirs(root, date, self.st).items():
                 top = QTreeWidgetItem([acc, ""])
                 top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                top.setToolTip(0, f"点这一行 = 「{acc}」的员工全勾上(再点一下全不勾)")
                 n_all = 0
                 rep: list = []
                 for d in dirs:                                 # 先把这个号的文件夹都翻完(同号同名要跨文件夹比)
@@ -760,7 +774,33 @@ class MainWindow(QMainWindow):
         finally:
             self.tree.blockSignals(False)
 
+    def batch_account(self) -> str:
+        """摆好的这批是哪个号的(软件重开以后 batch_videos 是空的,从记录里拿)。"""
+        return self.batch_videos[0].account if self.batch_videos else getattr(self, "_batch_acc", "")
+
+    def show_problems(self):
+        """首页「今天出问题」:去数据记录,只看没发成 / 不确定 / 摆好没确认的。"""
+        self.goto("records")
+        self.k_rec_bad.setChecked(True)
+        self.c_rec_date.setCurrentIndex(0)            # 全部日期(不确定 / 摆好没确认的可能是前几天的)
+        self.refresh_records()
+
     def _tree_changed(self, *_a):
+        self._load_videos()
+
+    def _top_clicked(self, it, _col=0):
+        """点号那一行:这个号能勾的员工全勾上;都勾着就全不勾(老手 / 新员工试用:原来要一个个勾)。只认一次封面,不是勾一个认一次。"""
+        if it is None or it.parent() is not None:
+            return
+        kids = [it.child(k) for k in range(it.childCount()) if it.child(k).data(0, Qt.ItemDataRole.UserRole + 2)]
+        if not kids:
+            return
+        on = not all(k.checkState(0) == Qt.CheckState.Checked for k in kids)
+        self.tree.blockSignals(True)
+        for k in kids:
+            k.setCheckState(0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+        self.tree.blockSignals(False)
+        self.tree.viewport().update()
         self._load_videos()
 
     def checked_dirs(self) -> list[tuple[str, str, str]]:
@@ -1169,7 +1209,7 @@ class MainWindow(QMainWindow):
                 big = "正在自己摆、自己发…"
         elif self.batch_id:
             nb = self.rec.ready_in_batch(self.batch_id)
-            acc = self.batch_videos[0].account if self.batch_videos else ""
+            acc = self.batch_account()
             big, tone = (f"「{acc}」这批 {nb} 条摆好了" if acc else f"这批 {nb} 条摆好了"), "good"
             sub = "去罐头里检查,点「发布 → 全部发布」→ 回来点「这批发好了」(不要了就在罐头里删掉,点「这批不要了」)"
             if getattr(self, "_yellow_stop", False):
@@ -1432,6 +1472,7 @@ class MainWindow(QMainWindow):
             self._chain_stop = False                   # 人自己点「摆下一批」:之前点过的「停」不算了
         self.batch_id = f"{acc}-{bj_str().replace(' ', '_').replace(':', '')}"
         self.batch_videos = vids
+        self._batch_acc = acc
         shots = str(data_dir() / "截图" / bj_str()[:10])
         self.worker = BatchWorker(acc, vids, shots, self, auto_publish=self.k_auto.isChecked(), unattended=self._unattended,
                                   sched_at=getattr(self, "_sched_at", "") if self._unattended else "")
@@ -1917,6 +1958,10 @@ class MainWindow(QMainWindow):
                 val = x[k] if x[k] is not None else ""
                 self.t_sum.setItem(i, c, QTableWidgetItem(short(val) if k.endswith("_at") else str(val)))
         rows = self.rec.rows(date)
+        if self.k_rec_bad.isChecked():
+            sent = {r.get("pkey") for r in rows if r["status"] == "已发"}
+            rows = [r for r in rows if r["status"] in ("结果不明", "发布中", "摆好")
+                    or (r["status"] == "没发成" and r.get("pkey") not in sent)]
         self._rec_rows = rows
         self.rec_empty.setText("" if rows else
                                ("还没有记录。在「教育号」摆好、点了「这批发好了」,或者在「16 个号」发了以后,这里会一条条记下来。"

@@ -247,6 +247,18 @@ class Records:
                 "SELECT account, employee, status, published_at FROM posts WHERE published_at LIKE ? "
                 "AND status IN ('已发','没发成') ORDER BY published_at", (f"{day}%",))]
 
+    def problems_on(self, day: str) -> dict:
+        """「今天出问题」那张卡(老板试用 2026-10-21):这天没发成的(后来发成了的不算)、
+        还不确定发没发的、摆好了还没确认的(后两样不管哪天的,没处理就一直算)。day = 2026-10-21。"""
+        self._fill()
+        with _LOCK:
+            fail = self.conn.execute(
+                "SELECT COUNT(DISTINCT pkey) FROM posts WHERE status='没发成' AND (published_at LIKE ? OR prepared_at LIKE ?) "
+                "AND pkey NOT IN (SELECT pkey FROM posts WHERE status='已发')", (f"{day}%", f"{day}%")).fetchone()[0]
+            unsure = self.conn.execute("SELECT COUNT(DISTINCT pkey) FROM posts WHERE status IN ('结果不明','发布中')").fetchone()[0]
+            ready = self.conn.execute("SELECT COUNT(DISTINCT pkey) FROM posts WHERE status='摆好'").fetchone()[0]
+        return {"fail": int(fail or 0), "unsure": int(unsure or 0), "ready": int(ready or 0)}
+
     def summary(self, date: str = "") -> list[dict]:
         """按 日期 / 号 / 员工 数:已发几条、摆好还没发几条、没发成几条(后来发成了的不算)、结果不明几条。"""
         self._fill()

@@ -279,6 +279,10 @@ class CoverDialog(QDialog):
         for key, d in (("Left", -1), ("Right", 1)):
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(lambda d=d: self.go(d))
+        for key in ("Return", "Enter"):                  # 老手试用:拖完框按回车没反应
+            QShortcut(QKeySequence(key), self).activated.connect(self.ok_next)
+        for k in range(len(C.RATIOS)):
+            QShortcut(QKeySequence(str(k + 1)), self).activated.connect(lambda k=k: self.pick_ratio(k))
         self.show_video()
 
     # ---- 复制封面 / 去豆包 / 打开文件夹(用户 2026-10-19:员工忘了处理封面,我去浏览器里找豆包处理) ----
@@ -340,12 +344,15 @@ class CoverDialog(QDialog):
         self.b_next.setEnabled(self.i < len(self.videos) - 1)
         self.refresh()
 
-    def pix_for(self, k) -> QPixmap:
-        """这个比例用哪张图:竖的比例有竖屏图用竖屏图;2.35:1 要专用图就用专用图;别的用横图。"""
+    def pix_for(self, k, make: bool = True) -> QPixmap:
+        """这个比例用哪张图:竖的比例有竖屏图用竖屏图;2.35:1 要专用图就用专用图;别的用横图。
+        make=False:专用图还没做就先用横图(左边小图用;老手试用:原来一打开就去 AI 扩图,要等还花钱,点到 2.35:1 才做)。"""
         _tag, r = C.RATIOS[k]
         if r < 1 and not self._vpm.isNull():
             return self._vpm
         if r >= 2 and not self.pm.isNull() and C.needs_wide(self.pm.width(), self.pm.height(), self.v.plan):
+            if self._wide is None and not make:
+                return self.pm
             if self._wide is None:
                 from PySide6.QtWidgets import QApplication, QMessageBox
                 QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -426,9 +433,9 @@ class CoverDialog(QDialog):
         self.show_video()
         self.changed.emit(self.i)
 
-    def rect_for(self, k):
+    def rect_for(self, k, make: bool = True):
         _tag, r = C.RATIOS[k]
-        pm = self.pix_for(k)
+        pm = self.pix_for(k, make)
         if pm is self._vpm:
             return C.crop_rect(pm.width() or 1, pm.height() or 1, r, self.v.vplan)
         if pm is not self.pm:
@@ -441,9 +448,9 @@ class CoverDialog(QDialog):
             b.setChecked(k == self.ratio_i)
             b.setText(tag + ("  ✎" if C.rkey(_r) in (self.v.plan or {}).get("manual", {}) else ""))
             if not self.pm.isNull():
-                x, y, w, h = self.rect_for(k)
+                x, y, w, h = self.rect_for(k, make=k == self.ratio_i)
                 tw, tht = (110, 62) if self._small else (150, 110)
-                th = self.pix_for(k).copy(int(x), int(y), int(w), int(h)).scaled(tw, tht, Qt.AspectRatioMode.KeepAspectRatio,
+                th = self.pix_for(k, make=k == self.ratio_i).copy(int(x), int(y), int(w), int(h)).scaled(tw, tht, Qt.AspectRatioMode.KeepAspectRatio,
                                                                           Qt.TransformationMode.SmoothTransformation)
                 b.setIcon(th)
                 b.setIconSize(th.size())
@@ -530,6 +537,13 @@ class CoverDialog(QDialog):
         self.b_okc.hide()
         self._toast("记下了:这张不再标黄")
         self.changed.emit(self.i)
+
+    def ok_next(self):
+        """回车:标黄的这张标「没问题」,跳到下一张(最后一张就只标)。"""
+        if self.v.warn and self.v.cover:
+            self.mark_ok()
+        if self.i < len(self.videos) - 1:
+            self.go(1)
 
     def go(self, d):
         self.i = min(max(self.i + d, 0), len(self.videos) - 1)

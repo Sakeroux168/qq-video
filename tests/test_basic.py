@@ -563,7 +563,7 @@ def test_api_tab(tmp: Path):
         tab.state[sent_row[0]] = "已发"
         tab.set_topic(sent_row)
         check(tab.videos[sent_row[0]].title == "d1", "发过的不改")
-        QInputDialog.getText = staticmethod(lambda *a, **k: ("c3 改过的标题", True))
+        tab._ask_title = lambda *a, **k: ("c3 改过的标题", True)        # 改标题的框(宽的那个)
         tab.edit_title(rows[0])
         check(tab.videos[rows[0]].title == "c3 改过的标题", "右键改标题")
         check("改标题" in tab.b_undo.toolTip(), "撤销按钮上写着上一次是什么")
@@ -891,7 +891,8 @@ def test_ui_r1(tmp: Path):
     class V:
         title = "A小到底该怎么控 "
         checks = {"w": 1080, "h": 1920, "tags": []}
-    check(checks.problems(V) == ["结尾多了空格"], "只是结尾多空格:单独说「结尾多了空格」")
+    check(checks.problems(V) == [] and checks.format_kind(V.title) == "结尾多了空格",
+          "只是结尾多空格:不算要处理(发的时候自己去掉,新员工试用 2026-10-21)")
     V.title = "标题 # 剑来"
     V.checks = {"w": 1080, "h": 1920, "tags": ["剑来"]}
     check(checks.problems(V) == ["话题写法不对"], "「# 话题」:说「话题写法不对」")
@@ -3186,13 +3187,39 @@ def test_ux_fixes(tmp: Path):
     check(not tab.selected_rows(), "切「全部 / 要处理 / 能发…」自动取消选中")
     tab._seg_changed("all")
     tab.items[0].setSelected(True)
-    real_get = QInputDialog.getText
-    QInputDialog.getText = staticmethod(lambda *a, **k: ("改过的标题", True))
-    try:
-        tab.edit_title(0)
-    finally:
-        QInputDialog.getText = real_get
+    tab._ask_title = lambda *a, **k: ("改过的标题", True)
+    tab.edit_title(0)
+    del tab._ask_title
     check(not tab.selected_rows(), "F2 改完标题自动取消选中")
+    # 老手包:批量替换标题里的字(先预览、改完能撤销)
+    from PySide6.QtWidgets import QDialog, QLineEdit as _QLE, QPlainTextEdit as _QPT
+    real_dexec = QDialog.exec
+    seen_pv = []
+
+    def fake_dexec(dlg):
+        eds = dlg.findChildren(_QLE)
+        if len(eds) >= 2:
+            eds[0].setText("今天")
+            eds[1].setText("明天")
+            seen_pv.append(dlg.findChild(_QPT).toPlainText())
+            return QDialog.DialogCode.Accepted
+        return real_dexec(dlg)
+    QDialog.exec = fake_dexec
+    try:
+        tab.replace_titles()
+    finally:
+        QDialog.exec = real_dexec
+    titles = sorted(v.title for v in tab.videos)
+    check(seen_pv and "→ 明天" in seen_pv[0] and titles == ["改过的标题", "明天二"],
+          f"批量替换:先预览,「今天」换成「明天」-> {titles}")
+    real_ask = T.ask
+    T.ask = lambda *a, **k: True
+    try:
+        tab.undo_topic()
+    finally:
+        T.ask = real_ask
+    _settle(tab)
+    check(sorted(v.title for v in tab.videos) == ["今天二", "改过的标题"], f"批量替换能撤销 -> {[v.title for v in tab.videos]}")
     tab._seg_changed("bad")
     check(tab.b_pub.text() == "点「全部」再发", f"看「要处理」时按钮说清楚为什么不能发 -> {tab.b_pub.text()}")
     tab._seg_changed("all")
@@ -3209,6 +3236,97 @@ def test_ux_fixes(tmp: Path):
     root_w, grp, _stk = shell([("today", "今天", QWidget())], lambda: None)
     set_badge(grp, 0, "12")
     check(grp.badges[0].width() >= 24, f"角标两位数够宽 -> {grp.badges[0].width()}")
+
+
+def test_packs(tmp: Path):
+    print("[试用后的三包(2026-10-21):老板看数(出问题卡 / 多发变黄 / 两边各算各的批 / 摆好写号名)、新员工(小问号 / 没 Key 先改写法)、老手(点号全勾)]")
+    from PySide6.QtWidgets import QApplication, QLabel, QTreeWidgetItem
+    app = QApplication.instance() or QApplication([])
+    from qe import folders as F
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    import gui.api_tab as T
+    import gui.window as GW
+    (tmp / "pk_mat").mkdir(exist_ok=True)
+    (tmp / "pk_api").mkdir(exist_ok=True)
+    st = Settings(tmp / "st_pk.json")
+    st["material_root"] = str(tmp / "pk_mat")
+    st["api_roots"] = [str(tmp / "pk_api")]
+    st["splash"] = False
+    st["daily_plan"] = [{"cat": "教育", "label": "教育总发布量", "accounts": {"家长研习空间": 2}},
+                        {"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 5}}]
+    rec = Records(tmp / "r_pk.sqlite")
+    md = f"{bj_now().month}.{bj_now().day}"
+    for k in range(3):                                            # 教育号发了 3 条(规定 2 条 → 多发 1)
+        rec.manual_published(F.Video(path=str(tmp / f"e{k}.mp4"), title=f"e{k}", account="家长研习空间", employee="梁", date=md))
+        rec.api_result(F.Video(path=str(tmp / f"a{k}.mp4"), title=f"a{k}", account="CSGO战神君", employee="", date=md), "已发")
+    rid = rec.api_begin(F.Video(path=str(tmp / "bad.mp4"), title="bad", account="CSGO战神君", employee="", date=md))
+    rec.api_finish(rid, "没发成", "测试")
+    rec.prepared(F.Video(path=str(tmp / "r1.mp4"), title="r1", account="家长小天地", employee="51", date=md), "批-1")
+    p = rec.problems_on(bj_now().strftime("%Y-%m-%d"))
+    check(p == {"fail": 1, "unsure": 0, "ready": 1}, f"今天出问题:没发成 1、摆好没确认 1 -> {p}")
+    w = GW.MainWindow(st, rec)
+    w.today.refresh(animate_=False)
+    check(w.today.prob.isVisibleTo(w.today) and "出问题 2 条" in w.today.prob_t.text() and "没发成 1" in w.today.prob_s.text(),
+          f"首页「今天出问题」卡 -> {w.today.prob_t.text()} / {w.today.prob_s.text()}")
+    edu = w.today.rings["教育"][2].text()
+    check(edu == "多发 1 条" and w.today.rings["教育"][2].property("tone") == "warn", f"多发了:写「多发 1 条」变黄,不是绿的「够了」-> {edu}")
+    eta = w.today.lab_eta.text()
+    check("教育号 1 批 3 条" in eta and "16 个号 1 批 3 条" in eta, f"今天发了这几批:教育号、16 个号各算各的 -> {eta}")
+    w.show_problems()
+    st_ = sorted(w.t_rec.item(r, 4).text() for r in range(w.t_rec.rowCount()))
+    check(w.k_rec_bad.isChecked() and len(st_) == 2 and "没发成" in st_, f"点「出问题」:数据记录只看出问题的 -> {st_}")
+    w.k_rec_bad.setChecked(False)
+    w.daily.refresh()
+    diffs = {w.daily.t.item(r, 1).text(): w.daily.t.item(r, 4).text() for r in range(w.daily.t.rowCount())}
+    check(diffs.get("家长研习空间") == "多发 1" and diffs.get("CSGO战神君") == "还差 2", f"每日汇总:多发 / 还差 -> {diffs}")
+    # 摆好的那批:软件重开以后也写号名
+    w.batch_id, w.batch_videos, w._batch_acc = "批-1", [], "家长小天地"
+    w.today._fill_next(False)
+    texts = [x.text() for x in w.today.findChildren(QLabel) if "摆好了" in x.text()]
+    check(any("「家长小天地」1 条摆好了" in x for x in texts), f"摆好的那批写号名和几条(原来是空的「」)-> {texts}")
+    w.batch_id = ""
+    # 小问号
+    check(len(w.findChildren(QLabel, "helpDot")) >= 5, f"行话旁边有小问号 -> {len(w.findChildren(QLabel, 'helpDot'))}")
+    # 老手:点号那一行 = 这个号的员工全勾 / 全不勾,只读一次
+    loads = []
+    real_load = w._load_videos
+    w._load_videos = lambda: loads.append(1)
+    top = QTreeWidgetItem(["家长研习空间", ""])
+    for e in ("梁", "51"):
+        it = QTreeWidgetItem([e, ""])
+        it.setData(0, GW.Qt.ItemDataRole.UserRole + 2, "d")
+        it.setCheckState(0, GW.Qt.CheckState.Unchecked)
+        top.addChild(it)
+    w.tree.addTopLevelItem(top)
+    w._top_clicked(top)
+    on = [top.child(k).checkState(0) == GW.Qt.CheckState.Checked for k in range(2)]
+    w._top_clicked(top)
+    off = [top.child(k).checkState(0) == GW.Qt.CheckState.Unchecked for k in range(2)]
+    w._load_videos = real_load
+    check(all(on) and all(off) and len(loads) == 2, f"点号那一行:全勾 / 再点全不勾,一次只读一遍 -> {on} {off} {loads}")
+    # 新员工:没填 AI Key 的「整理标题」:不用 AI 的先改,要 AI 的跳过
+    d = tmp / "pk_api" / "CSGO--CSGO战神君" / md
+    d.mkdir(parents=True, exist_ok=True)
+    for nm in ("甲 #a #b", "乙 ##c"):
+        (d / f"{nm}.mp4").write_bytes(b"x")
+    st2 = Settings(tmp / "st_pk2.json")
+    st2["api_roots"] = [str(tmp / "pk_api")]
+    st2["quota_open"] = True
+    st2.ai_key = lambda: ""
+    tab = T.ApiTab(st2, Records(tmp / "r_pk2.sqlite"), lambda m: None)
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    seen = []
+    real_ask = T.ask
+    T.ask = lambda _p, _t, text, *a, **k: seen.append(text) or True
+    try:
+        tab.run_topic()
+        _wait(app, lambda: not tab.busy())
+    finally:
+        T.ask = real_ask
+    got = sorted(v.title for v in tab.videos)
+    check(got == ["乙 #c", "甲 #a #b"] and seen and "还没填阿里百炼 Key" in seen[0],
+          f"没 Key:写法不对的先改,挂好几个话题的跳过并说一声 -> {got}")
 
 
 def test_quota_gate(tmp: Path):
@@ -3931,6 +4049,7 @@ if __name__ == "__main__":
     test_quota_gate(tmp)
     test_game_guard(tmp)
     test_ux_fixes(tmp)
+    test_packs(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

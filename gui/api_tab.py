@@ -286,6 +286,8 @@ class ApiTab(QWidget):
         cards = QHBoxLayout()
         cards.setSpacing(10)
         self.card_v = ProbCard("rotate", "横屏 / 偏方", [self.b_vert])
+        from gui.widgets import help_dot
+        self.card_v.add_help("偏方")
         self.card_t = ProbCard("tag", "标题 / 话题", [self.b_topic])
         self.card_w = ProbCard("scan", "水印 / 口播广告", [self.b_check, self.b_blur])
         for c in (self.card_v, self.card_t, self.card_w):
@@ -313,6 +315,8 @@ class ApiTab(QWidget):
         self.seg = Segmented([("all", "全部"), ("bad", "要处理"), ("ok", "能发"), ("sent", "已发")])
         self.seg.changed.connect(self._seg_changed)
         view.addWidget(self.seg)
+        from gui.widgets import help_dot
+        view.addWidget(help_dot("要处理"))
         self.k_bad = QCheckBox("只看有问题的")
         self.k_bad.setToolTip("只显示要处理的(横屏 / 标题有别的平台 / 话题问题 / 没发成 / 结果不明)")
         self.k_bad.toggled.connect(self._kbad_toggled)
@@ -614,6 +618,8 @@ class ApiTab(QWidget):
                                   ("全部展开", lambda: self.expand_all(True), True, ""),
                                   ("全部收起", lambda: self.expand_all(False), True, ""),
                                   (self.b_settopic.text(), self.b_settopic.click, self.b_settopic.isEnabled(), self.b_settopic.toolTip()),
+                                  ("批量替换标题里的字…", lambda: self.replace_titles(), bool(self.items) and not self.busy(),
+                                   "比如标题里都有「快手热门」:一次换掉 / 删掉(先给你看会改成什么样,改完能撤销)"),
                                   (self.b_undo.text(), self.b_undo.click, self.b_undo.isEnabled(), self.b_undo.toolTip())):
             act = mm.addAction(text, fn)
             act.setEnabled(ok)
@@ -1385,25 +1391,15 @@ class ApiTab(QWidget):
                 m.addAction("复制标题(去后台搜)", lambda: self._copy(self.videos[i].title))
                 m.exec(self.tree.viewport().mapToGlobal(pos))
                 return
+            # 老手试用 2026-10-21:原来 21 项、一屏放不下,常用的埋在下面 → 常用的放上面,不常用的收进子菜单,发布放最底下
+            n_s = len(sel)
+            if i != -1:
+                m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not busy and not self._sent(i))
+                m.addAction("复制标题", lambda: self._copy(self.videos[i].title))
+                m.addAction("打开所在文件夹", lambda: self.reveal(i))
             if sel:
-                for text, fn in ((f"检查选中的 {len(sel)} 条", lambda: self.run_check(sel)),
-                                 (f"转标准竖屏(选中的 {len(sel)} 条)", lambda: self.run_vertical(sel)),
-                                 (f"整理标题(选中的 {len(sel)} 条)", lambda: self.run_topic(sel)),
-                                 (f"只整理写法、不用 AI(选中的 {len(sel)} 条)", lambda: self.tidy_titles(sel)),
-                                 (f"批量改话题(选中的 {len(sel)} 条)…", lambda: self.set_topic(sel)),
-                                 (f"发布选中的 {len(sel)} 条…", lambda: self.run_publish(sel)),
-                                 (None, None),
-                                 (f"只检查「{nick}」的 {len(mine)} 条", lambda: self.run_check(mine)),
-                                 (f"只发「{nick}」的…", lambda: self.run_publish(mine))):
-                    if text is None:
-                        m.addSeparator()
-                    else:
-                        m.addAction(text, fn).setEnabled(not busy)
-            if sel:
-                m.addAction(f"高级检查选中的 {len(sel)} 条(再查水印)", lambda: self.run_check(sel, deep=True)).setEnabled(not busy)
-                m.addAction(f"模糊水印(选中的 {len(sel)} 条)", lambda: self.run_blur(sel)).setEnabled(not busy)
-                m.addAction(f"查口播广告(选中的 {len(sel)} 条)", lambda: self.run_ads(sel)).setEnabled(not busy)
-                m.addAction(f"剪掉口播广告(选中的 {len(sel)} 条)", lambda: self.run_cut(sel)).setEnabled(not busy)
+                m.addAction(f"转标准竖屏(选中 {n_s} 条)", lambda: self.run_vertical(sel)).setEnabled(not busy)
+                m.addAction(f"整理标题(选中 {n_s} 条)", lambda: self.run_topic(sel)).setEnabled(not busy)
             from qe import gamecheck
             if i != -1 and not self._sent(i) and gamecheck.account_game(nick):
                 g0 = gamecheck.by_words(nick, self.videos[i].title)[0] or (gamecheck.store().ai(self.videos[i].title) or "")
@@ -1454,16 +1450,35 @@ class ApiTab(QWidget):
                     m.addAction("其实有水印(先不发)", lambda: self.set_wm_ok(i, False)).setEnabled(not busy)
                 else:
                     m.addAction("没水印 / 不用管,这条能发", lambda: self.set_wm_ok(i, True)).setEnabled(not busy)
-            if i != -1:
-                m.addSeparator()
-                m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not busy and not self._sent(i))
-                m.addAction("复制标题", lambda: self._copy(self.videos[i].title))
-                m.addAction("打开所在文件夹", lambda: self.reveal(i))
             m.addSeparator()
-            m.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick)).setEnabled(not busy)
+            if sel:
+                mc = m.addMenu("检查")
+                mc.addAction(f"检查选中的 {n_s} 条", lambda: self.run_check(sel)).setEnabled(not busy)
+                mc.addAction(f"高级检查选中的 {n_s} 条(再查水印)", lambda: self.run_check(sel, deep=True)).setEnabled(not busy)
+                mc.addAction(f"查口播广告(选中 {n_s} 条)", lambda: self.run_ads(sel)).setEnabled(not busy)
+                mw = m.addMenu("水印 / 口播广告")
+                mw.addAction(f"模糊水印(选中 {n_s} 条)", lambda: self.run_blur(sel)).setEnabled(not busy)
+                mw.addAction(f"剪掉口播广告(选中 {n_s} 条)", lambda: self.run_cut(sel)).setEnabled(not busy)
+                mt = m.addMenu("标题 / 话题")
+                mt.addAction(f"只整理写法、不用 AI(选中 {n_s} 条)", lambda: self.tidy_titles(sel)).setEnabled(not busy)
+                mt.addAction(f"批量改话题(选中 {n_s} 条)…", lambda: self.set_topic(sel)).setEnabled(not busy)
+                mt.addAction(f"批量替换标题里的字(选中 {n_s} 条)…", lambda: self.replace_titles(sel)).setEnabled(not busy)
+            ma = m.addMenu(f"「{nick}」这个号")
+            ma.addAction(f"只检查「{nick}」的 {len(mine)} 条", lambda: self.run_check(mine)).setEnabled(not busy)
+            ma.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick)).setEnabled(not busy)
             if nick in self.picked(self.day()):
-                m.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick)).setEnabled(not busy)
-            m.addSeparator()
+                ma.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick)).setEnabled(not busy)
+            ma.addSeparator()
+            ma.addAction(f"只发「{nick}」的…", lambda: self.run_publish(mine)).setEnabled(not busy)
+            mo = m.addMenu("其它")
+            mo.addAction("给别的号选文件夹…", lambda: self.pick_folder()).setEnabled(not busy)
+            mo.addAction("全部展开", lambda: self.expand_all(True))
+            mo.addAction("全部收起", lambda: self.expand_all(False))
+            if sel:
+                m.addSeparator()
+                m.addAction(f"发布选中的 {n_s} 条…", lambda: self.run_publish(sel)).setEnabled(not busy)
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         m.addAction("给别的号选文件夹…", lambda: self.pick_folder()).setEnabled(not busy)
         m.addAction("全部展开", lambda: self.expand_all(True))
         m.addAction("全部收起", lambda: self.expand_all(False))
@@ -1819,8 +1834,21 @@ class ApiTab(QWidget):
             emit(i, CLEAR)
 
         def fn(emit, stopped):
+            t0, done, lock = time.time(), [0], threading.Lock()
+            emit(PROGRESS, f"转竖屏:已转 0 / {len(rows)} 条…")
+
+            def step(i):
+                if stopped():
+                    return
+                one(i, emit, stopped)
+                with lock:
+                    done[0] += 1
+                    k = done[0]
+                left = (time.time() - t0) / k * (len(rows) - k)    # 老手试用:113 条转 7 分半,原来只写「转竖屏…」不知道还要多久
+                emit(PROGRESS, f"转竖屏:已转 {k} / {len(rows)} 条" +
+                     ("" if k == len(rows) else f" · 还要约 {max(1, round(left / 60))} 分钟" if left >= 60 else " · 马上好"))
             with ThreadPoolExecutor(3) as ex:          # 3 条一起转最快(这台电脑试过)
-                list(ex.map(lambda i: None if stopped() else one(i, emit, stopped), rows))
+                list(ex.map(step, rows))
             return "转竖屏做完了"
         self._start(fn, f"转竖屏:{len(rows)} 条(3 条一起转)")
 
@@ -2089,13 +2117,94 @@ class ApiTab(QWidget):
             return
         v = self.videos[i]
         hits = (v.checks or {}).get("platform") or []
-        t, ok = QInputDialog.getText(self, "改标题", "标题(= 文件名)" + (f",里面有「{'、'.join(hits)}」" if hits else "") + ":",
-                                     text=v.title)
+        t, ok = self._ask_title("标题(= 文件名)" + (f",里面有「{'、'.join(hits)}」" if hits else "") + ":", v.title)
         t = topic.sanitize(t) if ok else ""
         if not t or t == v.title:
             return
         self._rename_rows([i], lambda _old: t, "改标题")
         self.tree.clearSelection()                       # 改完别留着选中(老手试用:按钮一直只管这 1 条)
+        self._goto_next_problem(i)
+
+    def _ask_title(self, label: str, text: str) -> tuple[str, bool]:
+        """改标题的框:宽到能看全一整行(老手试用:原来 200 多像素,40 字的标题只看得到结尾)。"""
+        d = QInputDialog(self)
+        d.setWindowTitle("改标题")
+        d.setLabelText(label)
+        d.setTextValue(text)
+        d.setMinimumWidth(min(760, max(520, self.fontMetrics().horizontalAdvance(text) + 120)))
+        ok = d.exec() == QInputDialog.DialogCode.Accepted
+        return d.textValue(), ok
+
+    def _goto_next_problem(self, i: int):
+        """改完一条:光标(不是选中)跳到它后面下一条要处理的,按 F2 接着改(老手试用:原来光标停在看不见的行上)。"""
+        order = [self.tree.topLevelItem(k).child(j).data(0, ROW) for k in range(self.tree.topLevelItemCount())
+                 for j in range(self.tree.topLevelItem(k).childCount())]
+        if i not in order:
+            return
+        k = order.index(i)
+        for r in order[k + 1:] + order[:k]:
+            it = self.items.get(r)
+            if it is None or it.isHidden() or self._sent(r):
+                continue
+            st, probs = self._status_text(r)
+            if probs:
+                from PySide6.QtCore import QItemSelectionModel
+                self.tree.setCurrentItem(it, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+                self.tree.scrollToItem(it)
+                return
+
+    def replace_titles(self, rows: list[int] | None = None):
+        """批量替换标题里的字:「快手热门」换成别的 / 删掉。管选中的,没选管看得见的全部;先预览,改完能撤销(老手试用)。"""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout
+        rows = [i for i in self.target_rows(rows) if not self._sent(i)]
+        if not rows:
+            QMessageBox.information(self, "批量替换", "没有能改的(发过的不改)。")
+            return
+        d = QDialog(self)
+        d.setWindowTitle("批量替换标题里的字")
+        d.resize(620, 460)
+        v = QVBoxLayout(d)
+        f = QFormLayout()
+        e_find, e_to = QLineEdit(), QLineEdit()
+        e_find.setPlaceholderText("比如:快手热门")
+        e_to.setPlaceholderText("空着 = 删掉")
+        f.addRow("把", e_find)
+        f.addRow("换成", e_to)
+        v.addLayout(f)
+        lab = QLabel(f"管:{self._who(rows)}(发过的不改)")
+        lab.setObjectName("muted")
+        v.addWidget(lab)
+        pv = QPlainTextEdit()
+        pv.setReadOnly(True)
+        v.addWidget(pv, 1)
+        bb = QDialogButtonBox()
+        b_ok = bb.addButton("改", QDialogButtonBox.ButtonRole.AcceptRole)
+        bb.addButton("先不", QDialogButtonBox.ButtonRole.RejectRole)
+        bb.accepted.connect(d.accept)
+        bb.rejected.connect(d.reject)
+        v.addWidget(bb)
+
+        def make(t: str):
+            a = e_find.text()
+            if not a or a not in t:
+                return None
+            new = topic.sanitize(" ".join(t.replace(a, e_to.text()).split()))
+            return new if new and new != t else None
+
+        def show():
+            hit = [(self.videos[i].title, make(self.videos[i].title)) for i in rows]
+            hit = [(o, n) for o, n in hit if n]
+            pv.setPlainText("\n".join(f"{o}\n  → {n}" for o, n in hit[:40]) + (f"\n…还有 {len(hit) - 40} 条" if len(hit) > 40 else "")
+                            if hit else ("没有标题里有这几个字的" if e_find.text() else "上面填要换掉的字"))
+            b_ok.setText(f"改这 {len(hit)} 条")
+            b_ok.setEnabled(bool(hit))
+        e_find.textChanged.connect(lambda _t: show())
+        e_to.textChanged.connect(lambda _t: show())
+        show()
+        if d.exec() != QDialog.DialogCode.Accepted:
+            return
+        n = self._rename_rows(rows, make, "批量替换")
+        self.say(f"批量替换:改了 {n} 条(「{e_find.text()}」→「{e_to.text() or '删掉'}」;点「更多 → 撤销」能改回去)")
 
     def run_topic(self, only: list[int] | None = None):
         """整理标题:先删乱码尾巴 / @ 那段(titleclean,不用 AI);话题写法不对的按固定规矩改;挂了好几个话题的 AI 留一个。"""
@@ -2117,12 +2226,17 @@ class ApiTab(QWidget):
         n_junk = sum(1 for i in rows if base(self.videos[i]) != self.videos[i].title)
         n_fmt = sum(1 for i in rows if not multi(self.videos[i]) and topic.bad_format(base(self.videos[i])))
         key = self.st.ai_key() if hasattr(self.st, "ai_key") else ""
-        if n_ai and not key:
-            QMessageBox.warning(self, "整理话题", "有挂好几个话题的要用 AI 挑,先在「设置」里填阿里百炼 Key。\n\n"
-                                                "(只想改写法的:右键「只整理写法、不用 AI」)")
-            return
+        no_key = 0
+        if n_ai and not key:                         # 新员工试用:原来没 Key 就整个不改 → 不用 AI 的先改,只跳过要 AI 的
+            no_key, n_ai = n_ai, 0
+            rows = [i for i in rows if not multi(self.videos[i])]
+            if not rows:
+                QMessageBox.warning(self, "整理标题", f"这 {no_key} 条挂了好几个话题,要用 AI 挑一个,先在「设置」里填阿里百炼 Key。")
+                return
         model = str(self.st.get("topic_model") or "qwen-plus")
         lines = []
+        if no_key:
+            lines.append(f"· {no_key} 条挂了好几个话题要 AI 挑,还没填阿里百炼 Key,这次先不改(设置里填了再点)")
         if n_junk:
             ex = next(self.videos[i] for i in rows if base(self.videos[i]) != self.videos[i].title)
             lines.append(f"· {n_junk} 条标题有乱码 / @ 那段:删掉(比如「{ex.title[:30]}」→「{base(ex)[:30]}」)")
@@ -2373,7 +2487,7 @@ class ApiTab(QWidget):
                     cimg = ""
                     emit(-1, f"「{v.title}」封面图读不出来({type(e).__name__}),这条用平台截的")
                 try:
-                    r = cl.send(v.path, v.title, cat, stop=stopped, before_publish=begin, cover=cimg,
+                    r = cl.send(v.path, v.title.strip(), cat, stop=stopped, before_publish=begin, cover=cimg,
                                 cover_upload=omcover.upload,
                                 on_progress=lambda o, s, i=i: emit(i, f"上传 {o * 100 // max(1, s)}%({o >> 20}/{s >> 20}MB)"),
                                 log=lambda m, i=i: emit(i, m + "…"))

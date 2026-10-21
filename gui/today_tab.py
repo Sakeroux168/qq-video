@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushBu
 
 from qe import plan
 from qe.config import bj_now
-from gui.widgets import Bar, GLYPH, ICON_FONT, Ring, fade_in, glyph_label, roll, tok
+from gui.widgets import Bar, GLYPH, ICON_FONT, Ring, fade_in, glyph_label, repolish, roll, tok
 
 WEEK = "一二三四五六日"
 CAT_ICON = {"游戏": ("game", "acc"), "教育": ("school", "green"), "动漫": ("movie", "orange")}
@@ -99,6 +99,27 @@ class TodayTab(QWidget):
             self.rings[cat] = (ring, num, left, card)
             card.setProperty("colkey", colkey)
             ic.setProperty("colkey", colkey)
+        # 「今天出问题 N 条」(老板试用:没发成 / 不确定 / 摆好没确认的,原来首页一个字都没提)
+        self.prob = QPushButton()
+        self.prob.setObjectName("ringCard")
+        self.prob.setProperty("bad", True)
+        self.prob.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.prob.setToolTip("点这里:去「数据记录」只看出问题的这几条")
+        self.prob.setMinimumHeight(92)
+        self.prob.clicked.connect(lambda: self.main.show_problems())
+        pv = QVBoxLayout(self.prob)
+        pv.setContentsMargins(16, 12, 16, 12)
+        pv.setSpacing(2)
+        self.prob_t = QLabel("")
+        self.prob_t.setObjectName("badTitle")
+        self.prob_s = QLabel("")
+        self.prob_s.setObjectName("heroSub")
+        for w in (self.prob_t, self.prob_s):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            pv.addWidget(w)
+        pv.addStretch(1)
+        rl.addWidget(self.prob, 1)
+        self.prob.hide()
         v.addWidget(self.rings_w)
 
         two = QHBoxLayout()
@@ -138,6 +159,7 @@ class TodayTab(QWidget):
             it = lay.takeAt(0)
             w = it.widget()
             if w is not None:
+                w.hide()                                 # 先藏起来:删要等回到主循环,中间新旧两行会叠在一起
                 w.deleteLater()
             elif it.layout() is not None:
                 TodayTab._clear(it.layout())
@@ -180,7 +202,15 @@ class TodayTab(QWidget):
             q, a = cats.get(cat, (0, 0))
             ring.set_value(a / q if q else 0, animate_)
             num.setText(f"{a}<span style='font-size:13px;font-weight:normal;color:{t['mu']}'> / {q}</span>")
-            lab.setText("够了 √" if q and a >= q else f"还差 {q - a} 条" if q else "没有规定条数")
+            lab.setText(f"多发 {a - q} 条" if q and a > q else "够了 √" if q and a >= q else f"还差 {q - a} 条" if q else "没有规定条数")
+            repolish(lab, tone="warn" if q and a > q else "")     # 多发了不是好事(老板试用:原来多发也是绿的「够了」)
+        p = self.rec.problems_on(day)
+        np_ = p["fail"] + p["unsure"] + p["ready"]
+        self.prob_t.setText(f"今天出问题 {np_} 条 ›")
+        self.prob_s.setText(" · ".join(x for x in ((f"没发成 {p['fail']}" if p["fail"] else ""),
+                                                   (f"不确定 {p['unsure']}" if p["unsure"] else ""),
+                                                   (f"摆好没确认 {p['ready']}" if p["ready"] else "")) if x))
+        self.prob.setVisible(bool(np_))
         self._fill_next(weekend)
         eta = self._fill_hist(day)
         self.lab_eta.setText(eta)
@@ -233,8 +263,9 @@ class TodayTab(QWidget):
         rows = []
         # 教育号:摆好了等人去罐头点发布 → 最要紧
         if m.batch_id:
-            acc = m.batch_videos[0].account if m.batch_videos else ""
-            rows.append(("school", t["green"], t["ok_bg"], f"教育号:「{acc}」这批摆好了",
+            acc = m.batch_account()
+            nb = self.rec.ready_in_batch(m.batch_id)
+            rows.append(("school", t["green"], t["ok_bg"], f"教育号:「{acc}」{nb} 条摆好了" if acc else f"教育号:这批 {nb} 条摆好了",
                          "去罐头点「发布 → 全部发布」,回来点「这批发好了」", lambda: m.goto("edu"), "去看看"))
         # 16 个号
         n_ok = n_bad = 0
@@ -294,23 +325,26 @@ class TodayTab(QWidget):
         self._clear(self.hist_v)
         rows = self.rec.published_on(day)
         batches = []
+        last: dict[str, dict] = {}                       # 教育号、16 个号各算各的(老板试用:两边同时发,原来每换一边就切一批,切出一百多批)
         for r in rows:
             kind = "16 个号" if r["employee"] == "接口" else "教育号"
             at = str(r["published_at"] or "")
             hm = at[11:16]
             mins = int(hm[:2]) * 60 + int(hm[3:5]) if len(hm) == 5 and hm[:2].isdigit() and hm[3:5].isdigit() else -1
-            if batches and batches[-1]["kind"] == kind and mins >= 0 and mins - batches[-1]["last"] <= 20:
-                b = batches[-1]
-            else:
-                b = {"kind": kind, "start": hm, "end": hm, "ok": 0, "fail": 0, "last": mins}
+            b = last.get(kind)
+            if not (b and mins >= 0 and mins - b["last"] <= 20):
+                b = {"kind": kind, "start": hm, "end": hm, "ok": 0, "fail": 0, "last": mins,
+                     "no": sum(1 for x in batches if x["kind"] == kind) + 1}
                 batches.append(b)
+                last[kind] = b
             b["end"], b["last"] = hm, mins
             b["ok" if r["status"] == "已发" else "fail"] += 1
         items = []
-        for k, b in enumerate(batches, 1):
+        for b in batches:
             when = b["start"] + (f"–{b['end']}" if b["end"] != b["start"] else "")
-            sub = f"{b['kind']} {b['ok']} 条" + (f" · {b['fail']} 条没发成" if b["fail"] else "")
-            items.append((t["ok"] if not b["fail"] else t["orange"], f"{when} 第 {k} 批", sub, "done" if not b["fail"] else "warn"))
+            sub = f"{b['ok']} 条" + (f" · {b['fail']} 条没发成" if b["fail"] else "")
+            items.append((t["ok"] if not b["fail"] else t["orange"], f"{when} {b['kind']}第 {b['no']} 批", sub,
+                          "done" if not b["fail"] else "warn"))
         api = self.main.api_tab
         lab = api.sched.label() if hasattr(api, "sched") else ""
         if lab:
@@ -339,8 +373,8 @@ class TodayTab(QWidget):
             wrap.setLayout(h)
             h.setContentsMargins(4, 5, 4, 5)
             self.hist_v.addWidget(wrap)
-        n = sum(b["ok"] for b in batches)
-        return f"今天发了 {len(batches)} 批 · {n} 条" if batches else ""
+        per = [(k, sum(1 for b in batches if b["kind"] == k), sum(b["ok"] for b in batches if b["kind"] == k)) for k in ("教育号", "16 个号")]
+        return " · ".join(f"{k} {nb} 批 {no} 条" for k, nb, no in per if nb)
 
     def showEvent(self, e):
         super().showEvent(e)

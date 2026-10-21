@@ -75,8 +75,8 @@ def problems(v) -> list[str]:
         out.append(ad)
     if len(c.get("tags") or []) > 1:
         out.append(f"{len(c['tags'])} 个话题")
-    elif topic.bad_format(v.title):                  # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
-        out.append(format_kind(v.title))
+    elif topic.bad_format(v.title) and format_kind(v.title) != "结尾多了空格":   # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
+        out.append(format_kind(v.title))             # 只是结尾多个空格:发的时候自己去掉,不算要处理(新员工试用 2026-10-21)
     from . import gamecheck                          # 标题像别的游戏的(用户 2026-10-20:和平精英传成了 PUBG)
     g = gamecheck.alien(getattr(v, "account", ""), v.title)
     if g:

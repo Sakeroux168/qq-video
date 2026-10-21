@@ -373,6 +373,30 @@ class Hero(QFrame):
 
 
 # ---------------- 问题卡片 ----------------
+HELP = {
+    "偏方": "偏方 = 画面不是标准竖屏 9:16(比如 3:4、正方形)。\n点「转标准竖屏」:上下糊底、中间原画面,变成 1080×1920 再发。",
+    "要处理": "要处理 = 还有问题、现在不会发的(横屏、标题里有别的平台、话题写法、水印、像别的游戏…)。\n"
+              "鼠标放在那一条的「要处理的」那一格上,看为什么;处理好了自动变「能发」。",
+    "摆": "摆 = 软件在「创作罐头」(发企鹅号用的那个浏览器)里把视频、标题、封面都填好,停在发布前 —— 还没发出去。\n"
+          "你去罐头里看一眼,点「发布 → 全部发布」,回来点「这批发好了」。",
+    "标黄": "标黄 = 软件拿不准封面框得对不对(比如两个人、大头照、没有无字封面),要你看一眼。\n"
+            "「快速过封面」一屏看完,回车 = 这张没问题。",
+    "自动点发布": "勾上:摆好以后软件自己在罐头里点「全部发布」,马上就发出去了(不是定时)。\n"
+                  "不勾:只摆好,你自己去罐头里看一眼再点发布。拿不准就别勾。",
+}
+
+
+def help_dot(key_or_text: str) -> QLabel:
+    """一个小「?」,鼠标放上去显示一句话(HELP 里的词,或者直接给的话)。"""
+    lab = QLabel("?")
+    lab.setObjectName("helpDot")
+    lab.setFixedSize(16, 16)
+    lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lab.setCursor(Qt.CursorShape.WhatsThisCursor)
+    lab.setToolTip(HELP.get(key_or_text, key_or_text))
+    return lab
+
+
 class ProbCard(QFrame):
     """「8 条横屏 → 转标准竖屏」:图标 + 一句话 + 处理按钮(就是原来那个按钮,搬进卡片里)。点卡片空白处 = 点第一个按钮。"""
 
@@ -398,7 +422,11 @@ class ProbCard(QFrame):
         v.setSpacing(1)
         self.title = QLabel(title)
         self.title.setObjectName("probTitle")
-        v.addWidget(self.title)
+        self._tl = QHBoxLayout()
+        self._tl.setSpacing(6)
+        self._tl.addWidget(self.title)
+        self._tl.addStretch(1)
+        v.addLayout(self._tl)
         row = QHBoxLayout()
         row.setSpacing(14)
         self.buttons = buttons
@@ -409,6 +437,9 @@ class ProbCard(QFrame):
         row.addStretch(1)
         v.addLayout(row)
         h.addLayout(v, 1)
+
+    def add_help(self, key_or_text: str):
+        self._tl.insertWidget(1, help_dot(key_or_text), 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set(self, title: str, tone: str = ""):
         self.title.setText(title)
@@ -540,7 +571,7 @@ def tone_of(text: str) -> str:
         return ""
     if s.startswith(("没发成", "没发:", "转竖屏失败", "没摆成", "失败", "出错")):
         return "bad"
-    if s.startswith(("不确定", "结果不明", "要处理", "不发:", "有水印", "跳过", "有问题", "还差")):
+    if s.startswith(("不确定", "结果不明", "要处理", "不发:", "有水印", "跳过", "有问题", "还差", "多发")):
         return "warn"
     if s.startswith(("已发", "发完", "够了")):
         return "ok"

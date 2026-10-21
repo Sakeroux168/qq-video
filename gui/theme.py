@@ -124,6 +124,10 @@ QPushButton#primary {{ background:{t['acc_btn']}; color:#ffffff; border:1px soli
 QPushButton#primary:hover {{ background:{t['acc_h']}; border-color:{t['acc_h']}; }}
 QPushButton#ringCard {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:16px; text-align:left; }}
 QPushButton#ringCard:hover {{ border-color:{t['acc']}; }}
+QPushButton#ringCard[bad="true"] {{ border-color:{t['bad']}; }}
+QLabel#badTitle {{ color:{t['bad']}; font-weight:bold; font-size:15px; background:transparent; }}
+QLabel#helpDot {{ background:{t['soft']}; color:{t['mu']}; border:1px solid {t['line']}; border-radius:8px; font-size:11px; font-weight:bold; }}
+QLabel#heroSub[tone="warn"] {{ color:{t['warn']}; font-weight:bold; }}
 QPushButton#primary[sel="true"] {{ background:{t['warn']}; border-color:{t['warn']}; }}
 QPushButton#selChip {{ background:{t['warn_bg']}; color:{t['warn']}; border:1px solid {t['warn']}; border-radius:15px; padding:5px 12px; font-weight:bold; }}
 QPushButton#primary:disabled {{ background:{t['soft']}; color:{t['dim']}; border-color:{t['soft']}; }}
