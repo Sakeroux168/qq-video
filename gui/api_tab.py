@@ -1416,7 +1416,7 @@ class ApiTab(QWidget):
                         d = os.path.basename(os.path.dirname(self.videos[i].path))
                         m.addAction(f"放错了:挪到「{home[0]}」的 {d}", lambda: self.move_to_game(i)).setEnabled(not busy)
                     m.addAction("先不发,留在这", lambda: self.set_game_ok(i, False)).setEnabled(not busy)
-                    m.addAction("看过了,是这个号的,能发…", lambda: self.confirm_game_ok(i)).setEnabled(not busy)
+                    m.addAction("看过了,是这个号的,能发", lambda: self.confirm_game_ok(i)).setEnabled(not busy)
             if gamecheck.account_game(nick):
                 day = self.day()
                 if self._blocked.get(nick):
@@ -1728,12 +1728,9 @@ class ApiTab(QWidget):
             self.load()
 
     def confirm_game_ok(self, i: int):
-        """「看过了,是这个号的,能发」:再问一次(点错了就会发到错的号上)。"""
-        rows = self.selected_rows() or [i]
-        names = "\n".join(f"· {self.videos[r].title[:30]}" for r in rows[:6]) + ("\n…" if len(rows) > 6 else "")
-        if ask(self, "是这个号的", f"这 {len(rows)} 条标题像别的游戏的,你确认就是「{self.videos[i].account}」的?\n\n{names}\n\n"
-                                    "放错了的话选「先不」,再右键「放错了:挪到…」。", "是这个号的,能发", "先不", default_no=True):
-            self.set_game_ok(i, True)
+        """右键「看过了,是这个号的,能发」:直接标(用户 2026-10-21:原来还要再确认一次、默认「先不」,
+        点完菜单以为好了,其实没标上,还是「要处理」)。菜单里这一项本身就是确认;「放错了:挪到…」排在它前面。"""
+        self.set_game_ok(i, True)
 
     def set_game_ok(self, i: int, ok: bool):
         """标题像别的游戏、人看过:是这个号的(能发)/ 其实不是(先不发)。选了好几条一起标。"""
@@ -1743,6 +1740,7 @@ class ApiTab(QWidget):
             gamecheck.store().set_ok(self.videos[r].account, self.videos[r].title, ok)
             self._fill(r)
         self.say(f"{len(rows)} 条标成" + ("「是这个号的,能发」" if ok else "「不是这个号的,先不发」"))
+        self._update_sum()                               # 大字「还有 N 条有点小问题」、号那一行一起更新
         self._update_scope()
 
     def set_batch_ok(self, nick: str, ok: bool):
