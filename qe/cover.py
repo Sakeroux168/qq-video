@@ -98,6 +98,81 @@ def subject_of(path: str) -> dict:
     return {"cx": float((m * xx).sum() / tot / ww), "cy": float((m * yy).sum() / tot / hh), "subject": True}
 
 
+# ---------------- 黑边(用户 2026-10-22:封面上下带黑条,框进去不好看 → 软件做一张去掉黑边的副本来裁、来传,原图不动) ----------------
+BLACK = 28              # 比这个暗的点算黑
+BAR_MIN = 3             # 黑条至少几像素才去(1、2 像素的压缩毛边不管)
+KEEP_MIN = 0.5          # 去完至少还剩一半宽 / 一半高;剩得更少说明不是黑边是图本身就暗,不去、标黄
+
+
+def borders_of(gray) -> tuple[int, int, int, int]:
+    """灰度图(numpy 二维)四边的黑条有多宽:(左, 上, 右, 下) 像素。贴着边、整条几乎全黑的才算(暗的夜景中间那点黑不算)。"""
+    g = np.asarray(gray)
+    h, w = g.shape[:2]
+
+    def run(lines) -> int:
+        k = 0
+        for ln in lines:
+            # 导出视频加的黑条是一整条平平的黑(实测亮度 0~10、起伏不到 2);夜景再暗也有噪点起伏,不算
+            if (ln < BLACK).mean() >= 0.97 and float(ln.mean()) < BLACK * 0.7 and float(ln.std()) < 4:
+                k += 1
+            else:
+                break
+        return k
+    t, b = run(g), run(g[::-1])
+    left, right = run(g.T), run(g.T[::-1])
+    out = []
+    for n, size in ((left, w), (t, h), (right, w), (b, h)):
+        out.append(n + 1 if n >= BAR_MIN and n < size else 0)      # 多去 1 像素:黑条和画面交界那条灰边
+    return tuple(out)
+
+
+def border_box(w: int, h: int, bd) -> tuple[int, int, int, int] | None:
+    """去黑边以后留哪块 (左, 上, 右, 下);没黑边 / 黑边太宽(剩不到一半)返回 None。"""
+    left, t, right, b = bd
+    if not any(bd):
+        return None
+    nw, nh = w - left - right, h - t - b
+    if nw < w * KEEP_MIN or nh < h * KEEP_MIN:
+        return None
+    return left, t, w - right, h - b
+
+
+_ORIG: dict = {}        # 去黑边的副本 → 原图(界面上「位置 / 打开封面文件夹」给人看原图)
+
+
+def orig_of(path: str) -> str:
+    return _ORIG.get(path, path)
+
+
+def deborder(path: str) -> tuple[str, str]:
+    """封面有黑边:做一张去掉黑边的副本(数据目录「去黑边的封面」里,原图不动)返回 (副本, "")。
+    没黑边返回 (原图, "");黑边太宽(剩不到一半)返回 (原图, "too_wide");读不出来返回 (原图, "")。"""
+    import cv2
+    img = read_image(path)
+    if img is None:
+        return path, ""
+    h, w = img.shape[:2]
+    bd = borders_of(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+    if not any(bd):
+        return path, ""
+    box = border_box(w, h, bd)
+    if box is None:
+        return path, "too_wide"
+    try:
+        st = os.stat(path)
+        out = cache_file("去黑边的封面", path, f"_{int(st.st_mtime)}_{st.st_size}.png")
+        if not out.exists():
+            x0, y0, x1, y1 = box
+            ok, buf = cv2.imencode(".png", img[y0:y1, x0:x1])
+            if not ok:
+                return path, ""
+            buf.tofile(str(out))
+    except OSError:
+        return path, ""
+    _ORIG[str(out)] = path
+    return str(out), ""
+
+
 def decide(v) -> None:
     """给一条视频定封面:填 v.cover / cover_kind / cover_why / plan / warn(还有 vcover / vplan)。只用无字的。"""
     v.warn = False
@@ -108,23 +183,29 @@ def decide(v) -> None:
         return
     v.cover, v.cover_kind = v.png, "横"
     try:
-        faces, (w, h) = faces_in(v.png)
+        v.cover, bd = deborder(v.png)                   # 有黑边:用去掉黑边的副本(原图不动)
+    except Exception:
+        v.cover, bd = v.png, ""
+    try:
+        faces, (w, h) = faces_in(v.cover)
     except Exception as e:
         v.cover_why, v.plan, v.warn = f"认人出错({type(e).__name__}),框放中间", {}, True
         return
     if not faces:
         try:
-            plan = subject_of(v.png)
+            plan = subject_of(v.cover)
         except Exception:
             plan = {}
         v.plan = plan
         v.cover_why, v.warn = ("没人,框对准画面主体", False) if plan else ("没认出人,框放中间(看一眼)", True)
+        _note_border(v, bd)
         return
     narrow_w = (h * NARROW) / w if w else 1.0          # 9:16 框占图宽的几成
     span = max(x[0] + x[2] for x in faces) - min(x[0] for x in faces)      # 几张脸从最左到最右(只算脸)
     if len(faces) == 1 or span <= narrow_w * 0.9:       # 一个人(脸再大也是他一个);几个人挨得近也框得下
         v.plan = dict(focus_of(faces), faces=[list(f) for f in faces])
         v.cover_why = "1 个人,框对准他" if len(faces) == 1 else f"{len(faces)} 个人挨得近,框得下"
+        _note_border(v, bd)
         return
     big = max(faces, key=lambda x: x[2] * x[3])
     # 用户(2026-10-15 截图):两个人挨着坐,框只对准大人把小孩切了一半 —— 应该框两个人中间。
@@ -134,8 +215,26 @@ def decide(v) -> None:
     # 用户一开始定的:几个人、裁剪会把人切掉 / 切一半 → 用竖封面。带字的 jpg 不能用,员工「梁」做的 竖屏9x16.png 是无字的 →
     # 竖的比例(3:4、9:16)用它;宽的比例(2.35:1、1:1)横图本来就框得下所有人,还用横图
     if getattr(v, "vpng", "") and exists(v.vpng):
-        v.vcover, v.vplan, v.warn = v.vpng, plan_for_image(v.vpng), False
-        v.cover_why = f"{len(faces)} 个人:竖的比例用他做的竖屏图,宽的比例框所有人"
+        try:
+            vc, vbd = deborder(v.vpng)
+        except Exception:
+            vc, vbd = v.vpng, ""
+        if vbd == "too_wide":                           # 竖屏图大半是黑的(横图塞进竖画布):不用它,照旧标黄
+            v.cover_why += ";他做的竖屏图大半是黑边,没用"
+        else:
+            v.vcover = vc
+            v.vplan, v.warn = plan_for_image(v.vcover), False
+            v.cover_why = f"{len(faces)} 个人:竖的比例用他做的竖屏图,宽的比例框所有人"
+    _note_border(v, bd)
+
+
+def _note_border(v, bd: str) -> None:
+    """说一声去了黑边 / 黑边太宽没去(标黄)。"""
+    if bd == "too_wide":
+        v.warn = True
+        v.cover_why += ";封面四边黑得太多(像整张都是暗的),没去黑边,看一眼"
+    elif v.cover != v.png:
+        v.cover_why += ";去掉了黑边"
 
 
 def plan_for_image(path: str) -> dict:

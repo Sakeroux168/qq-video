@@ -45,6 +45,19 @@ def crop_box(w: int, h: int, ratio) -> tuple[int, int, int, int]:
     return 0, y, w, y + nh
 
 
+def _border_box(img: str):
+    """这张图去黑边以后留哪块(和教育号用同一个判断);没黑边 / 读不出来 → None。"""
+    try:
+        import numpy as np
+        from PIL import Image
+        from .cover import border_box, borders_of
+        with Image.open(img) as im:
+            g = np.asarray(im.convert("L"))
+        return border_box(g.shape[1], g.shape[0], borders_of(g))
+    except Exception:
+        return None
+
+
 def _tmp_dir() -> str:
     d = os.path.join(tempfile.gettempdir(), "企鹅号助手封面")
     os.makedirs(d, exist_ok=True)
@@ -58,11 +71,14 @@ def prepare(img: str, mode: str = "原样") -> str:
         return ""
     ratio = RATIOS.get(mode)
     ext = os.path.splitext(img)[1].lower()
-    if ratio is None and ext in (".jpg", ".jpeg", ".png") and os.path.getsize(img) <= MAX_BYTES:
+    box = _border_box(img)                         # 封面带黑边:去掉再传(用户 2026-10-22)
+    if ratio is None and box is None and ext in (".jpg", ".jpeg", ".png") and os.path.getsize(img) <= MAX_BYTES:
         return img
     from PIL import Image
     with Image.open(img) as im:
         im = im.convert("RGB")
+        if box:
+            im = im.crop(box)
         if ratio:
             im = im.crop(crop_box(im.width, im.height, ratio))
         out = os.path.join(_tmp_dir(), uuid.uuid4().hex[:12] + ".jpg")

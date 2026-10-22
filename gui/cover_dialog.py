@@ -318,7 +318,8 @@ class CoverDialog(QDialog):
         """资源管理器里打开封面所在的文件夹并选中它;没封面就打开视频所在的文件夹。"""
         import os
         import subprocess
-        p = self._src_path if self._src_path and os.path.exists(self._src_path) else self.v.path
+        src = C.orig_of(self._src_path) if self._src_path else ""
+        p = src if src and os.path.exists(src) else self.v.path
         if not p or not os.path.exists(p):
             self._toast("找不到这个文件夹(网络盘断了?)")
             return
@@ -403,19 +404,21 @@ class CoverDialog(QDialog):
         else:
             path, what = v.cover, "图"
         self._src_path = path
-        name = self.cover_title(path)
+        shown = C.orig_of(path)                         # 去黑边的副本:给人看原图在哪
+        name = self.cover_title(shown)
         bad = norm_name(name) != norm_name(v.title)
         own = self.adj.own_cover(v.path)
         self.lab_src.setText(
             f"封面({what}):<b style='color:{red if bad else green}'>{html.escape(name)}</b>"
             + (f" <span style='color:{red}'>⚠ 和视频标题对不上,看一眼是不是配错了</span>" if bad and not own else "")
             + (f" <span style='color:{green}'>(你自己换的)</span>" if own else "")
-            + f"<br><span style='color:{grey}'>位置:{html.escape(path)}</span>")
+            + (f" <span style='color:{grey}'>(去掉了黑边)</span>" if shown != path else "")
+            + f"<br><span style='color:{grey}'>位置:{html.escape(shown)}</span>")
 
     def pick_cover(self):
         import os
         from PySide6.QtWidgets import QFileDialog
-        start = os.path.dirname(self.v.cover or self.v.path)
+        start = os.path.dirname(C.orig_of(self.v.cover) if self.v.cover else self.v.path)
         p, _ = QFileDialog.getOpenFileName(self, f"给「{self.v.title[:30]}」换封面", start, "图片 (*.png *.jpg *.jpeg *.webp)")
         if p:
             self.set_cover(os.path.normpath(p))

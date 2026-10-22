@@ -3439,6 +3439,45 @@ def test_clean_dirs(tmp: Path):
         omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
 
 
+def test_black_border(tmp: Path):
+    print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
+    from PIL import Image, ImageDraw
+    from qe import apicover
+    from qe import cover as C
+    d = tmp / "bb"
+    d.mkdir(exist_ok=True)
+    im = Image.new("RGB", (2048, 1152), (0, 0, 0))
+    ImageDraw.Draw(im).rectangle([0, 82, 2047, 1068], fill=(120, 160, 90))
+    p = d / "横屏16x9.png"
+    im.save(p)
+    out, why = C.deborder(str(p))
+    got = Image.open(out).size if out != str(p) else None
+    check(why == "" and got and got[0] == 2048 and 980 <= got[1] <= 987 and C.orig_of(out) == str(p)
+          and Image.open(p).size == (2048, 1152), f"上下黑条去掉,原图不动 -> {got}")
+    check(C.deborder(str(p))[0] == out, "做过的副本直接用(不重复做)")
+    import numpy as _np
+    rng = _np.random.default_rng(1)
+    sky = _np.clip(rng.normal(12, 7, (600, 800, 3)), 0, 255).astype(_np.uint8)       # 夜空:很暗,但有噪点(真照片都有)
+    night = Image.fromarray(sky)
+    ImageDraw.Draw(night).ellipse([300, 200, 500, 400], fill=(230, 220, 120))
+    pn = d / "夜景.png"
+    night.save(pn)
+    check(C.deborder(str(pn)) == (str(pn), ""), "暗的夜景:不当成黑边")
+    tall = Image.new("RGB", (1152, 2048), (0, 0, 0))
+    ImageDraw.Draw(tall).rectangle([0, 900, 1151, 1250], fill=(200, 100, 100))
+    pt = d / "竖屏9x16.png"
+    tall.save(pt)
+    check(C.deborder(str(pt)) == (str(pt), "too_wide"), "大半是黑的(横图塞进竖画布):不去,交给人看")
+    clean = d / "干净.png"
+    Image.new("RGB", (640, 360), (200, 200, 200)).save(clean)
+    check(C.deborder(str(clean)) == (str(clean), ""), "没黑边:用原图")
+    # 16 个号传的封面:原样模式也去黑边
+    up = apicover.prepare(str(p), "原样")
+    check(up != str(p) and Image.open(up).size[1] < 1000, f"16 个号的封面:有黑边的去掉再传 -> {Image.open(up).size}")
+    apicover.cleanup(up, str(p))
+    check(apicover.prepare(str(clean), "原样") == str(clean), "16 个号的封面:没黑边的原图照传")
+
+
 def test_quota_gate(tmp: Path):
     print("[每天规定条数的闸(2026-10-20 PUBG 多发了 21 条):不能多发、没发成的补上、多的挪到明天、开闸才不管;转竖屏不留原片]")
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -4161,6 +4200,7 @@ if __name__ == "__main__":
     test_ux_fixes(tmp)
     test_packs(tmp)
     test_clean_dirs(tmp)
+    test_black_border(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

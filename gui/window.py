@@ -972,7 +972,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "打开所在文件夹", "先在列表里选中一条视频(或者左边点一个员工)。")
             return
         v = self.videos[rows[0]]
-        path = v.cover if what == "cover" else v.path
+        path = C.orig_of(v.cover) if what == "cover" else v.path
         if not self.reveal(path):
             QMessageBox.information(self, "打开所在文件夹", f"找不到这个文件了(被挪走了?):{path}")
 
