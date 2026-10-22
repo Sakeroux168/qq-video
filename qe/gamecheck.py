@@ -175,17 +175,26 @@ def store() -> Store:
 
 
 def alien(nick: str, title: str) -> str:
-    """这条标题像哪个别的游戏(没有 / 人确认过是这个号的 = "")。关键词看得出来按关键词;看不出来看 AI 记下的答案。"""
+    """这条标题是哪个别的游戏的(拦着不发):只认关键词 —— 标题里明明白白写了别的游戏的名字。
+    人确认过是这个号的 = ""。AI 的判断不拦(用户 2026-10-22:「地铁逃生」判成暗区突围、「躲猫猫」判成蛋仔,
+    射击游戏的说法太像,AI 分不清,处理了一遍又冒出一批),只当提示,见 ai_hint。"""
     own = account_game(nick)
     if not own:
         return ""
-    s = store()
-    if s.ok(nick, title):
+    if store().ok(nick, title):
+        return ""
+    return by_words(nick, title)[0]
+
+
+def ai_hint(nick: str, title: str) -> str:
+    """AI 觉得像哪个别的游戏(只提示、不拦;关键词已经拦了的、人确认过的不提示)。"""
+    own = account_game(nick)
+    if not own or store().ok(nick, title):
         return ""
     g, known = by_words(nick, title)
     if known:
-        return g
-    a = s.ai(title) or ""
+        return ""
+    a = store().ai(title) or ""
     return a if a and a in _WORDS and not same_family(own, a) else ""
 
 

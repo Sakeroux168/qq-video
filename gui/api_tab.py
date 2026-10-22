@@ -1118,7 +1118,12 @@ class ApiTab(QWidget):
         c = v.checks or {}
         st, probs = self._status_text(i)
         res = (f"{c['w']}×{c['h']}" if c.get("w") else "") if c else "没检查"
-        for col, t in enumerate([v.title, res, "、".join(probs) if c else "", st]):
+        from qe import gamecheck
+        hint = gamecheck.ai_hint(v.account, v.title) if c and not self._sent(i) else ""
+        note = "、".join(probs) if c else ""
+        if hint:
+            note = (note + "、" if note else "") + f"(AI 觉得像《{hint}》,不拦)"
+        for col, t in enumerate([v.title, res, note, st]):
             it.setText(col, t)
             it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else t)
         ad = c.get("ads") or {}
@@ -1403,7 +1408,15 @@ class ApiTab(QWidget):
                 m.addAction(f"整理标题(选中 {n_s} 条)", lambda: self.run_topic(sel)).setEnabled(not busy)
             from qe import gamecheck
             if i != -1 and not self._sent(i) and gamecheck.account_game(nick):
-                g0 = gamecheck.by_words(nick, self.videos[i].title)[0] or (gamecheck.store().ai(self.videos[i].title) or "")
+                g0 = gamecheck.by_words(nick, self.videos[i].title)[0] or gamecheck.ai_hint(nick, self.videos[i].title)
+                hint = gamecheck.ai_hint(nick, self.videos[i].title)
+                if hint and not gamecheck.alien(nick, self.videos[i].title):
+                    home = self._game_home(hint)
+                    if home:
+                        m.addSeparator()
+                        d = os.path.basename(os.path.dirname(self.videos[i].path))
+                        m.addAction(f"AI 觉得像《{hint}》:真放错了就挪到「{home[0]}」的 {d}",
+                                    lambda: self.move_to_game(i)).setEnabled(not busy)
                 if gamecheck.store().ok(nick, self.videos[i].title):
                     m.addSeparator()
                     m.addAction("其实不是这个号的游戏(先不发)", lambda: self.set_game_ok(i, False)).setEnabled(not busy)
@@ -1751,7 +1764,7 @@ class ApiTab(QWidget):
         moved, miss = [], []
         for r in rows:
             v = self.videos[r]
-            g = gamecheck.alien(v.account, v.title)
+            g = gamecheck.alien(v.account, v.title) or gamecheck.ai_hint(v.account, v.title)
             home = self._game_home(g) if g else None
             if not home:
                 miss.append(v.title)

@@ -3083,7 +3083,8 @@ def test_game_guard(tmp: Path):
     a, b, ok = idx(tab, "和平精英"), idx(tab, "苟分"), idx(tab, "急停")
     check("标题像是《和平精英》的" in checks.problems(tab.videos[a]) and not tab._can_send(a),
           f"一条像和平精英:标「标题像是《和平精英》的」,不发 -> {checks.problems(tab.videos[a])}")
-    check("标题像是《PUBG》的" in checks.problems(tab.videos[b]) and not tab._can_send(b), "AI 说像 PUBG 的:也不发")
+    check(not checks.problems(tab.videos[b]) and tab._can_send(b) and "AI 觉得像《PUBG》,不拦" in tab.items[b].text(2),
+          f"AI 说像 PUBG 的:只提示、不拦(用户 2026-10-22:AI 误判太多)-> {tab.items[b].text(2)}")
     check(not tab._blocked and tab._can_send(ok), f"22 条里 2 条(不到一成):不算整批放错,别的照常能发 -> {tab._blocked}")
     AI_GAME_CALLS.clear()
     tab.run_check()
