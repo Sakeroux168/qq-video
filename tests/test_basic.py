@@ -505,6 +505,8 @@ def test_api_tab(tmp: Path):
           and apisrc.archive_dir({}, "10.15", accs[0]).endswith(os.path.join("企鹅号软件发布", "10.15", "CSGO")),
           "日期下面再分游戏;不勾「按游戏分」就只到日期")
     check(len([r for r in rec.rows("10.15") if r["employee"] == "接口" and r["status"] == "已发"]) == 3, "记进记录(员工 = 接口)")
+    check(not (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15").exists(), "这个号 10.15 发空了:文件夹自动删了")
+    (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15").mkdir()          # 员工又放了两条进来
     for f in ("c3.mp4", "c4.mp4"):
         (root / "游戏视频" / "CSGO--CSGO战神君" / "10.15" / f).write_bytes(b"x")
     tab.load()
@@ -3365,6 +3367,77 @@ def test_packs(tmp: Path):
           f"没 Key:写法不对的先改,挂好几个话题的跳过并说一声 -> {got}")
 
 
+def test_clean_dirs(tmp: Path):
+    print("[发完文件夹空了自动删(用户 2026-10-21):剩下的图挪进归档再删;手选的 10.2 发空了删 10.2,不动 10.1;没发完的不删]")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    root = tmp / "api_cl" / "游戏视频"
+    acc = root / "CSGO--CSGO战神君"
+    for d, names in (("10.1", ["一1", "一2"]), ("10.2", ["二1", "二2"])):
+        (acc / d).mkdir(parents=True, exist_ok=True)
+        for nm in names:
+            (acc / d / f"{nm}.mp4").write_bytes(b"x")
+            (acc / d / f"{nm}.jpg").write_bytes(b"j")
+    (acc / "10.2" / "多的一张图.png").write_bytes(b"p")
+    (acc / "10.2" / "Thumbs.db").write_bytes(b"t")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"),
+                  "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_cl.json")
+    st["api_roots"] = [str(root)]
+    st["api_archive"] = str(tmp / "发布cl" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    st["quota_open"] = True
+    st["api_picked"] = {"10.1": {"CSGO战神君": str(acc / "10.2")}}      # 这天手选的是 10.2
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, **k):
+            if before_publish:
+                before_publish("V")
+            return {"vid": "V", "article_id": "A" + title, "transaction_id": "P", "status": "成功"}
+    real = (omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning)
+    omapi.Client, T.ask = Fake, (lambda *a, **k: True)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: 0)
+    try:
+        tab = T.ApiTab(st, Records(tmp / "r_cl.sqlite"), lambda m: None)
+        tab.set_day("10.1")
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+        for v in tab.videos:
+            v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+        tab._update_scope()
+        # 先只发 1 条:还剩视频 → 不删
+        tab.run_publish([0])
+        _wait(app, lambda: not tab.busy())
+        app.processEvents()
+        check((acc / "10.2").is_dir(), "没发完(还剩视频):文件夹不删")
+        for v in tab.videos:
+            v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+        tab._update_scope()
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy())
+        _wait(app, lambda: not (acc / "10.2").exists(), 10)
+        arc = sorted(os.listdir(tmp / "发布cl")) if (tmp / "发布cl").exists() else []
+        moved = sorted(x for dd in arc for x in os.listdir(tmp / "发布cl" / dd / "CSGO"))
+        check(not (acc / "10.2").exists() and (acc / "10.1").is_dir() and len(os.listdir(acc / "10.1")) == 4,
+              f"手选的 10.2 发空了删 10.2;10.1 不动 -> 10.1 里 {sorted(os.listdir(acc / '10.1'))}")
+        check("多的一张图.png" in moved and "二1.jpg" in moved and "Thumbs.db" not in moved,
+              f"剩下的图挪进发布归档,Thumbs.db 删掉 -> {moved}")
+        tab.load()                                        # 点「刷新」
+        _wait(app, lambda: not tab.busy())
+        check(not tab.videos and len(os.listdir(acc / "10.1")) == 4,
+              f"手选的文件夹删了:这天这个号就没东西了,不会自己去找 10.1 列出来 -> {[v.title for v in tab.videos]}")
+        check(acc.is_dir() and root.is_dir(), "号的总文件夹、素材根目录不动")
+    finally:
+        omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
+
+
 def test_quota_gate(tmp: Path):
     print("[每天规定条数的闸(2026-10-20 PUBG 多发了 21 条):不能多发、没发成的补上、多的挪到明天、开闸才不管;转竖屏不留原片]")
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -4086,6 +4159,7 @@ if __name__ == "__main__":
     test_game_guard(tmp)
     test_ux_fixes(tmp)
     test_packs(tmp)
+    test_clean_dirs(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

@@ -1586,9 +1586,57 @@ class ApiTab(QWidget):
         self._popup = None
         if pop:
             QMessageBox.warning(self, pop[0], pop[1]) if pop[2] else QMessageBox.information(self, pop[0], pop[1])
+        self._clean_empty_dirs()                          # 发空了的文件夹删掉(发了的已经在归档里,列表上「已发」照旧看得见,不用重读)
         if getattr(self, "_reload_after", False):          # 多的挪到明天了:重读列表(挪走的不在这天了)
             self._reload_after = False
             self.load()
+
+    JUNK = ("thumbs.db", "desktop.ini", ".ds_store")
+
+    def _clean_empty_dirs(self) -> int:
+        """发完:这次发出去的视频原来所在的文件夹,视频都没了 → 剩下的图(和别的零碎文件)挪进发布归档,再删掉这个空文件夹
+        (用户 2026-10-21:「每次发完视频该文件夹空了后自动把该文件夹删除」;选的:剩下的图挪走再删、16 个号的日期文件夹 + 手选的文件夹)。
+        号的总文件夹、素材根目录、里面还有子文件夹 / 视频的,都不动。返回删了几个。"""
+        dirs = dict(getattr(self, "_pub_dirs", {}) or {})
+        self._pub_dirs = {}
+        if not dirs:
+            return 0
+        roots = {os.path.normcase(os.path.abspath(r)) for r in self.roots()}
+        acc_dirs = {os.path.normcase(os.path.abspath(p)) for ps in apisrc.account_folder_list(self.roots()).values() for p in ps}
+        picked = {os.path.normcase(os.path.abspath(p)): (day, nick) for day, m in (self.st.get("api_picked") or {}).items()
+                  for nick, p in (m or {}).items() if p}
+        n = 0
+        for d, acc in dirs.items():
+            key = os.path.normcase(os.path.abspath(d))
+            if key in roots or key in acc_dirs or not os.path.isdir(d):
+                continue
+            if os.path.normcase(os.path.dirname(os.path.abspath(d))) in roots:
+                continue                                  # 直接在素材根目录下的(「2电竞赛事」这种号常年用的文件夹)不删
+            if not (apisrc.date_key(os.path.basename(d)) or key in picked):
+                continue                                  # 名字不是日期、也不是手选的:不动
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue
+            paths = [os.path.join(d, x) for x in names]
+            if any(os.path.isdir(p) for p in paths) or any(os.path.splitext(x)[1].lower() in apisrc.VIDEO_EXTS for x in names):
+                continue                                  # 还有视频 / 子文件夹:没空
+            rest = [p for p in paths if os.path.basename(p).lower() not in self.JUNK]
+            try:
+                dest = apisrc.archive_dir(self.st, "", acc)
+                for p in rest:
+                    plan.move_noclobber(p, dest)          # 剩下的封面图挪进归档(同一天、同一个游戏文件夹),不删
+                for p in paths:
+                    if os.path.basename(p).lower() in self.JUNK and os.path.isfile(p):
+                        os.remove(p)                      # Thumbs.db 这种系统自己生成的,删
+                os.rmdir(d)                               # 只删空的;里面又有了东西就删不掉,不硬删
+            except OSError as e:
+                self.say(f"「{d}」发完了,但文件夹没删掉:{e.strerror or e}")
+                continue
+            n += 1
+            self.say(f"「{d}」发完空了,删了" + (f"(剩下 {len(rest)} 个文件挪进了发布归档)" if rest else ""))
+            # 手选的文件夹删了:手选那条留着(这天这个号就没东西了),不回到自动找 —— 免得把别的日期文件夹(10.1)的视频列出来顺手发了
+        return n
 
     def stop(self):
         if self.job and self.job.isRunning():
@@ -2314,6 +2362,7 @@ class ApiTab(QWidget):
         else:
             from PySide6.QtWidgets import QMessageBox
         picked = only is not None or bool(self.selected_rows())
+        self._pub_dirs = {}                              # 这次发出去的视频原来在哪个文件夹 → 号(发完看空没空,空了删)
         scope = self.target_rows(only)
         if not scope:
             return
@@ -2547,6 +2596,7 @@ class ApiTab(QWidget):
                 try:
                     old = v.path
                     v.path = apisrc.move_published(v.path, apisrc.archive_dir(self.st, "", a))
+                    self._pub_dirs[os.path.dirname(old)] = a
                     if "id" in rid:                       # 记下新位置:之后在归档里再看到它也认得出发过
                         _retry(lambda: self.rec.mark_moved(rid["id"], v.path))
                 except OSError as e:
