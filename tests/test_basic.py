@@ -3439,6 +3439,33 @@ def test_clean_dirs(tmp: Path):
         omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
 
 
+def test_edit_quota(tmp: Path):
+    print("[每天规定条数自己改(用户 2026-10-22:有个号要从 10 条变成 30 条):每日汇总里双击一个号改]")
+    from PySide6.QtWidgets import QApplication, QInputDialog
+    QApplication.instance() or QApplication([])
+    from qe import plan
+    from qe.config import Settings
+    from qe.records import Records
+    from gui.daily_tab import DailyTab
+    st = Settings(tmp / "st_eq.json")
+    check(plan.quota_of(st, "DNF连招档案馆") == 10, "默认 DNF连招档案馆 每天 10 条")
+    tab = DailyTab(st, Records(tmp / "r_eq.sqlite"))
+    tab.refresh()
+    row = next(r for r in range(tab.t.rowCount()) if tab.t.item(r, 1).text() == "DNF连招档案馆")
+    real = QInputDialog.getInt
+    QInputDialog.getInt = staticmethod(lambda *a, **k: (30, True))
+    try:
+        tab.edit_quota(row)
+    finally:
+        QInputDialog.getInt = real
+    st2 = Settings(tmp / "st_eq.json")                               # 重新读一遍:存盘了
+    row = next(r for r in range(tab.t.rowCount()) if tab.t.item(r, 1).text() == "DNF连招档案馆")
+    check(plan.quota_of(st2, "DNF连招档案馆") == 30 and tab.t.item(row, 2).text() == "30" and tab.t.item(row, 4).text() == "还差 30",
+          f"双击改成 30:存下来了,表里马上按 30 算 -> {tab.t.item(row, 2).text()} / {tab.t.item(row, 4).text()}")
+    check(plan.quota_of(st2, "家长研习空间") == 102 and plan.quota_of(st2, "和平精英上分君") == 80, "别的号不变")
+    check(plan.left_today(Records(tmp / "r_eq.sqlite"), st2, "DNF连招档案馆") == 30, "发够就停的闸也按新数算")
+
+
 def test_black_border(tmp: Path):
     print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
     from PIL import Image, ImageDraw
@@ -4201,6 +4228,7 @@ if __name__ == "__main__":
     test_packs(tmp)
     test_clean_dirs(tmp)
     test_black_border(tmp)
+    test_edit_quota(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

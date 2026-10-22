@@ -5,8 +5,8 @@
 """
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDateEdit, QHBoxLayout, QHeaderView, QLabel, QPushButton,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDateEdit, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+                               QMenu, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from qe import plan
 from qe.config import bj_now
@@ -77,6 +77,9 @@ class DailyTab(QWidget):
         self.hint_more.setObjectName("muted")
         hr.addWidget(self.hint_more)
         hr.addStretch(1)
+        how = QLabel("双击一个号 = 改它每天规定几条")
+        how.setObjectName("muted")
+        hr.addWidget(how)
         v.addLayout(hr)
 
         self.t = QTableWidget(0, 5)
@@ -94,6 +97,10 @@ class DailyTab(QWidget):
         for i, wd in ((0, 90), (2, 90), (3, 300), (4, 110)):
             self.t.setColumnWidth(i, wd)
         self.t.setColumnHidden(2, True)                   # 规定条数写在进度条旁边了(列还在,复制用)
+        self.t.cellDoubleClicked.connect(lambda r, _c: self.edit_quota(r))
+        self.t.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.t.customContextMenuRequested.connect(self._menu)
+        self.t.setToolTip("双击一个号:改它每天规定发几条")
         self.t.setHorizontalHeaderLabels(["品类", "号", "规定条数", "这天发了 / 规定", "还差"])
         v.addWidget(self.t, 1)
         foot = QLabel("说明:只数用这个软件发出去的(旧软件发的、自己在后台手动发的不算)。")
@@ -104,6 +111,38 @@ class DailyTab(QWidget):
 
     def day(self) -> str:
         return self.d.date().toString("yyyy-MM-dd")
+
+    def _menu(self, pos):
+        r = self.t.rowAt(pos.y())
+        if r < 0:
+            return
+        m = QMenu(self)
+        m.addAction(f"改「{self.t.item(r, 1).text()}」每天规定几条…", lambda: self.edit_quota(r))
+        m.exec(self.t.viewport().mapToGlobal(pos))
+
+    def edit_quota(self, row: int):
+        """改这个号每天规定几条(用户 2026-10-22)。改完马上按新数算:还差几条、发够就停、多的挪到明天。"""
+        it = self.t.item(row, 1)
+        if it is None:
+            return
+        nick = it.text()
+        q = plan.quota_of(self.st, nick)
+        n, ok = QInputDialog.getInt(self, "每天规定条数", f"「{nick}」每天规定发几条?\n(改完今天马上按新数算:发够就停,多的挪到明天)",
+                                    q, 0, 5000, 1)
+        if not ok or n == q:
+            return
+        plan.set_quota(self.st, nick, n)
+        self.refresh()
+        w = self.window()
+        for name in ("today", "api_tab"):              # 别的页也按新数算
+            tab = getattr(w, name, None)
+            try:
+                if name == "today":
+                    tab.refresh(animate_=False)
+                elif tab is not None:
+                    tab._update_sum()
+            except Exception:
+                pass
 
     def _today(self):
         n = bj_now()

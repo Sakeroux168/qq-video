@@ -24,6 +24,22 @@ def plan(st) -> list[dict]:
     return p if isinstance(p, list) and p else DEFAULT_PLAN
 
 
+def set_quota(st, nick: str, n: int) -> bool:
+    """改这个号每天规定几条(用户 2026-10-22:有个号要从 10 条变成 30 条,要能自己改)。
+    改的是设置里的 daily_plan(没改过就从默认的抄一份再改),存盘。号不在表里返回 False。"""
+    import copy
+    p = copy.deepcopy(plan(st))
+    for g in p:
+        if nick in (g.get("accounts") or {}):
+            g["accounts"][nick] = max(0, int(n))
+            g.pop("total", None)                         # 品类合计跟着各号加起来算
+            st["daily_plan"] = p
+            if hasattr(st, "save"):
+                st.save()
+            return True
+    return False
+
+
 def quota_of(st, nick: str) -> int:
     """这个号每天规定几条;没规定返回 0。"""
     for g in plan(st):
