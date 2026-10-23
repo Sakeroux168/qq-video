@@ -35,7 +35,7 @@ const fmtTicker = (v, dec = 0) => v.toFixed(dec);
 
 // ================= 场景：一张纸（开场 0–7.0 / 近景对折 9.05–13.45 / 结尾 73.8–77）
 function sceneSheet(t) {
-  const a = vis(t, -1, 7.0) + vis(t, 9.05, 13.45) + vis(t, 73.75, 80);
+  const a = vis(t, -1, 5.15, 0.15) + vis(t, 9.05, 13.45) + vis(t, 73.75, 80);
   if (a <= 0.01) return;
   withAlpha(Math.min(1, a), () => {
     floorLine(1);
@@ -46,7 +46,7 @@ function sceneSheet(t) {
     const endPush = 1 + 0.06 * P(t, 73.8, 3.0);
     const cam = makeCam(540, cy, yaw, pitch, lerp(1.0, 1.25, close) * endPush);
     const theta = t < 20 ? Math.PI * ease(clamp((t - 11.72) / 1.0)) : 0;
-    tickRing(540, cy, 330, t, vis(t, 3.8, 6.95) + (t < 20 ? 0.8 * vis(t, 11.7, 13.45) : 0) + 0.6 * vis(t, 73.9, 80));
+    tickRing(540, cy, 330, t, vis(t, 3.8, 5.15) + (t < 20 ? 0.8 * vis(t, 11.7, 13.45) : 0) + 0.6 * vis(t, 73.9, 80));
     paper3d(cam, 260, 190, theta);
     // 悬浮碎光
     if (close < 0.99) {
@@ -55,8 +55,6 @@ function sceneSheet(t) {
       for (let i = 0; i < 26; i++) { const ph = r() * 6.28, dx = (r() - 0.5) * 180, dy = r() * 26; ctx.fillStyle = `rgba(255,225,170,${((1 - close) * (0.25 + 0.5 * (0.5 + 0.5 * Math.sin(t * 3 + ph)))).toFixed(3)})`; ctx.beginPath(); ctx.arc(540 + dx, 1415 + dy - 6 * Math.sin(t * 1.5 + ph), 2 + r() * 4, 0, 6.283); ctx.fill(); }
       ctx.restore();
     }
-    tag(830, 700, '1 米？', '第一个猜测', easeOut(clamp((t - 5.15) / 0.25)) * (1 - P(t, 6.8, 0.25)));
-    tag(250, 1180, '一栋楼？', '第二个猜测', easeOut(clamp((t - 5.98) / 0.25)) * (1 - P(t, 6.8, 0.25)));
     // 卡尺 0.1 → 0.2 mm
     const calA = vis(t, 9.4, 13.45);
     if (calA > 0.01) {
@@ -93,6 +91,149 @@ function sceneMoon(t, s, e, quick) {
       for (const [y, r, l] of marks) milestone(540, y, r, l, easeOut(clamp((y - yTop + 2) / 70)));
       milestone(540, 440, '月球 38 万公里', '第 42 次', easeOut(clamp((lt - growDur - 0.05) / 0.3)));
     });
+  });
+}
+
+// ================= 场景：拉远镜头（5.1–9.05）——从人身边一路拉到地球和月亮
+// 世界坐标用“米”。镜头可见高度 V 按对数插值，柱顶高度 hc 跟着走；物体按真实比例摆放，
+// 太小的自然缩进地面，太大的还在画面外，于是“从自身被拉到上帝视角”。
+const JR = 6.371e6, JMOON = 3.844e8, JYG = 1430;
+// [时间, log10(柱顶高度), log10(可见高度)]
+const JKEYS = [[5.1, -3, 0.42], [5.45, 0, 0.42], [5.95, 0, 0.45], [6.5, 2, 2.15], [6.95, 2, 2.18], [8.55, Math.log10(JMOON), 8.706], [9.2, Math.log10(JMOON), 8.71]];
+function jState(t) {
+  let i = 0; while (i < JKEYS.length - 2 && t > JKEYS[i + 1][0]) i++;
+  const [t0, h0, v0] = JKEYS[i], [t1, h1, v1] = JKEYS[i + 1];
+  const p = clamp((t - t0) / (t1 - t0)), e = i === 4 ? (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2) : ease(p);
+  return { lhc: lerp(h0, h1, e), lv: lerp(v0, v1, e) };
+}
+const J_STARS = (() => { const r = rng(77); return [...Array(140)].map(() => ({ x: r() * W, y: r() * 1500, s: 0.6 + r() * 1.8, a: 0.3 + r() * 0.7 })); })();
+const J_CLOUDS = (() => { const r = rng(31); return [...Array(14)].map(() => ({ X: (r() - 0.5) * 16000, h: 1800 + r() * 6500, rx: 900 + r() * 1800 })); })();
+function fmtH(h) {
+  if (h < 0.01) return (h * 1000).toFixed(1) + ' 毫米';
+  if (h < 1) return Math.round(h * 100) + ' 厘米';
+  if (h < 1000) return Math.round(h) + ' 米';
+  if (h < 1e7) return Math.round(h / 1000).toLocaleString('en') + ' 公里';
+  return Math.round(h / 1e7) + ' 万公里';
+}
+function person(x, yg, hp) {   // hp：身高像素
+  if (hp < 3) return;
+  const u = hp / 1.7;
+  ctx.save(); ctx.fillStyle = '#17110C'; ctx.strokeStyle = G.goldA + '0.75)'; ctx.lineWidth = Math.max(1, u * 0.008); ctx.shadowColor = G.goldA + '0.6)'; ctx.shadowBlur = Math.min(18, u * 0.03);
+  ctx.beginPath(); ctx.arc(x, yg - 1.58 * u, 0.11 * u, 0, 6.283); ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 0.06 * u, yg - 1.44 * u); ctx.lineTo(x - 0.21 * u, yg - 1.38 * u); ctx.lineTo(x - 0.25 * u, yg - 0.86 * u); ctx.lineTo(x - 0.19 * u, yg - 0.85 * u);
+  ctx.lineTo(x - 0.16 * u, yg - 1.2 * u); ctx.lineTo(x - 0.15 * u, yg - 0.82 * u); ctx.lineTo(x - 0.14 * u, yg); ctx.lineTo(x - 0.03 * u, yg); ctx.lineTo(x, yg - 0.76 * u);
+  ctx.lineTo(x + 0.03 * u, yg); ctx.lineTo(x + 0.14 * u, yg); ctx.lineTo(x + 0.15 * u, yg - 0.82 * u); ctx.lineTo(x + 0.16 * u, yg - 1.2 * u); ctx.lineTo(x + 0.19 * u, yg - 0.85 * u);
+  ctx.lineTo(x + 0.25 * u, yg - 0.86 * u); ctx.lineTo(x + 0.21 * u, yg - 1.38 * u); ctx.lineTo(x + 0.06 * u, yg - 1.44 * u); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function tower(x, yg, w, hp, floors, lit, seed) {
+  if (hp < 2 || x + w / 2 < -20 || x - w / 2 > W + 20) return;
+  ctx.save();
+  const g = ctx.createLinearGradient(x - w / 2, 0, x + w / 2, 0); g.addColorStop(0, '#2A2119'); g.addColorStop(1, '#14100B');
+  ctx.fillStyle = g; ctx.fillRect(x - w / 2, yg - hp, w, hp);
+  ctx.strokeStyle = G.goldA + '0.5)'; ctx.lineWidth = 1.5; ctx.strokeRect(x - w / 2, yg - hp, w, hp);
+  if (lit && hp / floors > 5) {
+    const r = rng(seed), cols = 5, fh = hp / floors;
+    for (let f = 0; f < floors; f++) for (let c = 0; c < cols; c++) {
+      if (r() < 0.45) continue;
+      ctx.fillStyle = `rgba(255,214,150,${(0.25 + 0.5 * r()).toFixed(2)})`;
+      ctx.fillRect(x - w / 2 + w * (c + 0.25) / cols, yg - hp + f * fh + fh * 0.3, w / cols * 0.5, fh * 0.4);
+    }
+  }
+  ctx.restore();
+}
+function burj(x, yg, hp) {      // 哈利法塔：逐级收分的尖塔
+  if (hp < 3 || x < -60 || x > W + 60) return;
+  ctx.save(); ctx.fillStyle = '#1C1610'; ctx.strokeStyle = G.goldA + '0.6)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x - hp * 0.075, yg);
+  const steps = [[0.075, 0], [0.06, 0.25], [0.045, 0.45], [0.032, 0.62], [0.02, 0.76], [0.008, 0.87], [0.002, 1]];
+  for (const [w, h] of steps) ctx.lineTo(x - hp * w, yg - hp * h);
+  for (const [w, h] of steps.slice().reverse()) ctx.lineTo(x + hp * w, yg - hp * h);
+  ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+}
+function mountains(sx, sy, k) {  // 珠峰在 X=+3km，旁边几座次峰
+  const peaks = [[3000, 8848, 9000], [-4000, 6200, 7000], [9000, 7400, 8000], [15000, 5600, 7000]];
+  ctx.save();
+  for (const [X, h, hw] of peaks.slice().reverse()) {
+    if (h * k < 2) continue;
+    const g = ctx.createLinearGradient(0, sy(h), 0, JYG); g.addColorStop(0, '#5A5045'); g.addColorStop(0.18, '#2B241D'); g.addColorStop(1, '#120E0A');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(sx(X - hw), JYG);
+    ctx.lineTo(sx(X - hw * 0.45), sy(h * 0.52)); ctx.lineTo(sx(X - hw * 0.12), sy(h * 0.86)); ctx.lineTo(sx(X), sy(h));
+    ctx.lineTo(sx(X + hw * 0.2), sy(h * 0.8)); ctx.lineTo(sx(X + hw * 0.55), sy(h * 0.45)); ctx.lineTo(sx(X + hw), JYG); ctx.closePath(); ctx.fill();
+    // 雪顶
+    ctx.fillStyle = 'rgba(235,228,214,0.55)'; ctx.beginPath(); ctx.moveTo(sx(X), sy(h)); ctx.lineTo(sx(X - hw * 0.12), sy(h * 0.86)); ctx.lineTo(sx(X - hw * 0.04), sy(h * 0.88)); ctx.lineTo(sx(X + hw * 0.06), sy(h * 0.84)); ctx.lineTo(sx(X + hw * 0.2), sy(h * 0.8)); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function sceneJourney(t) {
+  const a = Math.min(easeOut(clamp((t - 5.0) / 0.25)), clamp((9.1 - t) / 0.12));
+  if (a <= 0.01) return;
+  const { lhc, lv } = jState(t), hc = Math.pow(10, lhc), V = Math.pow(10, lv);
+  const k = 1150 / V, sy = h => JYG - h * k, sx = X => 540 + X * k;
+  const speed = (jState(t + 0.02).lv - jState(t - 0.02).lv) / 0.04;   // 每秒拉远多少个数量级
+  // 地球显示半径：上帝视角时放大一点，好看清
+  const boost = 1 + 2.5 * ease(clamp((lv - 8.1) / 0.5));
+  const rE = JR * k * boost;
+  withAlpha(a, () => {
+    // 星空：离开大气层后出现，高速拉远时拖出短线
+    const sa = ease(clamp((lv - 3.9) / 1.2));
+    if (sa > 0) {
+      ctx.save(); ctx.lineCap = 'round';
+      for (const s of J_STARS) { ctx.strokeStyle = `rgba(255,236,200,${(sa * s.a * 0.8).toFixed(3)})`; ctx.lineWidth = s.s; const L = Math.min(4, speed * 0.6) * s.s; ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x, s.y + L + 0.1); ctx.stroke(); }
+      ctx.restore();
+    }
+    // 大气：贴着地面的一层淡蓝
+    if (rE > 1.5e5) {
+      const top = sy(6e4), g = ctx.createLinearGradient(0, JYG, 0, Math.max(top, -2000));
+      g.addColorStop(0, 'rgba(110,150,190,0.11)'); g.addColorStop(1, 'rgba(110,150,190,0)');
+      ctx.fillStyle = g; ctx.fillRect(0, Math.max(top, 0), W, JYG - Math.max(top, 0));
+    }
+    // 云：从头顶掠过
+    for (const c of J_CLOUDS) {
+      const ca = clamp((c.rx * k - 30) / 80) * clamp((V - 600) / 1500);
+      if (ca <= 0.01 || c.rx * k > 4000) continue;
+      const x = sx(c.X), y = sy(c.h), rx = c.rx * k, ry = rx * 0.22;
+      ctx.save(); ctx.globalAlpha *= ca * 0.5; ctx.translate(x, y); ctx.scale(1, ry / rx);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx); g.addColorStop(0, 'rgba(225,215,200,0.35)'); g.addColorStop(1, 'rgba(225,215,200,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, rx, 0, 6.283); ctx.fill(); ctx.restore();
+    }
+    // 地面 / 地球
+    const flatA = clamp((rE - 5e4) / 1e5);
+    if (flatA > 0) withAlpha(flatA, () => floorLine(1, JYG));
+    if (rE < 1.5e5) withAlpha(1 - flatA, () => {
+      earth(540, JYG + rE, rE);
+      // 太空边界 100 公里：虚线圈
+      const ka = clamp((lv - 4.6) / 0.4) * clamp((7.3 - lv) / 0.4);
+      if (ka > 0) withAlpha(ka, () => { ctx.strokeStyle = G.goldA + '0.55)'; ctx.lineWidth = 2; ctx.setLineDash([10, 10]); ctx.beginPath(); ctx.arc(540, JYG + rE, rE + 1e5 * k, 0, 6.283); ctx.stroke(); ctx.setLineDash([]); });
+      // 第 37 次：再叠一个地球那么高
+      const da = clamp((lhc - 7.12) / 0.15) * clamp((8.25 - lv) / 0.25);
+      if (da > 0) withAlpha(da, () => { ctx.strokeStyle = G.goldA + '0.6)'; ctx.lineWidth = 2; ctx.setLineDash([6, 9]); ctx.beginPath(); ctx.arc(540, JYG - rE, rE, 0, 6.283); ctx.stroke(); ctx.setLineDash([]); });
+    });
+    // 参照物（真实比例）
+    withAlpha(ease(clamp((lv - 3.86) / 0.14)), () => mountains(sx, sy, k));
+    burj(sx(-420), JYG, 828 * k);
+    tower(sx(-105), JYG, 22 * k, 55 * k, 16, true, 3);
+    tower(sx(90), JYG, 26 * k, 40 * k, 12, true, 5);
+    tower(sx(-50), JYG, 32 * k, 100 * k, 30, true, 9);
+    person(sx(-0.85), JYG, 1.7 * k);
+    // 月亮：真实大小只有几个像素，这里给个最小半径
+    const my = sy(JMOON);
+    if (my > -150) moon(540, my - 46, Math.max(1.737e6 * k, 46), 1);
+    // 纸柱
+    const w = clamp(0.07 * k, 10, 32), yTop = Math.max(sy(hc), -50);
+    column(540, yTop, JYG, w);
+    // 刻度：柱顶到达时出现，缩进地面时淡出
+    const MS = [[1, '1 米？', '第 13 次'], [100, '一栋楼？', '第 20 次'], [828, '哈利法塔', '第 23 次'], [8848, '珠峰', '第 27 次'],
+      [1e5, '太空边界', '第 30 次'], [4e5, '空间站', '第 32 次'], [1.2742e7, '地球直径', '第 37 次'], [JMOON, '月球 38 万公里', '第 42 次']];
+    for (const [h, r, l] of MS) {
+      const y = h === JMOON ? my + 40 : sy(h);
+      const ma = clamp(1 + 6 * (lhc - Math.log10(h))) * clamp((JYG - 200 - y) / 80) * clamp((y - 240) / 60);
+      if (ma > 0.01) milestone(540, y, r, l, ma);
+    }
+    // 左上：实时折叠次数 + 高度
+    const n = Math.max(0, Math.round(Math.log2(hc / 1e-4)));
+    chapter(clamp((t - 5.15) / 0.3), `第 ${n}`, ' 次', fmtH(hc), 1);
   });
 }
 
@@ -356,11 +497,11 @@ window.draw = function (t) {
   background(t, { cx: 540, cy: 900, glow: 0.95 });
   bokeh(t);
   bgWord('42', 640, 520, vis(t, -1, 3.75));
-  bgWord('?', 640, 520, vis(t, 3.8, 6.95));
+  bgWord('?', 640, 520, vis(t, 3.8, 5.15, 0.15));
   bgWord('0.1 mm', 640, 230, vis(t, 9.1, 12.75));
   bgWord('0.2 mm', 640, 230, vis(t, 12.75, 13.45));
   sceneSheet(t);
-  sceneMoon(t, 6.95, 9.1, true);
+  sceneJourney(t);
   sceneStack(t);
   sceneBuilding(t);
   sceneSpace(t);
