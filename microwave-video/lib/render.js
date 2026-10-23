@@ -18,13 +18,15 @@ function pageHtml() {
 html,body { margin:0; padding:0; width:1080px; height:1920px; overflow:hidden; background:#0F141A; }
 svg { display:block; }
 </style></head><body>
+<script>window.ROOT = ${JSON.stringify(ROOT)}; window.XMETA = ${fs.readFileSync(path.join(ROOT, 'xingxing', 'assets', 'meta.json'), 'utf8')};</script>
 <script src="file://${path.join(ROOT, 'lib', 'core.js')}"></script>
+<script src="file://${path.join(ROOT, "lib", "characters.js")}"></script>
 <script src="file://${shot}"></script>
 </body></html>`;
 }
 
 (async () => {
-  const tmp = path.join(ROOT, 'frames', '_page.html');
+  const tmp = path.join(ROOT, 'frames', '_page_' + path.basename(shot, '.js') + '_' + process.pid + '.html');
   fs.writeFileSync(tmp, pageHtml());
   const browser = await chromium.launch({ args: ['--allow-file-access-from-files'] });
   const page = await browser.newPage({ viewport: { width: 1080, height: 1920 }, deviceScaleFactor: 1 });
@@ -34,6 +36,7 @@ svg { display:block; }
     await document.fonts.load('120px NotoBlack', '测');
     await document.fonts.load('76px NotoBold', '测');
     await document.fonts.ready;
+    await Promise.all(window.ASSETS || []);
   });
   const fonts = await page.evaluate(() => [...document.fonts].map(f => f.family + ':' + f.status).join(' '));
   console.log('fonts:', fonts);

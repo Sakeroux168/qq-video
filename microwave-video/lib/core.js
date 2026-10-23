@@ -181,3 +181,142 @@ function pushIn(g, t, dur, amt = 0.03, cx = 540, cy = 800) {
   const s = 1 + amt * clamp(t / dur);
   g.setAttribute('transform', `translate(${cx} ${cy}) scale(${s.toFixed(5)}) translate(${-cx} ${-cy})`);
 }
+
+// ---------------------------------------------------------------- 通用组件
+// 青色 ✓（安全/正确）
+function checkIcon(parent, cx, cy, r = 60) {
+  const g = el('g', {}, parent);
+  el('circle', { cx, cy, r, fill: 'none', stroke: C.cyan, 'stroke-width': Math.max(5, r * 0.09) }, g);
+  el('path', { d: `M${cx - r * 0.42},${cy + r * 0.02} L${cx - r * 0.1},${cy + r * 0.34} L${cx + r * 0.45},${cy - r * 0.3}`, fill: 'none', stroke: C.cyan, 'stroke-width': Math.max(8, r * 0.16), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, g);
+  return g;
+}
+// 橙色 ✕（危险/错误）
+function crossIcon(parent, cx, cy, r = 60) {
+  const g = el('g', {}, parent);
+  el('circle', { cx, cy, r, fill: 'none', stroke: C.orange, 'stroke-width': Math.max(5, r * 0.09) }, g);
+  const k = r * 0.36;
+  el('path', { d: `M${cx - k},${cy - k} L${cx + k},${cy + k} M${cx + k},${cy - k} L${cx - k},${cy + k}`, stroke: C.orange, 'stroke-width': Math.max(8, r * 0.16), 'stroke-linecap': 'round' }, g);
+  return g;
+}
+// 橙色警示三角
+function warnIcon(parent, cx, cy, r = 60) {
+  const g = el('g', {}, parent);
+  el('path', { d: `M${cx},${cy - r} L${cx + r * 1.1},${cy + r * 0.8} L${cx - r * 1.1},${cy + r * 0.8} Z`, fill: 'none', stroke: C.orange, 'stroke-width': Math.max(6, r * 0.1), 'stroke-linejoin': 'round' }, g);
+  el('rect', { x: cx - r * 0.07, y: cy - r * 0.45, width: r * 0.14, height: r * 0.7, rx: r * 0.07, fill: C.orange }, g);
+  el('circle', { cx, cy: cy + r * 0.5, r: r * 0.09, fill: C.orange }, g);
+  return g;
+}
+// 立体水分子：O 在中心，两个 H 夹角 104.5°；ang 为朝向（度）
+function waterMol(parent, cx, cy, s = 1) {
+  const outer = el('g', { transform: `translate(${cx} ${cy})` }, parent);
+  const g = el('g', {}, outer);
+  for (const d of [-52, 52]) {
+    const a = (d * Math.PI) / 180;
+    el('circle', { cx: (54 * Math.cos(a) * s).toFixed(1), cy: (54 * Math.sin(a) * s).toFixed(1), r: 25 * s, fill: 'url(#atomH)' }, g);
+  }
+  el('circle', { cx: 0, cy: 0, r: 42 * s, fill: 'url(#atomO)' }, g);
+  return { outer, g, rot(a) { g.setAttribute('transform', `rotate(${a.toFixed(2)})`); } };
+}
+// 圆弧箭头（顺时针），返回 g
+function arcArrow(parent, cx, cy, r, a0, a1, color = C.cyan, w = 4, head = 14) {
+  const g = el('g', {}, parent);
+  const P = a => [cx + r * Math.cos((a * Math.PI) / 180), cy + r * Math.sin((a * Math.PI) / 180)];
+  const [x0, y0] = P(a0), [x1, y1] = P(a1);
+  const large = ((a1 - a0) % 360 + 360) % 360 > 180 ? 1 : 0;
+  el('path', { d: `M${x0},${y0} A${r},${r} 0 ${large} 1 ${x1},${y1}`, fill: 'none', stroke: color, 'stroke-width': w, 'stroke-linecap': 'round' }, g);
+  const t = (a1 * Math.PI) / 180, tx = -Math.sin(t), ty = Math.cos(t), nx = Math.cos(t), ny = Math.sin(t);
+  el('path', { d: `M${x1 + tx * head * 1.1},${y1 + ty * head * 1.1} L${x1 + nx * head * 0.75},${y1 + ny * head * 0.75} L${x1 - nx * head * 0.75},${y1 - ny * head * 0.75} Z`, fill: color }, g);
+  return g;
+}
+// 直线箭头
+function arrow(parent, x0, y0, x1, y1, color = C.cyan, w = 6, head = 22) {
+  const g = el('g', {}, parent);
+  const a = Math.atan2(y1 - y0, x1 - x0), ux = Math.cos(a), uy = Math.sin(a);
+  el('path', { d: `M${x0},${y0} L${x1 - ux * head * 0.8},${y1 - uy * head * 0.8}`, stroke: color, 'stroke-width': w, 'stroke-linecap': 'round' }, g);
+  el('path', { d: `M${x1},${y1} L${x1 - ux * head - uy * head * 0.6},${y1 - uy * head + ux * head * 0.6} L${x1 - ux * head + uy * head * 0.6},${y1 - uy * head - ux * head * 0.6} Z`, fill: color }, g);
+  return g;
+}
+// 放大圈
+function lens(parent, cx, cy, r) {
+  const g = el('g', {}, parent);
+  el('circle', { cx, cy, r, fill: 'url(#lensbg)' }, g);
+  const inner = el('g', {}, g);
+  const cp = el('clipPath', { id: 'lens' + Math.round(cx) + Math.round(cy) }, g);
+  el('circle', { cx, cy, r: r - 2 }, cp);
+  inner.setAttribute('clip-path', `url(#lens${Math.round(cx)}${Math.round(cy)})`);
+  const ring = el('circle', { cx, cy, r, fill: 'none', stroke: C.cyan, 'stroke-width': 4, filter: 'url(#soft)' }, g);
+  return { g, inner, ring };
+}
+// 一碗米饭（侧视），(cx, cy) 为碗口中心
+function riceBowl(parent, cx, cy, s = 1) {
+  const g = el('g', { transform: `translate(${cx} ${cy}) scale(${s})` }, parent);
+  el('ellipse', { cx: 0, cy: 0, rx: 118, ry: 22, fill: 'url(#rice)' }, g);
+  el('path', { d: 'M-115,0 Q-110,-75 0,-80 Q110,-75 115,0 Z', fill: 'url(#rice)' }, g);
+  el('path', { d: 'M-130,0 Q-120,85 0,87 Q120,85 130,0 Z', fill: 'url(#bowl)' }, g);
+  el('ellipse', { cx: 0, cy: 0, rx: 130, ry: 10, fill: 'none', stroke: '#FFFFFF', 'stroke-opacity': 0.6, 'stroke-width': 3 }, g);
+  el('ellipse', { cx: 0, cy: 92, rx: 60, ry: 8, fill: '#000', opacity: 0.35 }, g);
+  return g;
+}
+// 热气：几条上升的淡白曲线，update(t) 让它缓慢流动
+function steam(parent, xs, y0, h = 90, color = '#FFFFFF', op = 0.4) {
+  const g = el('g', {}, parent);
+  const ps = xs.map(() => el('path', { fill: 'none', stroke: color, 'stroke-width': 5, 'stroke-linecap': 'round', opacity: op }, g));
+  return {
+    g,
+    update(t) {
+      ps.forEach((p, i) => {
+        let d = '';
+        for (let k = 0; k <= h; k += 5) {
+          const x = xs[i] + 9 * Math.sin(k / 22 - t * 3 + i * 1.7);
+          d += (d ? ' L' : 'M') + x.toFixed(1) + ',' + (y0 - k).toFixed(1);
+        }
+        p.setAttribute('d', d);
+      });
+    },
+  };
+}
+// 扑克牌：背面深灰 + 青色内框 + 大号字；正面浅色，内容由 front(g, w, h) 绘制（以牌中心为原点）
+function playingCard(parent, { cx, cy, w = 240, h = 340, back = '', backSize = 120, front = null, id = 'c' }) {
+  const outer = el('g', { transform: `translate(${cx} ${cy})` }, parent);
+  const flip = el('g', {}, outer);
+  el('rect', { x: -w / 2 + 6, y: -h / 2 + 14, width: w, height: h, rx: 20, fill: '#000', opacity: 0.45 }, outer).remove();
+  const shadow = el('rect', { x: -w / 2 + 4, y: -h / 2 + 16, width: w, height: h, rx: 20, fill: '#000', opacity: 0.45 }, flip);
+  const bk = el('g', {}, flip);
+  el('rect', { x: -w / 2, y: -h / 2, width: w, height: h, rx: 20, fill: C.g2, stroke: C.g4, 'stroke-width': 3 }, bk);
+  el('rect', { x: -w / 2 + 16, y: -h / 2 + 16, width: w - 32, height: h - 32, rx: 12, fill: 'none', stroke: C.cyan, 'stroke-width': 3, opacity: 0.8 }, bk);
+  const bt = el('text', { x: 0, y: backSize * 0.36, 'font-family': FONT.heavy, 'font-size': backSize, fill: C.white, 'text-anchor': 'middle' }, bk);
+  bt.textContent = back;
+  const fr = el('g', {}, flip);
+  el('rect', { x: -w / 2, y: -h / 2, width: w, height: h, rx: 20, fill: '#E9EDF1' }, fr);
+  if (front) front(fr, w, h);
+  const hi = el('rect', { x: -w / 2 - 6, y: -h / 2 - 6, width: w + 12, height: h + 12, rx: 24, fill: 'none', stroke: C.orange, 'stroke-width': 6, opacity: 0 }, flip);
+  return {
+    outer, flip, backText: bt, hi,
+    // p: 0 背面 → 1 正面（绕竖轴翻转）
+    setFlip(p) {
+      const sx = Math.abs(Math.cos(Math.PI * clamp(p)));
+      flip.setAttribute('transform', `scale(${Math.max(0.001, sx).toFixed(4)} 1)`);
+      bk.setAttribute('opacity', p < 0.5 ? 1 : 0);
+      fr.setAttribute('opacity', p < 0.5 ? 0 : 1);
+    },
+    move(x, y, s = 1, op = 1) {
+      outer.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${s.toFixed(4)})`);
+      outer.setAttribute('opacity', op);
+    },
+  };
+}
+// 普通文字
+function text(parent, x, y, str, { size = SIZE.label, font = FONT.bold, color = C.white, anchor = 'middle' } = {}) {
+  const t = el('text', { x, y, 'font-family': font, 'font-size': size, fill: color, 'text-anchor': anchor }, parent);
+  if (Array.isArray(str)) for (const [s, c] of str) { const sp = el('tspan', { fill: c || color }, t); sp.textContent = s; }
+  else t.textContent = str;
+  return t;
+}
+// 缩放入场（0.92 → 1，淡入；无过冲），以 (cx,cy) 为中心
+function popIn(g, t, start, cx, cy, dur = 0.4, from = 0.92) {
+  const p = prog(t, start, dur);
+  const s = from + (1 - from) * p;
+  g.setAttribute('opacity', p);
+  g.setAttribute('transform', `translate(${cx} ${cy}) scale(${s.toFixed(4)}) translate(${-cx} ${-cy})`);
+  return p;
+}
