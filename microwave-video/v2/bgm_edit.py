@@ -2,7 +2,7 @@
 整体延后 0.4 秒，让 47–49 秒的渐强落在“没人能”盖章上。输出 ../bgm/bgm_edit.npy 给 mix_bgm.py 用。"""
 import numpy as np, subprocess
 SR = 48000
-raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', '../bgm/bgm.mp3', '-af', 'equalizer=f=2500:t=q:w=1.2:g=-3', '-ac', '2', '-ar', str(SR), '-f', 'f32le', '-'], capture_output=True, check=True).stdout
+raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', '../bgm/bgm.mp3', '-ac', '2', '-ar', str(SR), '-f', 'f32le', '-'], capture_output=True, check=True).stdout
 x = np.frombuffer(raw, np.float32).reshape(-1, 2).astype(np.float64)
 a, b = 61.59, 77.32
 xf = int(0.08 * SR); pre = int(0.04 * SR)

@@ -41,17 +41,17 @@ voice = np.zeros(len(sfx)); v = np.frombuffer(raw, dtype=np.float32).astype(np.f
 voice *= 0.89 / np.abs(voice).max()
 bgm = np.load('../bgm/bgm_edit.npy').astype(np.float64)[:len(sfx)]
 bgm = np.pad(bgm, ((0, len(sfx) - len(bgm)), (0, 0)))
-# 配音包络 → BGM 闪避：说话时 -9 dB，停顿处回到原位，起 40ms / 落 350ms
+# 配音包络 → BGM 闪避：说话时 -6 dB，停顿处回到原位，起 40ms / 落 350ms
 hop = SR // 100
 env = np.sqrt(np.convolve(voice ** 2, np.ones(hop * 3) / (hop * 3), 'same'))[::hop]
 talk = (20 * np.log10(env + 1e-9) > -38).astype(float)
 g = np.zeros_like(talk); up, dn = 1 - np.exp(-1 / 4), 1 - np.exp(-1 / 35)
 for i in range(len(talk)):
     prev = g[i - 1] if i else talk[0]; g[i] = prev + (talk[i] - prev) * (up if talk[i] > prev else dn)
-duck = 10 ** (-9 * np.interp(np.arange(len(sfx)) / hop, np.arange(len(g)), g) / 20)
+duck = 10 ** (-6 * np.interp(np.arange(len(sfx)) / hop, np.arange(len(g)), g) / 20)
 tt = np.arange(len(sfx)) / SR
 fade = np.clip(tt / 0.3, 0, 1) * np.clip((DUR - tt) / 1.6, 0, 1) ** 1.5
-BGM_GAIN = 0.22; MAKEUP = float(__import__("os").environ.get("MAKEUP", "1.4"))
+BGM_GAIN = 1.2; MAKEUP = float(__import__("os").environ.get("MAKEUP", "1.3"))
 mus = bgm * (BGM_GAIN * duck * fade)[:, None]
 mix = (mus + (voice + sfx * 0.55)[:, None]) * MAKEUP
 lim = 10 ** (-2 / 20); k = 0.6; over = np.abs(mix) > k
