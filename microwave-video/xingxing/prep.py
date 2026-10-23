@@ -22,6 +22,12 @@ for k, f in src.items():
         meta[k] = dict(w=w, h=h, ax=float(footx), ay=float(h), headx=float(headx))
     else:
         meta[k] = dict(w=w, h=h, headx=float(headx))
+    if k in cut:
+        arr = np.asarray(im).copy().astype(np.float32)
+        fh = int(h * 0.18)
+        ramp = np.linspace(1, 0, fh)[:, None]
+        arr[h - fh:, :, 3] *= ramp
+        im = Image.fromarray(arr.astype(np.uint8), 'RGBA')
     big = im.resize((w * 2, h * 2), Image.LANCZOS).filter(ImageFilter.UnsharpMask(radius=1.6, percent=60, threshold=2))
     big.save(f'assets/{k}.png')
 off = float(np.mean(heads))

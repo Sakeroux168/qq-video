@@ -69,11 +69,16 @@ function xingxing(parent, { x, y, h = 480, flip = false, cues = [{ t: 0, pose: '
       const { cur, prev } = poseAt(t);
       const since = t - cur.t;
       // 换动作：0.12s 交叉淡化 + 0.3s 小跳（向上 14px 再落回，无回弹）
-      const fade = prev ? clamp(since / 0.12) : 1;
+      const fade = 1;  // 换动作直接切（配合小跳），不做交叉淡化，避免出现重影
       for (const k of XPOSES) imgs[k].setAttribute('opacity', 0);
       const nk = resolve(cur, t);
+      // 新姿势叠在旧姿势上面淡入，旧姿势保持不透明，避免交叉时人物变半透明
       imgs[nk].setAttribute('opacity', fade);
-      if (prev && fade < 1) { const pk = resolve(prev, t); if (pk !== nk) imgs[pk].setAttribute('opacity', 1 - fade); }
+      if (prev && fade < 1) {
+        const pk = resolve(prev, t);
+        if (pk !== nk) { imgs[pk].setAttribute('opacity', 1); sc.appendChild(imgs[nk]); }
+      }
+      if (shadowEl) shadowEl.setAttribute('opacity', ['stick', 'wave', 'heart'].includes(nk) ? 0 : 0.45);
       const hp = prev && since < 0.3 ? Math.sin(Math.PI * since / 0.3) : 0;
       const talking = cur.pose === 'talk' && cur.talk !== false;
       const bob = talking && (nk === 'talk' || nk === 'talkblink') ? -2 : 0;
