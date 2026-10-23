@@ -271,7 +271,7 @@ function sceneReal(t) {
   withAlpha(a1, () => {
     bgWord('42', 1000, 620, 1);
     zoom(540, 900, 0.9 + 0.1 * easeOut((t - 46.6) / 0.6), () => serifText('42 次？', 540, 960, { size: 180, weight: 900, color: G.ink, glow: 0.4 }));
-    const sa = easeOut(clamp((t - 48.95) / 0.18));
+    const sa = easeOut(clamp((t - 49.03) / 0.18));   // 落在“没人能”和 BGM 拍点 49.21
     zoom(700, 1200, 1.4 - 0.4 * sa, () => stamp(700, 1200, '没人能', sa));
   });
   const a2 = vis(t, 49.95, 56.15);
@@ -301,7 +301,7 @@ function sceneReal(t) {
     serifText(`第 ${Math.round(k)} 次`, 540, 560, { size: 64, weight: 900, color: G.gold });
     serifText('越厚 ↑', st.x1 + 40, st.top + 40, { size: 50, weight: 900, color: G.gold, a: P(t, 56.4, 0.3), align: 'left' });
     serifText('越短 ←→', 540, 1480, { size: 50, weight: 900, color: G.gold, a: P(t, 57.3, 0.3) });
-    const sa = easeOut(clamp((t - 58.55) / 0.18));
+    const sa = easeOut(clamp((t - 59.22) / 0.18));   // 落在“折不动”的“折”字
     zoom(540, 760, 1.4 - 0.4 * sa, () => stamp(540, 760, '折不动', sa, 0.08, 80));
   });
 }
