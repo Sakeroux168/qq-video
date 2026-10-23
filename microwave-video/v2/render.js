@@ -14,6 +14,7 @@ const [scene, out, a3, a4] = process.argv.slice(2);
 html,body{margin:0;background:#000;width:1080px;height:1920px;overflow:hidden} canvas{display:block}
 </style></head><body>
 <script src="file://${path.join(ROOT, 'lib', 'style.js')}"></script>
+<script src="file://${path.join(ROOT, 'lib', 'kitc.js')}"></script>
 <script src="file://${path.resolve(scene)}"></script></body></html>`;
   const tmp = path.join(ROOT, `_page_${process.pid}.html`); fs.writeFileSync(tmp, html);
   const browser = await chromium.launch({ args: ['--allow-file-access-from-files'] });
@@ -33,9 +34,10 @@ html,body{margin:0;background:#000;width:1080px;height:1920px;overflow:hidden} c
     }
   } else {
     const n = Math.round(parseFloat(a3) * 30);
+    const f0 = Math.round(parseFloat(process.env.T0 || '0') * 30), f1 = process.env.T1 ? Math.round(parseFloat(process.env.T1) * 30) : n;
     const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', '30', '-c:v', 'mjpeg', '-i', '-',
       '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out], { stdio: ['pipe', 'inherit', 'inherit'] });
-    for (let i = 0; i < n; i++) {
+    for (let i = f0; i < f1; i++) {
       await page.evaluate(t => window.draw(t), i / 30);
       const buf = await page.screenshot({ type: 'jpeg', quality: 95 });
       if (!ff.stdin.write(buf)) await new Promise(r => ff.stdin.once('drain', r));
