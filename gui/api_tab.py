@@ -757,6 +757,12 @@ class ApiTab(QWidget):
                 sub += f" · 另外 {self._over} 条超过今天的规定条数,发够以后挪到明天"
         elif n + gone and sent + gone >= n + gone:
             big, sub, tone = "这天的都发完了 √", "", "good"
+        elif getattr(self, "_over", 0):
+            big, tone = "今天都发够了 √", "good"
+            sub = (f"这天还有 {self._over} 条能发:现在发就超了今天的规定条数 —— 点「到点自动发…」定到明天发"
+                   if not self._is_today() else f"还没发的 {self._over} 条发够以后挪到明天")
+            if bad:
+                sub += f" · 另有 {bad} 条要处理"
         elif bad:
             big, tone = f"{bad} 条要先处理一下", "warn"
             sub = "处理好就能发(用下面的卡片)"
@@ -772,7 +778,8 @@ class ApiTab(QWidget):
             tone = tone or "warn"
         if cats.get("o") and not self.busy():
             sub += ("\n" if sub else "") + f"其中 {cats['o']} 条标题里有别的平台的名字,要你自己改(列表里右键「改标题」)"
-        if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)) and sub != self._fun:
+        if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)) and sub != self._fun \
+                and not big.startswith("今天都发够了"):
             sub = (sub + " · " if sub else "") + quota
         self.hero.set(big, sub, tone)
         idle = not n or checked < n or not self.day()
@@ -937,7 +944,7 @@ class ApiTab(QWidget):
             self.b_pub.setText("点「全部」再发")
         else:
             self.b_pub.setText(f"现在发布 {n} 条" + (f" + 再发一次没发成的 {retry} 条" if retry else "") if n else
-                               (f"再发一次没发成的 {retry} 条" if retry else "没有能发的"))
+                               (f"再发一次没发成的 {retry} 条" if retry else "今天都发够了" if _over else "没有能发的"))
         self.b_pub.setEnabled(bool(n or retry) and not self.busy())
         from gui.widgets import repolish
         repolish(self.b_pub, sel=bool(sel))
@@ -1180,8 +1187,16 @@ class ApiTab(QWidget):
         self._apply_filter()
         self._busy(self.busy())
 
+    def _is_today(self) -> bool:
+        return self.day() == f"{bj_now().month}.{bj_now().day}"
+
+    def _full_today(self, nick: str) -> bool:
+        sent = getattr(self, "today_sent", None) or {}
+        return plan.left_today(self.rec, self.st, nick, sent=sent) == 0
+
     def _done(self, nick: str) -> bool:
-        """这个号这天发完了:能发的都发了(列表里的都已发 / 发完挪走了),或者今天发够规定条数了。"""
+        """这个号这天发完了:能发的都发了(列表里的都已发 / 发完挪走了);看的是今天的文件夹时,今天发够规定条数了也算。
+        (用户 2026-10-24:切到 25 号准备定明天的,全都显示「发完了」—— 原来不管看哪天都按今天发够了算)"""
         g = self.groups.get(nick)
         if g is None:
             return False
@@ -1190,8 +1205,7 @@ class ApiTab(QWidget):
             return bool(self.archived.get(nick))
         if all(self._sent(i) for i in rows):
             return True
-        sent = getattr(self, "today_sent", None) or {}
-        return plan.left_today(self.rec, self.st, nick, sent=sent) == 0
+        return self._is_today() and self._full_today(nick)
 
     def _reorder(self):
         """发完的号沉到下面、收起来、名字后面写「发完了」(用户 2026-10-23:abcde 里 abd 发完了 → c e a b d)。
@@ -1321,7 +1335,8 @@ class ApiTab(QWidget):
         unsure = sum(1 for i in rows if self.state.get(i, "") == "结果不明")
         ok = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
         pk = "(手选文件夹)" if nick in self.picked(self.day()) else ""
-        g.setText(0, f"{nick}  {n} 条{pk}" + (" · 发完了" if self._done(nick) else ""))
+        g.setText(0, f"{nick}  {n} 条{pk}" + (" · 发完了" if self._done(nick) else
+                                               " · 今天发够了" if not self._is_today() and self._full_today(nick) else ""))
         g.setText(1, "")
         parts = []
         if not checked:

@@ -3746,6 +3746,43 @@ def test_api_dups(tmp: Path):
     check(tab._can_send(dup_i) and dup_i not in tab._dups, "让员工改个名:就能发了")
 
 
+def test_view_tomorrow(tmp: Path):
+    print("[切到明天的文件夹准备定时(用户 2026-10-24):今天发够了的号不算「发完了」,大字提示定到明天]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, plan
+    from qe import folders as F
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    import gui.api_tab as T
+    tmr = plan.tomorrow_folder()
+    root = tmp / "vt" / "游戏视频"
+    (root / "CSGO--CSGO战神君" / tmr).mkdir(parents=True)
+    for k in range(3):
+        (root / "CSGO--CSGO战神君" / tmr / f"明天{k}.mp4").write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_vt.json")
+    st["api_roots"] = [str(root)]
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 2}}]
+    rec = Records(tmp / "r_vt.sqlite")
+    for k in range(2):
+        rec.api_result(F.Video(path=str(tmp / f"今天{k}.mp4"), title=f"今天{k}", account="CSGO战神君", employee="",
+                               date=f"{bj_now().month}.{bj_now().day}"), "已发")
+    tab = T.ApiTab(st, rec, lambda m: None)
+    tab.set_day(tmr)
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 3)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920, tags=[], platform=[])
+    tab._update_sum()
+    tab._update_scope()
+    g = tab.groups["CSGO战神君"]
+    tab._fill_group("CSGO战神君")
+    check(not tab._done("CSGO战神君") and g.text(0).endswith("今天发够了") and "发完了" not in g.text(0),
+          f"看明天的文件夹:今天发够了的号不算发完、不沉底,写「今天发够了」-> {g.text(0)}")
+    check(tab.hero.big.text() == "今天都发够了 √" and "定到明天" in tab.hero.sub.text() and tab.b_pub.text() == "今天都发够了",
+          f"大字说今天都发够了,提示「到点自动发…」定到明天 -> {tab.hero.big.text()} / {tab.hero.sub.text()} / {tab.b_pub.text()}")
+
+
 def test_black_border(tmp: Path):
     print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
     from PIL import Image, ImageDraw
@@ -4527,6 +4564,7 @@ if __name__ == "__main__":
     test_verify(tmp)
     test_unsend(tmp)
     test_api_dups(tmp)
+    test_view_tomorrow(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)
