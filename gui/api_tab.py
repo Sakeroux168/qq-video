@@ -577,6 +577,12 @@ class ApiTab(QWidget):
         full = sorted({v.account for v in self.videos if plan.left_today(self.rec, self.st, v.account, sent=sent) == 0})
         return sum(self._spill(n, only_day=today_md) for n in full) > 0
 
+    def verify_one(self, nick: str):
+        """去企鹅号核对这一个号今天的(只读);没发上的能拎回来重发。"""
+        from gui.verify_dialog import VerifyDialog
+        VerifyDialog(self.rec, plan.today(), self, nicks=[nick]).exec()
+        self.load()
+
     def add_extra_today(self, nick: str, n: int | None = None) -> int:
         """今天临时多发几条(用户 2026-10-23):今天这个号上限加 n(明天照旧);发够以后挪到明天文件夹里的,挪 n 条回今天的文件夹。
         返回挪回来几条。n 不给就问。"""
@@ -1574,6 +1580,7 @@ class ApiTab(QWidget):
                 mt.addAction(f"批量替换标题里的字(选中 {n_s} 条)…", lambda: self.replace_titles(sel)).setEnabled(not busy)
             ma = m.addMenu(f"「{nick}」这个号")
             ma.addAction(f"只检查「{nick}」的 {len(mine)} 条", lambda: self.run_check(mine)).setEnabled(not busy)
+            ma.addAction(f"去企鹅号核对「{nick}」今天发了几条…", lambda: self.verify_one(nick))
             ma.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick)).setEnabled(not busy)
             if nick in self.picked(self.day()):
                 ma.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick)).setEnabled(not busy)

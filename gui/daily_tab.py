@@ -66,8 +66,8 @@ class DailyTab(QWidget):
         top.addWidget(b)
         b = QPushButton("去企鹅号核对")
         b.setToolTip("16 个号:去企鹅号读一下这天每个号真发了几条,和软件记的对一对(只读,不发不删)。\n"
-                     "软件记成已发、企鹅号上其实没有的,能「拎回来重发」。教育号查不了。")
-        b.clicked.connect(self.verify)
+                     "软件记成已发、企鹅号上其实没有的,能「拎回来重发」。教育号查不了。\n只查一个号:表里右键那个号「去企鹅号核对…」")
+        b.clicked.connect(lambda: self.verify())
         top.addWidget(b)
         v.addLayout(top)
 
@@ -124,6 +124,9 @@ class DailyTab(QWidget):
         m = QMenu(self)
         nick = self.t.item(r, 1).text()
         m.addAction(f"改「{nick}」每天规定几条…", lambda: self.edit_quota(r))
+        from qe import apiacc
+        if nick in apiacc.nicks():
+            m.addAction(f"去企鹅号核对「{nick}」这天发了几条", lambda: self.verify([nick]))
         w = self.window()
         if hasattr(w, "add_extra") and self.day() == plan.today():
             m.addAction(f"「{nick}」今天临时多发几条…(只管今天)", lambda: (w.add_extra(nick), self.refresh()))
@@ -153,9 +156,10 @@ class DailyTab(QWidget):
             except Exception:
                 pass
 
-    def verify(self):
+    def verify(self, nicks: list[str] | None = None):
+        """去企鹅号核对:不给号 = 16 个号全查;给了 = 只查这几个(右键一个号)。"""
         from gui.verify_dialog import VerifyDialog
-        VerifyDialog(self.rec, self.day(), self).exec()
+        VerifyDialog(self.rec, self.day(), self, nicks=nicks or None).exec()
         self.refresh()
 
     def _today(self):

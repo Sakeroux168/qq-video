@@ -3646,6 +3646,16 @@ def test_verify(tmp: Path):
         dlg.pull_back()
         check((src / "G镇大写.mp4").is_file() and "拎回来 1 条" in dlg.lab_done.text(),
               f"点「拎回来重发」:挪回原文件夹,文件名大小写不变 -> {sorted(os.listdir(src))}")
+        # 只查指定的号(右键一个号「去企鹅号核对…」)
+        apiacc.save([{"nick": n, "source_name": n, "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}
+                     for n in ("CSGO战神君", "PUBG突围君", "DNF连招档案馆")])
+        dlg2 = VerifyDialog(rec, day, nicks=["PUBG突围君"])
+        _wait(app, lambda: not dlg2.w.isRunning(), 20)
+        app.processEvents()
+        check(dlg2.t.rowCount() == 1 and dlg2.t.item(0, 0).text() == "PUBG突围君" and "PUBG突围君" in dlg2.windowTitle(),
+              f"指定一个号核对:只查这一个 -> {[dlg2.t.item(k, 0).text() for k in range(dlg2.t.rowCount())]}")
+        dlg3 = VerifyDialog(rec, day, nicks=["家长小天地"])
+        check(dlg3.w is None and "教育号" in dlg3.lab_done.text(), "教育号指定核对:说清楚查不了")
     finally:
         omapi.Client = real
 

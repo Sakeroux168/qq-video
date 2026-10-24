@@ -34,10 +34,11 @@ class VerifyWorker(QThread):
 
 
 class VerifyDialog(QDialog):
-    def __init__(self, rec, day: str, parent=None):
+    def __init__(self, rec, day: str, parent=None, nicks: list[str] | None = None):
+        """nicks = 只查这几个号(用户 2026-10-23「再加一个指定某某号核对」);不给 = 16 个号全查。"""
         super().__init__(parent)
         self.rec, self.day = rec, day
-        self.setWindowTitle(f"去企鹅号核对 · {day}")
+        self.setWindowTitle(f"去企鹅号核对 · {day}" + (f" · {'、'.join(nicks)}" if nicks else ""))
         self.resize(820, 620)
         v = QVBoxLayout(self)
         self.lab = QLabel("只是去企鹅号读一下,不发、不删。教育号走创作罐头,查不了。")
@@ -71,8 +72,10 @@ class VerifyDialog(QDialog):
         v.addLayout(h)
         self.rows, self.extra = [], []
         accs = [a for a in apiacc.load() if a.get("enabled", True) and a.get("client_id")]
+        if nicks:
+            accs = [a for a in accs if a.get("nick") in nicks]
         if not accs:
-            self.lab_done.setText("还没有 16 个号的账号(去设置里搬账号)")
+            self.lab_done.setText("这个号不是 16 个号里的(教育号走创作罐头,查不了)" if nicks else "还没有 16 个号的账号(去设置里搬账号)")
             self.w = None
             return
         self.w = VerifyWorker(rec, day, accs, self)
