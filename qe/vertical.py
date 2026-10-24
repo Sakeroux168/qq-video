@@ -1,7 +1,6 @@
-"""横屏视频 → 竖屏(1080×1920):上下用同一段视频糊一下当底,中间放原画面。
+"""横屏视频 → 竖屏(1080×1920):原画面缩到 1080 宽放中间,上下补纯黑(用户 2026-10-24 从糊底改成黑边)。
 
 快的办法(2026-10-15 在这台电脑上试过:53 秒 1080p 一条 8.7 秒,3 条一起 19 秒):
-- 糊底先缩到 270×480 再糊再放大(在大图上糊很慢);缩放都用 fast_bilinear;
 - 用显卡编码 h264_nvenc,声音直接拷不重编;显卡不行就退回 libx264 veryfast。
 - 用百家号发布助手2 带的 ffmpeg 4.2.2(ainame 带的 ffmpeg 8 要新显卡驱动,这台用不了)。
 
@@ -16,10 +15,9 @@ import uuid
 from pathlib import Path
 
 ORIG_DIR = "横屏原片"
-FILTER = ("[0:v]split=2[a][b];"
-          "[a]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,"
-          "boxblur=10:2,scale=1080:1920:flags=fast_bilinear,setsar=1[bg];"
-          "[b]scale=1080:-2:flags=fast_bilinear[fg];[bg][fg]overlay=0:(H-h)/2")
+# 用户 2026-10-24:「改成竖屏时原本横屏的视频头和脚会模糊,改成黑边」→ 原画面缩到 1080 宽放中间,上下补纯黑
+FILTER = ("[0:v]scale=1080:-2:flags=bicubic,"
+          "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
 _NOWIN = 0x08000000 if os.name == "nt" else 0
 
 
@@ -63,7 +61,7 @@ def is_landscape(info: dict) -> bool:
 
 
 # 标准竖屏 9:16 = 0.5625;宽 / 高超过 0.6 就算「不够竖」(3:4 = 0.75、正方形 = 1),
-# 用户 2026-10-15:「偏正方形的视频 尽量处理成标准竖屏」—— 和横屏一样一键转成 1080×1920(上下糊底,中间原画面)。
+# 用户 2026-10-15:「偏正方形的视频 尽量处理成标准竖屏」—— 和横屏一样一键转成 1080×1920(上下黑边,中间原画面)。
 VERTICAL_MAX = 0.6
 
 

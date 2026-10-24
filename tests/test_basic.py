@@ -3798,6 +3798,33 @@ def test_view_tomorrow(tmp: Path):
     check(tab._quota_sub() == f"{tmr}还差 2 条", f"还差几条按这天算 -> {tab._quota_sub()}")
 
 
+def test_cover_move_keep(tmp: Path):
+    print("[封面:「图片修改需求 (16).png」也认;挪了文件夹 / 去了黑边,调好的框还在(用户 2026-10-24)]")
+    from PIL import Image
+    from qe import folders as F
+    from qe.adjust import Adjustments
+    d = tmp / "cmk" / "10.25" / "研习社"
+    sub = d / "家有儿童手表的注意啦，防止被骗要当心"
+    sub.mkdir(parents=True)
+    (d / "家有儿童手表的注意啦，防止被骗要当心.mp4").write_bytes(b"x")
+    (d / "家有儿童手表的注意啦，防止被骗要当心.jpg").write_bytes(b"j")
+    Image.new("RGB", (1280, 720), (100, 120, 140)).save(sub / "图片修改需求 (16).png")
+    vs = F.scan_account(str(tmp / "cmk" / "10.25" / "研习社"), "家长研习空间", "10.25")
+    check(vs and vs[0].png.endswith("图片修改需求 (16).png"), f"封面文件夹里只有「图片修改需求 (16).png」:认成无字封面 -> {[v.png for v in vs]}")
+    adj = Adjustments(tmp / "adj_cmk.json")
+    old_v, old_c = r"X:\素材\25\研习社\a.mp4", r"X:\素材\25\研习社\a\横屏16x9.png"
+    adj.set_box(old_v, old_c, "0.750", 0.3, 0.4)
+    adj.set_ok(old_v, old_c)
+    new_v, new_c = r"X:\素材\10.25\研习社\a.mp4", r"X:\素材\10.25\研习社\a\横屏16x9.png"
+    check(adj.manual(new_v, new_c, "a") == {"0.750": [0.3, 0.4]} and adj.is_ok(new_v, new_c, "a"),
+          "视频从 25 挪到 10.25:调好的框、「这张没问题」都还在(按标题 + 封面图名字找回来)")
+    cache = r"C:\数据\去黑边的封面\横屏16x9_0123456789_1792837650_12345.png"
+    check(adj.manual(new_v, cache, "a") == {"0.750": [0.3, 0.4]}, "去了黑边(封面换成副本路径):框也还在")
+    adj.set_box(new_v, new_c, "0.562", 0.5, 0.5, title="a")
+    check(adj.manual(new_v, new_c, "a") == {"0.750": [0.3, 0.4], "0.562": [0.5, 0.5]}, "在新位置再调一个比例:原来调过的比例不丢")
+    check(adj.manual(r"X:\素材\10.25\研习社\b.mp4", r"X:\素材\10.25\研习社\b\横屏16x9.png", "b") == {}, "别的标题不会串")
+
+
 def test_black_border(tmp: Path):
     print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
     from PIL import Image, ImageDraw
@@ -4580,6 +4607,7 @@ if __name__ == "__main__":
     test_unsend(tmp)
     test_api_dups(tmp)
     test_view_tomorrow(tmp)
+    test_cover_move_keep(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

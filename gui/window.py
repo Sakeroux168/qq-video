@@ -118,7 +118,7 @@ class BlurWorker(QThread):
 
 class VertWorker(QThread):
     """后台转标准竖屏(教育号页,用户 2026-10-23「教育类也搞一个处理的,要把横屏变成竖屏」):
-    一条条看是不是横屏 / 偏方(3:4、正方形),是就转成 1080×1920(上下糊底、中间原画面),原片删掉(和 16 个号一样)。
+    一条条看是不是横屏 / 偏方(3:4、正方形),是就转成 1080×1920(上下黑边、中间原画面),原片删掉(和 16 个号一样)。
     one(行, 结果):"" = 本来就是竖的;"转好了 1920×1080" / "失败:…"。"""
     one = Signal(int, str)
 
@@ -399,7 +399,7 @@ class MainWindow(QMainWindow):
         self.b_move.setObjectName("link")
         self.b_move.clicked.connect(self.move_day)
         self.b_vert = QPushButton("转标准竖屏")
-        self.b_vert.setToolTip("勾上的员工的视频里,横屏 / 偏方(3:4、正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n"
+        self.b_vert.setToolTip("勾上的员工的视频里,横屏 / 偏方(3:4、正方形)的转成标准竖屏 1080×1920:上下黑边、中间原画面。\n"
                                "先一条条看是不是横的,竖的不动;转好以后原来的横屏视频删掉(和 16 个号一样)。封面不动。")
         self.b_vert.clicked.connect(self.run_vertical)
         self.vert_worker = None
@@ -1116,7 +1116,7 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(self, "转标准竖屏", "先在左边勾上要处理的员工(发过的不转)。")
             return
-        if not self._ask("转标准竖屏", f"勾上的 {len(rows)} 条里,横屏 / 偏方的转成标准竖屏 1080×1920(上下糊底、中间原画面)?\n\n"
+        if not self._ask("转标准竖屏", f"勾上的 {len(rows)} 条里,横屏 / 偏方的转成标准竖屏 1080×1920(上下黑边、中间原画面)?\n\n"
                          "先一条条看是不是横的,竖的不动;转好以后原来的横屏视频删掉。一条一两分钟,3 条一起转。",
                          "转", "先不"):
             return
@@ -1815,7 +1815,7 @@ class MainWindow(QMainWindow):
     def _mark_covers_ok(self, vs):
         """这几条标黄的封面记成「人看过了」:不再标黄,自动发布 / 定时发布不会再为它们停下来。"""
         for v in vs:
-            self.adj.set_ok(v.path, v.cover)
+            self.adj.set_ok(v.path, v.cover, title=v.title)
             v.warn = False
             if "人看过" not in v.cover_why:
                 v.cover_why += "(人看过了)"

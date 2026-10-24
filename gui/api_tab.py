@@ -270,7 +270,7 @@ class ApiTab(QWidget):
         self.b_check.add("查口播广告", lambda: self.run_ads(),
                          "把视频里说的话转成文字,找「点击下方链接」「扫码」「得物」这类广告词,标出第几秒。转过的不再转")
         self.b_vert = QPushButton("转标准竖屏")
-        self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n转好以后原来的横屏视频直接删掉(转失败的不动)。")
+        self.b_vert.setToolTip("横屏、偏方(3:4 / 正方形)的转成标准竖屏 1080×1920:上下黑边、中间原画面。\n转好以后原来的横屏视频直接删掉(转失败的不动)。")
         self.b_vert.clicked.connect(lambda: self.run_vertical())
         self.b_blur = MenuButton("去水印 / 广告")
         self.b_blur.setToolTip("查到的水印糊掉、查到的口播广告剪掉。原片都留着(「水印原片」「广告原片」),不删。")

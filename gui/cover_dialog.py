@@ -488,7 +488,7 @@ class CoverDialog(QDialog):
         _tag, r = C.RATIOS[self.ratio_i]
         v = self.v
         vert = pm is self._vpm
-        self.adj.set_box(v.path, v.vcover if vert else v.cover, C.rkey(r), cx, cy)
+        self.adj.set_box(v.path, v.vcover if vert else v.cover, C.rkey(r), cx, cy, title=v.title)
         key = "vplan" if vert else "plan"
         man = dict((getattr(v, key) or {}).get("manual", {}))
         man[C.rkey(r)] = [cx, cy]
@@ -502,7 +502,7 @@ class CoverDialog(QDialog):
 
     def toggle_ai(self, on: bool):
         v = self.v
-        self.adj.set_ai235(v.path, bool(on))
+        self.adj.set_ai235(v.path, bool(on), title=v.title)
         self.adj.apply(v)
         C.note_wide(v)
         self._wide = None
@@ -532,7 +532,7 @@ class CoverDialog(QDialog):
         v = self.v
         if not v.cover:
             return
-        self.adj.set_ok(v.path, v.cover)
+        self.adj.set_ok(v.path, v.cover, title=v.title)
         v.warn = False
         if "人看过" not in v.cover_why:
             v.cover_why += "(人看过了)"

@@ -243,7 +243,7 @@ class QuickReview(QDialog):
     def _ok(self, k: int):
         v = self.vs[k]
         if v.warn:
-            self.adj.set_ok(v.path, v.cover)
+            self.adj.set_ok(v.path, v.cover, title=v.title)
             v.warn = False
             if "人看过" not in v.cover_why:
                 v.cover_why += "(人看过了)"

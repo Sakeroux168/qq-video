@@ -165,9 +165,10 @@ def covers_from_dir(d: str) -> tuple[str, str]:
                 t = os.path.getmtime(os.path.join(d, f))
             except OSError:
                 t = 0
-            return t, f.startswith("修改"), f
+            return t, f.startswith(("修改", "图片修改")), f
         return max(fs, key=key) if fs else ""
-    fix = [f for f in imgs if f.startswith("修改")]
+    # 「修改 (1).png」「图片修改需求 (16).png」都是改过的无字版(用户 2026-10-24:后一种原来不认,封面就丢了)
+    fix = [f for f in imgs if f.startswith(("修改", "图片修改"))]
     fix_h = [f for f in fix if _landscape(os.path.join(d, f))]
     hs = [f for f in imgs if f.startswith("横屏")] + fix_h
     vs = [f for f in imgs if f.startswith("竖屏")] + [f for f in fix if f not in fix_h]
@@ -289,7 +290,7 @@ def _emp_of(parts: list[str], stem: str) -> str:
 
 
 # 封面工具出的文件:横屏16x9.png、横屏16x9 (2).png、竖屏9x16.png、横屏.png、修改 (1).png、原图.png、_thumb.jpg
-_TOOL_FILE = re.compile(r"^(横屏|竖屏|修改|原图)\s*(\d+\s*[x×X:：]\s*\d+)?\s*([(（]\s*\d+\s*[)）])?$|^_thumb$")
+_TOOL_FILE = re.compile(r"^(横屏|竖屏|修改|原图|图片修改需求|图片修改)\s*(\d+\s*[x×X:：]\s*\d+)?\s*([(（]\s*\d+\s*[)）])?$|^_thumb$")
 
 
 def _is_tool_dir(files: list[str]) -> bool:
@@ -359,7 +360,7 @@ def scan_account(acc_dir: str, account: str, date: str, report: list | None = No
                 continue
             if e in VIDEO_EXTS:
                 vids.append((os.path.join(cur, f), _emp_of(parts, stem)))
-            elif e in IMG_EXTS and not _TOOL_FILE.match(stem) and not (tool and stem.startswith(("原图", "_thumb", "横屏", "竖屏", "修改"))):
+            elif e in IMG_EXTS and not _TOOL_FILE.match(stem) and not (tool and stem.startswith(("原图", "_thumb", "横屏", "竖屏", "修改", "图片修改"))):
                 imgs.setdefault(norm_name(stem), []).append((os.path.join(cur, f), _emp_of(parts, stem), stem))
 
     crowd: dict[str, int] = {}                       # 这个号里 norm 后同名的视频有几条
