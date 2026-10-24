@@ -909,7 +909,7 @@ class ApiTreeDelegate(QStyledItemDelegate):
         if top and col == 0:
             nick = str(index.data(self.NICK) or text.split("  ")[0])
             rest = text[len(nick):].strip()
-            grey = "没找到视频" in rest
+            grey = "没找到视频" in rest or "发完了" in rest
             draw_avatar(painter, r.left() + 2, cy, nick, 28, grey)
             x = r.left() + 40
             wn = draw_text(painter, QRectF(x, r.top(), r.right() - x, r.height()), nick, t["dim"] if grey else t["tx"], 14, True)

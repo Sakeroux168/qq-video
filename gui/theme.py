@@ -142,6 +142,7 @@ QPushButton#pill:disabled {{ color:{t['dim']}; }}
 QPushButton#link, QPushButton#toggle {{ border:none; background:transparent; color:{t['acc']}; padding:4px 8px; }}
 QPushButton#link:hover, QPushButton#toggle:hover {{ color:{t['acc_h']}; background:transparent; }}
 QPushButton#toggle {{ font-weight:bold; }}
+QPushButton#toggle:checked {{ background:{t['acc_bg']}; border-radius:10px; }}
 QPushButton#nextBtn {{ text-align:left; background:transparent; border:none; border-radius:10px; padding:8px; }}
 QPushButton#nextBtn:hover {{ background:{t['soft']}; }}
 

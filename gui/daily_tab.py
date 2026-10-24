@@ -117,7 +117,11 @@ class DailyTab(QWidget):
         if r < 0:
             return
         m = QMenu(self)
-        m.addAction(f"改「{self.t.item(r, 1).text()}」每天规定几条…", lambda: self.edit_quota(r))
+        nick = self.t.item(r, 1).text()
+        m.addAction(f"改「{nick}」每天规定几条…", lambda: self.edit_quota(r))
+        w = self.window()
+        if hasattr(w, "add_extra") and self.day() == plan.today():
+            m.addAction(f"「{nick}」今天临时多发几条…(只管今天)", lambda: (w.add_extra(nick), self.refresh()))
         m.exec(self.t.viewport().mapToGlobal(pos))
 
     def edit_quota(self, row: int):

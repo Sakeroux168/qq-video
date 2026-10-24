@@ -3466,6 +3466,110 @@ def test_edit_quota(tmp: Path):
     check(plan.left_today(Records(tmp / "r_eq.sqlite"), st2, "DNF连招档案馆") == 30, "发够就停的闸也按新数算")
 
 
+def test_extra_vert_order(tmp: Path):
+    print("[今天临时多发 / 教育号转标准竖屏 / 发完的号沉底(用户 2026-10-23)]")
+    import datetime
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, plan, vertical
+    from qe import folders as F
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    import gui.api_tab as T
+    import gui.window as GW
+    today_md = f"{bj_now().month}.{bj_now().day}"
+    tmr = plan.tomorrow_folder()
+    # ---- 今天临时多发:上限加 N(只管今天),明天文件夹里挪 N 条回来 ----
+    root = tmp / "ev" / "游戏视频"
+    for nick in ("CSGO战神君", "PUBG突围君", "DNF连招档案馆"):
+        g = nick[:4]
+        (root / f"{g}--{nick}" / today_md).mkdir(parents=True, exist_ok=True)
+        for k in range(2):
+            (root / f"{g}--{nick}" / today_md / f"{nick}{k}.mp4").write_bytes(b"x")
+    (root / "CSGO--CSGO战神君" / tmr).mkdir(parents=True, exist_ok=True)
+    for k in range(3):
+        (root / "CSGO--CSGO战神君" / tmr / f"明天{k}.mp4").write_bytes(b"x")
+        (root / "CSGO--CSGO战神君" / tmr / f"明天{k}.jpg").write_bytes(b"j")
+    apiacc.save([{"nick": n, "source_name": n[:4], "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}
+                 for n in ("CSGO战神君", "PUBG突围君", "DNF连招档案馆")])
+    st = Settings(tmp / "st_ev.json")
+    st["api_roots"] = [str(root)]
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 2, "PUBG突围君": 5, "DNF连招档案馆": 5}},
+                        {"cat": "教育", "label": "教育总发布量", "accounts": {"家长小天地": 3}}]
+    rec = Records(tmp / "r_ev.sqlite")
+    for k in range(2):
+        rec.api_result(F.Video(path=str(tmp / f"sent{k}.mp4"), title=f"s{k}", account="CSGO战神君", employee="", date=today_md), "已发")
+    check(plan.left_today(rec, st, "CSGO战神君") == 0, "CSGO战神君 今天规定 2 条,发够了")
+    tab = T.ApiTab(st, rec, lambda m: None)
+    _wait(app, lambda: not tab.busy() and tab.videos)
+    moved = tab.add_extra_today("CSGO战神君", 2)
+    _wait(app, lambda: not tab.busy())
+    here = sorted(os.listdir(root / "CSGO--CSGO战神君" / today_md))
+    left_tmr = sorted(os.listdir(root / "CSGO--CSGO战神君" / tmr))
+    # 打开页面时 CSGO 已经发够了:今天那 2 条先被挪到了明天;临时多发 2 条 → 挪回来的就是它俩(排在最前面)
+    check(moved == 2 and plan.left_today(rec, st, "CSGO战神君") == 2 and here == ["CSGO战神君0.mp4", "CSGO战神君1.mp4"]
+          and left_tmr == ["明天0.jpg", "明天0.mp4", "明天1.jpg", "明天1.mp4", "明天2.jpg", "明天2.mp4"],
+          f"今天临时多发 2 条:今天还能发 2 条,明天文件夹挪回 2 条 -> 今天 {here} / 明天 {left_tmr}")
+    tab.add_extra_today("CSGO战神君", 1)
+    _wait(app, lambda: not tab.busy())
+    here = sorted(os.listdir(root / "CSGO--CSGO战神君" / today_md))
+    check("明天0.mp4" in here and "明天0.jpg" in here and plan.quota_on(st, "CSGO战神君") == 5,
+          f"再多发 1 条:累加,封面跟着挪回来 -> {here}")
+    y = (bj_now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    check(plan.quota_on(st, "CSGO战神君") == 5 and plan.quota_on(st, "CSGO战神君", y) == 2, "只管今天,明天还是原来的条数")
+    s = plan.summary(rec, st, plan.today())
+    check(("游戏", "CSGO战神君", 5, 2) in s["accounts"], f"每日汇总按 2+2 算 -> {s['accounts']}")
+    # ---- 发完的号沉底 ----
+    order = [tab.tree.topLevelItem(k).data(0, T.NICK) for k in range(tab.tree.topLevelItemCount())]
+    pubg = [i for i, v in enumerate(tab.videos) if v.account == "PUBG突围君"]
+    for i in pubg:
+        tab.state[i] = "已发"
+    tab._reorder()
+    order2 = [tab.tree.topLevelItem(k).data(0, T.NICK) for k in range(tab.tree.topLevelItemCount())]
+    check(order2[-1] == "PUBG突围君" and tab.groups["PUBG突围君"].text(0).endswith("· 发完了")
+          and not tab.groups["PUBG突围君"].isExpanded(), f"发完的号沉到最下面、收起、写「发完了」-> {order} → {order2}")
+    tab.k_undone.setChecked(True)
+    check(all(tab.items[i].isHidden() for i in pubg) and not tab.groups["CSGO战神君"].isHidden(), "「只看没发完的号」:发完的藏起来")
+    tab.k_undone.setChecked(False)
+    # ---- 教育号:今天临时多发,从明天的文件夹挪回来(文件夹结构不变)----
+    mat = tmp / "ev_mat"
+    (mat / today_md / "小天地" / "51").mkdir(parents=True, exist_ok=True)
+    (mat / today_md / "小天地" / "51" / "今天的.mp4").write_bytes(b"x")
+    (mat / tmr / "小天地" / "51").mkdir(parents=True, exist_ok=True)
+    (mat / tmr / "小天地" / "51" / "明天的.mp4").write_bytes(b"x")
+    (mat / tmr / "小天地" / "51" / "明天的.png").write_bytes(b"p")
+    st["material_root"] = str(mat)
+    st["splash"] = False
+    w = GW.MainWindow(st, rec)
+    w.add_extra("家长小天地", 1)
+    got = sorted(os.listdir(mat / today_md / "小天地" / "51"))
+    check("明天的.mp4" in got and "明天的.png" in got and plan.quota_on(st, "家长小天地") == 1 + plan.quota_of(st, "家长小天地"),
+          f"教育号今天临时多发 1 条:明天的那条连封面挪回今天(结构不变)-> {got}")
+    # ---- 教育号转标准竖屏 ----
+    ff = vertical.ffmpeg_path()
+    if ff:
+        import subprocess
+        vd = tmp / "ev_vert"
+        vd.mkdir(exist_ok=True)
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25", "-t", "1",
+                        "-c:v", "libx264", str(vd / "横的.mp4")], check=True)
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=360x640:rate=25", "-t", "1",
+                        "-c:v", "libx264", str(vd / "竖的.mp4")], check=True)
+        vids = [F.Video(path=str(vd / "横的.mp4"), title="横的", account="家长小天地", employee="51", date=today_md),
+                F.Video(path=str(vd / "竖的.mp4"), title="竖的", account="家长小天地", employee="51", date=today_md)]
+        res = {}
+        wk = GW.VertWorker(vids, [0, 1])
+        wk.one.connect(lambda i, r: res.__setitem__(i, r))
+        wk.run()
+        app.processEvents()
+        info0, info1 = vertical.probe(vids[0].path, ff), vertical.probe(vids[1].path, ff)
+        check(res.get(0, "").startswith("转好了") and (info0["w"], info0["h"]) == (1080, 1920) and res.get(1) == ""
+              and (info1["w"], info1["h"]) == (360, 640) and sorted(os.listdir(vd)) == ["横的.mp4", "竖的.mp4"],
+              f"教育号转标准竖屏:横的转成 1080×1920(原片不留),竖的不动 -> {res} {info0} {sorted(os.listdir(vd))}")
+    else:
+        check(True, "(没有 ffmpeg,转竖屏那段跳过)")
+
+
 def test_black_border(tmp: Path):
     print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
     from PIL import Image, ImageDraw
@@ -4229,6 +4333,7 @@ if __name__ == "__main__":
     test_clean_dirs(tmp)
     test_black_border(tmp)
     test_edit_quota(tmp)
+    test_extra_vert_order(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

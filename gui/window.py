@@ -116,6 +116,45 @@ class BlurWorker(QThread):
             list(ex.map(one, self.rows))
 
 
+class VertWorker(QThread):
+    """后台转标准竖屏(教育号页,用户 2026-10-23「教育类也搞一个处理的,要把横屏变成竖屏」):
+    一条条看是不是横屏 / 偏方(3:4、正方形),是就转成 1080×1920(上下糊底、中间原画面),原片删掉(和 16 个号一样)。
+    one(行, 结果):"" = 本来就是竖的;"转好了 1920×1080" / "失败:…"。"""
+    one = Signal(int, str)
+
+    def __init__(self, videos, rows, parent=None):
+        super().__init__(parent)
+        self.videos, self.rows = videos, rows
+        self.stop = False
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from qe import vertical
+        ff = vertical.ffmpeg_path()
+
+        def one(i):
+            if self.stop:
+                return
+            v = self.videos[i]
+            try:
+                info = vertical.probe(v.path, ff)
+            except Exception as e:
+                self.one.emit(i, f"失败:读不出视频({type(e).__name__})")
+                return
+            if not (vertical.is_landscape(info) or vertical.is_squarish(info)):
+                self.one.emit(i, "")
+                return
+            try:
+                new, _orig = vertical.to_vertical(v.path, ff, stop=lambda: self.stop, keep_orig=False)
+            except Exception as e:
+                self.one.emit(i, f"失败:{e}")
+                return
+            v.path = new
+            self.one.emit(i, f"转好了(原来 {info.get('w', '?')}×{info.get('h', '?')})")
+        with ThreadPoolExecutor(3) as ex:                 # 3 条一起转最快(16 个号那边试过)
+            list(ex.map(one, self.rows))
+
+
 WAIT_NOTE = "上传中(这批一起传,传完再一条条弄封面)"
 READY = "摆好等发布"          # 记录里的「摆好」:在罐头里摆好了,还没点发布(审查 17:原来「摆好没发 / 没发 / 还没发」三个词混着用)
 PICK_DAY = "先在左上角「要发哪天的」里选一天"       # 审查 13:刚打开是空白,不知道先干什么
@@ -359,6 +398,11 @@ class MainWindow(QMainWindow):
         self.b_move = QPushButton("这天发完,挪走…")
         self.b_move.setObjectName("link")
         self.b_move.clicked.connect(self.move_day)
+        self.b_vert = QPushButton("转标准竖屏")
+        self.b_vert.setToolTip("勾上的员工的视频里,横屏 / 偏方(3:4、正方形)的转成标准竖屏 1080×1920:上下糊底、中间原画面。\n"
+                               "先一条条看是不是横的,竖的不动;转好以后原来的横屏视频删掉(和 16 个号一样)。封面不动。")
+        self.b_vert.clicked.connect(self.run_vertical)
+        self.vert_worker = None
         self.b_wm = QPushButton("查水印")
         self.b_wm.setToolTip("勾上的员工的视频,查一遍有没有别的平台的水印 / 广告图标(B站、抖音、快手、得物、转转 …)。\n"
                              "查到的标黄、不摆;鼠标放在状态上看截图,不是水印就右键「没水印,能摆」。查过的记着,不再查。")
@@ -407,7 +451,7 @@ class MainWindow(QMainWindow):
         tools = QHBoxLayout()
         tools.setSpacing(8)
         tools.addWidget(self.lab_scope, 1)
-        for b in (self.b_wm, self.b_blur, self.b_review, self.b_allok):
+        for b in (self.b_vert, self.b_wm, self.b_blur, self.b_review, self.b_allok):
             tools.addWidget(b)
             if b is self.b_review:
                 tools.addWidget(help_dot("标黄"))
@@ -1057,6 +1101,50 @@ class MainWindow(QMainWindow):
         n = sum(1 for v in self.videos if wmstore.blocks(v.wm))
         self.say(f"查水印完了:{n} 条有水印(标黄,不摆;鼠标放在状态上看截图,不是水印就右键「没水印,能摆」)" if n else "查水印完了:没查到水印")
 
+    def run_vertical(self):
+        """教育号:勾上的里横屏 / 偏方的转成标准竖屏(用户 2026-10-23,和 16 个号一样;原片删掉)。"""
+        busy = [w for w in (self.wm_worker, self.blur_worker, self.vert_worker, self.worker) if w and w.isRunning()]
+        if busy:
+            QMessageBox.information(self, "转标准竖屏", "还在查水印 / 摆 / 糊 / 转,等它做完。")
+            return
+        rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path) and os.path.isfile(v.path)
+                and not self.row_note.get(v.path, "")]
+        if not rows:
+            QMessageBox.information(self, "转标准竖屏", "先在左边勾上要处理的员工(发过的不转)。")
+            return
+        if not self._ask("转标准竖屏", f"勾上的 {len(rows)} 条里,横屏 / 偏方的转成标准竖屏 1080×1920(上下糊底、中间原画面)?\n\n"
+                         "先一条条看是不是横的,竖的不动;转好以后原来的横屏视频删掉。一条一两分钟,3 条一起转。",
+                         "转", "先不"):
+            return
+        self.vert_worker = VertWorker(self.videos, rows, self)
+        self._vert = {"left": len(rows), "done": 0, "fail": 0}
+        self.vert_worker.one.connect(self._vert_one)
+        self.vert_worker.finished.connect(self._vert_end)
+        self.b_vert.setEnabled(False)
+        self.say(f"转标准竖屏:先看 {len(rows)} 条里哪些是横的(3 条一起转)")
+        self.vert_worker.start()
+
+    def _vert_one(self, i: int, res: str):
+        self._vert["left"] -= 1
+        self.b_vert.setText(f"转竖屏中(还剩 {self._vert['left']})")
+        if not res:
+            return
+        v = self.videos[i]
+        if res.startswith("失败"):
+            self._vert["fail"] += 1
+            self.say(f"「{v.title}」转竖屏{res}")
+        else:
+            self._vert["done"] += 1
+            self.say(f"「{v.title}」{res.replace('转好了', '转成竖屏了')}")
+        self._fill_row(i)
+
+    def _vert_end(self):
+        self.b_vert.setText("转标准竖屏")
+        self.b_vert.setEnabled(True)
+        s = getattr(self, "_vert", {})
+        self.say(f"转标准竖屏做完了:转了 {s.get('done', 0)} 条" + (f",{s.get('fail')} 条没转成" if s.get("fail") else "") +
+                 (";都是竖的,不用转" if not s.get("done") and not s.get("fail") else ""))
+
     def run_blur(self):
         """把查到水印、还没处理的糊掉。"""
         from qe import blur, wmstore
@@ -1120,7 +1208,56 @@ class MainWindow(QMainWindow):
         self.tree.setCurrentItem(it)
         m = QMenu(self)
         m.addAction("打开这个文件夹", lambda: self.reveal(self._cur_dir()))
+        acc = it.text(0) if it.parent() is None else (it.data(0, Qt.ItemDataRole.UserRole + 1) or "")
+        if acc and plan.quota_of(self.st, acc):
+            m.addSeparator()
+            m.addAction(f"「{acc}」今天临时多发几条…(今天规定 {plan.quota_on(self.st, acc)} 条)", lambda: self.add_extra(acc))
         m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def add_extra(self, acc: str, n: int | None = None) -> int:
+        """今天临时多发几条(用户 2026-10-23「今天 50 条发满了,临时又要多发 5 条」):
+        16 个号的交给接口页;教育号:今天上限加 n,明天文件夹里挪 n 条回今天的(文件夹结构不变)。返回挪回来几条。"""
+        if acc not in {a["name"] for a in self.st["accounts"]}:
+            return self.api_tab.add_extra_today(acc, n)
+        if self.worker and self.worker.isRunning():
+            return 0
+        if n is None:
+            from PySide6.QtWidgets import QInputDialog
+            n, ok = QInputDialog.getInt(self, "今天临时多发", f"「{acc}」今天规定 {plan.quota_on(self.st, acc)} 条,临时再多发几条?\n"
+                                        "(只管今天,明天还是原来的条数;已经挪到明天文件夹的,挪这么多条回今天的文件夹)", 5, 1, 500, 1)
+            if not ok:
+                return 0
+        total = plan.add_extra(self.st, acc, n)
+        moved = self._edu_pull_back(acc, n)
+        self.say(f"「{acc}」今天临时多发 {total} 条(今天一共 {plan.quota_on(self.st, acc)} 条)" +
+                 (f";从明天的文件夹挪回 {moved} 条" if moved else ""))
+        self._load_dates()
+        return moved
+
+    def _edu_pull_back(self, acc: str, n: int) -> int:
+        """教育号:明天日期文件夹里这个号最前面 n 条(连同封面)挪回今天的日期文件夹,里面的文件夹结构不变(和挪到明天反过来)。"""
+        root = self.st["material_root"]
+        tmr = plan.tomorrow_folder()
+        today_md = f"{bj_now().month}.{bj_now().day}"
+        today_dir = next((os.path.join(root, d) for d in F.list_dates(root) if F.day_of(d) == today_md), os.path.join(root, today_md))
+        tmr_dir = os.path.join(root, tmr)
+        moved = 0
+        for d in F.account_dirs(root, tmr, self.st).get(acc, []):
+            vids = sorted(F.scan_account(d, acc, tmr), key=lambda x: x.title)
+            for v in vids:
+                if moved >= n:
+                    return moved
+                if self.rec.status_of(v.path) or not os.path.isfile(v.path):
+                    continue
+                try:
+                    for f in [v.path] + [p for p in (v.png, v.jpg, v.vpng) if p and os.path.isfile(p)
+                                         and os.path.normcase(p).startswith(os.path.normcase(tmr_dir) + os.sep)]:
+                        rel = os.path.relpath(f, tmr_dir)
+                        plan.move_noclobber(f, os.path.join(today_dir, os.path.dirname(rel)))
+                    moved += 1
+                except OSError as e:
+                    self.say(f"⚠「{v.title[:24]}」挪不回今天的文件夹:{e}")
+        return moved
 
     def mark_manual(self):
         rows = sorted({ix.row() for ix in self.table.selectedIndexes()})

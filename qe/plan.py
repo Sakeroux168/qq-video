@@ -51,6 +51,37 @@ def quota_of(st, nick: str) -> int:
     return 0
 
 
+def extra_of(st, nick: str, day: str = "") -> int:
+    """这天这个号临时多发几条(用户 2026-10-23:「今天 50 条发满了,临时又要多发 5 条」)。day = 2026-10-23,默认今天。"""
+    try:
+        return max(0, int(((st.get("quota_extra") or {}).get(day or today()) or {}).get(nick) or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def quota_on(st, nick: str, day: str = "") -> int:
+    """这天这个号一共能发几条 = 每天规定的 + 这天临时多发的。"""
+    q = quota_of(st, nick)
+    return q + extra_of(st, nick, day) if q else 0
+
+
+def add_extra(st, nick: str, n: int, day: str = "") -> int:
+    """这天这个号再临时多发 n 条(累加),只管这一天;老的日子(7 天前)顺手清掉。返回这天一共多发几条。"""
+    day = day or today()
+    m = {k: dict(v) for k, v in (st.get("quota_extra") or {}).items() if k >= _days_ago(7)}
+    m.setdefault(day, {})
+    m[day][nick] = max(0, extra_of(st, nick, day) + int(n))
+    st["quota_extra"] = m
+    if hasattr(st, "save"):
+        st.save()
+    return m[day][nick]
+
+
+def _days_ago(n: int) -> str:
+    from datetime import timedelta
+    return (bj_now() - timedelta(days=n)).strftime("%Y-%m-%d")
+
+
 def cat_total(g: dict) -> int:
     if g.get("total") is not None:
         try:
@@ -76,7 +107,7 @@ def left_today(rec, st, nick: str, day: str = "", sent: dict | None = None) -> i
     用户 2026-10-20:不能发多、也不能发少;开闸(设置里「允许超过每天规定条数」)才能多发。"""
     if st.get("quota_open", False):
         return None
-    q = quota_of(st, nick)
+    q = quota_on(st, nick, day)
     if not q:
         return None
     got = (sent if sent is not None else rec.sent_on(day or today())).get(nick, 0)
@@ -109,13 +140,13 @@ def summary(rec, st, day: str) -> dict:
     rows, accs = [], []
     tq = ta = 0
     for g in plan(st):
-        q = cat_total(g)
+        q = cat_total(g) + sum(extra_of(st, n, day) for n, nq in (g.get("accounts") or {}).items() if nq)
         a = sum(got.get(n, 0) for n in (g.get("accounts") or {}))
         rows.append((g.get("label") or g["cat"], q, a))
         tq += q
         ta += a
         for n, nq in (g.get("accounts") or {}).items():
-            accs.append((g["cat"], n, int(nq or 0), got.get(n, 0)))
+            accs.append((g["cat"], n, int(nq or 0) + (extra_of(st, n, day) if nq else 0), got.get(n, 0)))
     return {"day": day, "rows": rows, "total": (tq, ta), "accounts": accs}
 
 

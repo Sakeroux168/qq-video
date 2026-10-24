@@ -318,6 +318,12 @@ class ApiTab(QWidget):
         view.addWidget(self.seg)
         from gui.widgets import help_dot
         view.addWidget(help_dot("要处理"))
+        self.k_undone = QPushButton("只看没发完的号")
+        self.k_undone.setObjectName("toggle")
+        self.k_undone.setCheckable(True)
+        self.k_undone.setToolTip("发完的号(能发的都发了 / 今天发够了)先藏起来;发完的号本来就沉在最下面")
+        self.k_undone.toggled.connect(lambda _on: self._apply_filter())
+        view.addWidget(self.k_undone)
         self.k_bad = QCheckBox("只看有问题的")
         self.k_bad.setToolTip("只显示要处理的(横屏 / 标题有别的平台 / 话题问题 / 没发成 / 结果不明)")
         self.k_bad.toggled.connect(self._kbad_toggled)
@@ -571,6 +577,50 @@ class ApiTab(QWidget):
         full = sorted({v.account for v in self.videos if plan.left_today(self.rec, self.st, v.account, sent=sent) == 0})
         return sum(self._spill(n, only_day=today_md) for n in full) > 0
 
+    def add_extra_today(self, nick: str, n: int | None = None) -> int:
+        """今天临时多发几条(用户 2026-10-23):今天这个号上限加 n(明天照旧);发够以后挪到明天文件夹里的,挪 n 条回今天的文件夹。
+        返回挪回来几条。n 不给就问。"""
+        if self.busy() and not getattr(self, "_quiet", False):
+            return 0
+        if n is None:
+            q = plan.quota_on(self.st, nick)
+            n, ok = QInputDialog.getInt(self, "今天临时多发", f"「{nick}」今天规定 {q} 条,临时再多发几条?\n"
+                                        "(只管今天,明天还是原来的条数;已经挪到明天文件夹的,挪这么多条回今天的文件夹)", 5, 1, 500, 1)
+            if not ok:
+                return 0
+        total = plan.add_extra(self.st, nick, n)
+        moved = self._pull_back(nick, n)
+        self.say(f"「{nick}」今天临时多发 {total} 条(今天一共 {plan.quota_on(self.st, nick)} 条)" +
+                 (f";从明天的文件夹挪回 {moved} 条" if moved else ""))
+        self.load()
+        return moved
+
+    def _pull_back(self, nick: str, n: int) -> int:
+        """把这个号明天文件夹里最前面 n 条(连同名封面)挪回今天的日期文件夹(没有就建)。"""
+        tmr = plan.tomorrow_folder()
+        today_md = f"{bj_now().month}.{bj_now().day}"
+        moved = 0
+        for folder in apisrc.account_folder_list(self.roots(), self.known()).get(nick, []):
+            src = os.path.join(folder, tmr)
+            if moved >= n or not os.path.isdir(src):
+                continue
+            dst = os.path.join(folder, today_md)
+            for v in apisrc._videos_in(src, nick, tmr):
+                if moved >= n:
+                    break
+                if self.rec.status_of(v.path):
+                    continue
+                stem = os.path.splitext(os.path.basename(v.path))[0].strip()
+                try:
+                    covers = [os.path.join(src, x) for x in os.listdir(src)
+                              if os.path.splitext(x)[1].lower() in (".jpg", ".jpeg", ".png", ".webp") and os.path.splitext(x)[0].strip() == stem]
+                    for f in [v.path] + covers:
+                        plan.move_noclobber(f, dst)
+                    moved += 1
+                except OSError as e:
+                    self.say(f"「{v.title[:24]}」挪不回今天的文件夹:{e}")
+        return moved
+
     def _quota_cap(self, idxs) -> tuple[int, int]:
         """这些能发的里,按每个号今天还能发几条,真正会发几条;多出来几条(发够以后挪到明天)。"""
         sent = getattr(self, "today_sent", None) or {}
@@ -751,7 +801,8 @@ class ApiTab(QWidget):
             self._update_sum()
 
     def filtering(self) -> bool:
-        return self.k_bad.isChecked() or bool(self.e_find.text().strip()) or getattr(self, "_segk", "all") != "all"
+        return (self.k_bad.isChecked() or bool(self.e_find.text().strip()) or getattr(self, "_segk", "all") != "all"
+                or (hasattr(self, "k_undone") and self.k_undone.isChecked()))
 
     def target_rows(self, only: list[int] | None = None) -> list[int]:
         """这次要管哪些:给了就是给的;没给 → 选中的;没选 → 列表里看得见的全部(「只看有问题的」/ 搜索过滤掉的不算)。"""
@@ -1057,8 +1108,50 @@ class ApiTab(QWidget):
                 g.setExpanded(nick in self.open_accounts)
                 self._fill_group(nick)
         self.tree.blockSignals(False)
+        self._reorder()
         self._apply_filter()
         self._busy(self.busy())
+
+    def _done(self, nick: str) -> bool:
+        """这个号这天发完了:能发的都发了(列表里的都已发 / 发完挪走了),或者今天发够规定条数了。"""
+        g = self.groups.get(nick)
+        if g is None:
+            return False
+        rows = [g.child(k).data(0, ROW) for k in range(g.childCount())]
+        if not rows:
+            return bool(self.archived.get(nick))
+        if all(self._sent(i) for i in rows):
+            return True
+        sent = getattr(self, "today_sent", None) or {}
+        return plan.left_today(self.rec, self.st, nick, sent=sent) == 0
+
+    def _reorder(self):
+        """发完的号沉到下面、收起来、名字后面写「发完了」(用户 2026-10-23:abcde 里 abd 发完了 → c e a b d)。
+        没发完的照原来的顺序在上面。"""
+        if not self.groups:
+            return
+        cur = [self.tree.topLevelItem(k) for k in range(self.tree.topLevelItemCount())]
+        done = {g.data(0, NICK): self._done(g.data(0, NICK)) for g in cur}
+        want = [g for g in cur if not done[g.data(0, NICK)]] + [g for g in cur if done[g.data(0, NICK)]]
+        self.tree.blockSignals(True)
+        if want != cur:
+            opened = {g.data(0, NICK) for g in cur if g.isExpanded()}
+            sel = self.selected_rows()
+            for g in cur:
+                self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(g))
+            for g in want:
+                self.tree.addTopLevelItem(g)
+                g.setExpanded(g.data(0, NICK) in opened and not done[g.data(0, NICK)])
+            for i in sel:
+                if i in self.items:
+                    self.items[i].setSelected(True)
+        for g in want:
+            nick = g.data(0, NICK)
+            if g.childCount():
+                self._fill_group(nick)                   # 名字后面写「· 发完了」
+                if done[nick]:
+                    g.setExpanded(False)
+        self.tree.blockSignals(False)
 
     def _remember(self, it: QTreeWidgetItem, on: bool):
         if it.data(0, ROW) == -1:
@@ -1158,7 +1251,7 @@ class ApiTab(QWidget):
         unsure = sum(1 for i in rows if self.state.get(i, "") == "结果不明")
         ok = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
         pk = "(手选文件夹)" if nick in self.picked(self.day()) else ""
-        g.setText(0, f"{nick}  {n} 条{pk}")
+        g.setText(0, f"{nick}  {n} 条{pk}" + (" · 发完了" if self._done(nick) else ""))
         g.setText(1, "")
         parts = []
         if not checked:
@@ -1183,7 +1276,7 @@ class ApiTab(QWidget):
         self._update_sum()
 
     def _quota_text(self, nick: str) -> str:
-        q = plan.quota_of(self.st, nick)
+        q = plan.quota_on(self.st, nick)
         t = (getattr(self, "today_sent", {}) or {}).get(nick, 0)
         if not q:
             return f"今天 {t}" if t else ""
@@ -1192,7 +1285,7 @@ class ApiTab(QWidget):
     def _quota_nicks(self) -> list[tuple[str, int]]:
         """有规定条数的号:[(号, 每天几条)]。账号还没搬(nicks 空)就用列表里出现的号(审查 14:原来没号可算时写「都发够了」)。"""
         names = apiacc.nicks() or sorted({v.account for v in self.videos})
-        return [(n, q) for n in names for q in (plan.quota_of(self.st, n),) if q]
+        return [(n, q) for n in names for q in (plan.quota_on(self.st, n),) if q]
 
     def _quota_card(self):
         """「今天达标」卡片:有规定的号里今天发够了几个(按发出去的时间算)。"""
@@ -1255,6 +1348,8 @@ class ApiTab(QWidget):
         self._hero_update(*self._hero_args)
 
     def _hidden(self, i: int) -> bool:
+        if getattr(self, "k_undone", None) is not None and self.k_undone.isChecked() and self._done(self.videos[i].account):
+            return True
         key = self.e_find.text().strip().lower()
         if key and key not in self.videos[i].title.lower():
             return True
@@ -1482,6 +1577,9 @@ class ApiTab(QWidget):
             ma.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick)).setEnabled(not busy)
             if nick in self.picked(self.day()):
                 ma.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick)).setEnabled(not busy)
+            if plan.quota_of(self.st, nick):
+                ma.addAction(f"今天临时多发几条…(今天规定 {plan.quota_on(self.st, nick)} 条)",
+                             lambda: self.add_extra_today(nick)).setEnabled(not busy)
             ma.addSeparator()
             ma.addAction(f"只发「{nick}」的…", lambda: self.run_publish(mine)).setEnabled(not busy)
             mo = m.addMenu("其它")
@@ -1600,6 +1698,7 @@ class ApiTab(QWidget):
         if pop:
             QMessageBox.warning(self, pop[0], pop[1]) if pop[2] else QMessageBox.information(self, pop[0], pop[1])
         self._clean_empty_dirs()                          # 发空了的文件夹删掉(发了的已经在归档里,列表上「已发」照旧看得见,不用重读)
+        self._reorder()                                   # 发完的号沉底
         if getattr(self, "_reload_after", False):          # 多的挪到明天了:重读列表(挪走的不在这天了)
             self._reload_after = False
             self.load()
