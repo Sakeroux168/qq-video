@@ -3700,6 +3700,52 @@ def test_unsend(tmp: Path):
     check("视频没找到" in msg and rec.status_of(str(src / "b.mp4")) == "", f"视频找不到:记录照样改回没发,说清楚要自己放回去 -> {msg}")
 
 
+def test_api_dups(tmp: Path):
+    print("[16 个号查重(用户 2026-10-24):号 + 标题(去掉话题空格标点);发过同名的不发、同一天同名只发一条]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc
+    from qe import folders as F
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    root = tmp / "dup" / "游戏视频"
+    d = root / "CSGO--CSGO战神君" / "10.24"
+    d.mkdir(parents=True)
+    for nm in ("旧的", "同名 #CSGO", "同名", "新的"):
+        (d / f"{nm}.mp4").write_bytes(b"x")
+    (root / "PUBG--PUBG突围君" / "10.24").mkdir(parents=True)
+    (root / "PUBG--PUBG突围君" / "10.24" / "旧的.mp4").write_bytes(b"x")
+    apiacc.save([{"nick": n, "source_name": n[:4], "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}
+                 for n in ("CSGO战神君", "PUBG突围君")])
+    rec = Records(tmp / "r_dup.sqlite")
+    rec.api_result(F.Video(path=str(tmp / "早就发了" / "旧的 #CSGO.mp4"), title="旧的 #CSGO", account="CSGO战神君", employee="",
+                           date="10.20"), "已发")
+    st = Settings(tmp / "st_dup.json")
+    st["api_roots"] = [str(root)]
+    st["quota_open"] = True
+    tab = T.ApiTab(st, rec, lambda m: None)
+    tab.set_day("10.24")
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 5)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920, tags=[], platform=[])
+    tab._update_sum()
+
+    def i_of(acc, title):
+        return next(k for k, v in enumerate(tab.videos) if v.account == acc and v.title == title)
+    old, s1, s2, new = (i_of("CSGO战神君", t) for t in ("旧的", "同名 #CSGO", "同名", "新的"))
+    other = i_of("PUBG突围君", "旧的")
+    check(not tab._can_send(old) and "发过同名的(10.20)" in tab._dups.get(old, ""),
+          f"这个号发过同名的(带话题的也认):不发,写清楚哪天发的 -> {tab._dups.get(old)}")
+    check(sum(1 for k in (s1, s2) if tab._can_send(k)) == 1 and (s1 in tab._dups) != (s2 in tab._dups),
+          f"同一天同一个号同名的两条:只发一条 -> {tab._dups}")
+    check(tab._can_send(new) and tab._can_send(other), "不同名的、别的号的同名:照常能发")
+    check(tab._status_text(old)[0] == "要处理", "重复的显示「要处理」")
+    dup_i = s1 if s1 in tab._dups else s2
+    tab._rename_rows([dup_i], lambda t: "改了个名", "改标题")
+    check(tab._can_send(dup_i) and dup_i not in tab._dups, "让员工改个名:就能发了")
+
+
 def test_black_border(tmp: Path):
     print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
     from PIL import Image, ImageDraw
@@ -4480,6 +4526,7 @@ if __name__ == "__main__":
     test_extra_vert_order(tmp)
     test_verify(tmp)
     test_unsend(tmp)
+    test_api_dups(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

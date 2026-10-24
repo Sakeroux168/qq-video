@@ -151,6 +151,8 @@ class ApiTab(QWidget):
         self.ledger = topic.Ledger(data_dir() / "话题改名台账.json")
         self._auto = ""                           # 定时发布:"" / "等检查"(到点了,等自动检查做完)/ "发"(正在发)
         self._blocked: dict[str, int] = {}        # 这天可能整批放错了的号(像别的游戏的条数),人确认前整批不发
+        self._dups: dict[int, str] = {}           # 重复的(发过同名的 / 同一天同名的):不发
+        self._sent_keys: dict = {}
         from qe import gamecheck
         gamecheck.configure(st)
         self._build()
@@ -838,7 +840,45 @@ class ApiTab(QWidget):
 
     def _can_send(self, i: int) -> bool:
         v = self.videos[i]
-        return bool(v.checks) and not checks.problems(v) and not self._sent(i) and not self._blocked.get(v.account)
+        return (bool(v.checks) and not checks.problems(v) and not self._sent(i) and not self._blocked.get(v.account)
+                and i not in self._dups)
+
+    # ---------------- 查重:号 + 标题(用户 2026-10-24:16 个号也要「发过同名的不发、同一天同名只发一条」,和教育号一样) ----------------
+    @staticmethod
+    def _dkey(account: str, title: str) -> tuple[str, str]:
+        """号 + 标题:去掉话题、空格、标点(「xxx #和平精英」和「xxx」算同一条)。"""
+        from qe.folders import norm_name
+        body = topic.split_topics(title)["body"] or title
+        return account, (norm_name(body) or norm_name(title) or title)
+
+    def _load_sent_keys(self):
+        """记录里每个号发过的标题(已发的)。员工把发过的复制一份 / 重新下一个同名的放进新文件夹,按路径认不出,按这个认。"""
+        keys: dict = {}
+        try:
+            for r in self.rec.rows():
+                if r["status"] == "已发":
+                    keys.setdefault(self._dkey(r["account"], r["title"]), {"date": r["date"], "path": r["path"]})
+        except Exception:
+            pass
+        self._sent_keys = keys
+
+    def _refresh_dups(self):
+        """哪几条不发(重复):① 这个号以前发过同名的;② 列表里同一个号同名的,只留第一条。{行: 为什么}。"""
+        out, first = {}, {}
+        keys = getattr(self, "_sent_keys", {})
+        for i, v in enumerate(self.videos):
+            if self._sent(i):
+                continue
+            k = self._dkey(v.account, v.title)
+            r = keys.get(k)
+            if r and pkey(r.get("path") or "") != pkey(v.path):
+                out[i] = f"这个号发过同名的({r.get('date') or '之前'}),不再发(真要发就让员工改个名)"
+                continue
+            if k in first:
+                out[i] = f"和「{self.videos[first[k]].title[:20]}」同名,同一个号只发一条(两条都要发就让员工改个名)"
+                continue
+            first[k] = i
+        self._dups = out
 
     def _refresh_blocked(self):
         """一个号这天有 3 条以上(或超过一成)标题像别的游戏 → 可能整批放错了,人点「确认没放错」前整批不发(用户 2026-10-20)。"""
@@ -1053,6 +1093,8 @@ class ApiTab(QWidget):
                 self._attach_wm(v)
             elif not s.startswith("已发"):
                 todo.append(i)
+        self._load_sent_keys()
+        self._refresh_dups()
         # 这天已经发出去、挪走了的(列表里没有了,但记录里有):号那一行和上面卡片要算上
         self.today_sent = self.rec.sent_on(plan.today())
         self.archived = {}
@@ -1223,6 +1265,8 @@ class ApiTab(QWidget):
             return st, probs
         if c and probs:
             return "要处理", probs
+        if c and i in self._dups:
+            return "要处理", [self._dups[i]]
         if c and self._blocked.get(v.account):
             return "要处理", [f"这个号整批先不发({self._blocked[v.account]} 条像别的游戏,可能放错了)"]
         if c and not probs:
@@ -1271,8 +1315,8 @@ class ApiTab(QWidget):
         n = len(rows)
         sent = sum(1 for i in rows if self.state.get(i, "").startswith("已发"))
         checked = [i for i in rows if self.videos[i].checks]
-        bad = sum(1 for i in checked if (checks.problems(self.videos[i]) or self._blocked.get(self.videos[i].account))
-                  and not self._sent(i))
+        bad = sum(1 for i in checked if (checks.problems(self.videos[i]) or self._blocked.get(self.videos[i].account)
+                                         or i in self._dups) and not self._sent(i))
         fail = sum(1 for i in rows if self.state.get(i, "").startswith(FAILED[:2]))
         unsure = sum(1 for i in rows if self.state.get(i, "") == "结果不明")
         ok = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
@@ -1331,14 +1375,15 @@ class ApiTab(QWidget):
         return f"今天还差 {short} 条" if short else "今天都发够了 √"
 
     def _update_sum(self):
+        self._refresh_dups()
         self._refresh_blocked()
         n = len(self.videos)
         sent = sum(1 for i in range(n) if self.state.get(i, "").startswith("已发"))
         checked = [i for i in range(n) if self.videos[i].checks]
         n_done = sum(1 for i in range(n) if self.videos[i].checks or self._sent(i))
         ok, self._over = self._quota_cap([i for i in range(n) if self._can_send(i) and not self.state.get(i, "").startswith(FAILED)])
-        bad = sum(1 for i in checked if (checks.problems(self.videos[i]) or self._blocked.get(self.videos[i].account))
-                  and not self._sent(i))
+        bad = sum(1 for i in checked if (checks.problems(self.videos[i]) or self._blocked.get(self.videos[i].account)
+                                         or i in self._dups) and not self._sent(i))
         fail = sum(1 for i in range(n) if self.state.get(i, "").startswith(FAILED[:2]))
         accs = {}
         for i, v in enumerate(self.videos):
@@ -1703,6 +1748,8 @@ class ApiTab(QWidget):
         elif t:
             if t.startswith("已发") and not self.state.get(i, "").startswith("已发"):
                 self.today_sent = self.rec.sent_on(plan.today())
+                v0 = self.videos[i]
+                self._sent_keys.setdefault(self._dkey(v0.account, v0.title), {"date": v0.date, "path": v0.path})
             self.state[i] = t
             # 不再跟着滚到正在发的那条(用户 2026-10-18:发布的时候列表一直往回跳,没法上下翻看别的);进度看下面那行绿字
         if i in self.items:
@@ -2253,6 +2300,11 @@ class ApiTab(QWidget):
             self._fill(i)
             self.say(f"{what}:{old} → {v.title}" + (f"({note(old)})" if note and note(old) else ""))
             n += 1
+        if n:                                            # 改了名:重复的可能变了(改成不同名就能发了)
+            self._refresh_dups()
+            for k in range(len(self.videos)):
+                self._fill(k, group=False)
+            self._update_sum()
         self._update_scope()
         return n
 
