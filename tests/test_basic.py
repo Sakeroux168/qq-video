@@ -3790,10 +3790,12 @@ def test_view_tomorrow(tmp: Path):
     tab._update_scope()
     g = tab.groups["CSGO战神君"]
     tab._fill_group("CSGO战神君")
-    check(not tab._done("CSGO战神君") and g.text(0).endswith("今天发够了") and "发完了" not in g.text(0),
-          f"看明天的文件夹:今天发够了的号不算发完、不沉底,写「今天发够了」-> {g.text(0)}")
-    check(tab.hero.big.text() == "今天都发够了 √" and "定到明天" in tab.hero.sub.text() and tab.b_pub.text() == "今天都发够了",
-          f"大字说今天都发够了,提示「到点自动发…」定到明天 -> {tab.hero.big.text()} / {tab.hero.sub.text()} / {tab.b_pub.text()}")
+    check(not tab._done("CSGO战神君") and "发完了" not in g.text(0) and "今天发够了" not in g.text(0),
+          f"看明天的文件夹:不算发完、不沉底,也不写「今天发够了」(用户 2026-10-24:25 号都没发)-> {g.text(0)}")
+    check(g.text(3).endswith(f"{tmr} 0/2"), f"号那一行的进度按这天算:{tmr} 发了 0 / 规定 2 -> {g.text(3)}")
+    check(tab.hero.big.text().startswith("这天 3 条能发") and "到点自动发" in tab.hero.sub.text() and tab.b_pub.text() == "今天都发够了",
+          f"大字:这天的用「到点自动发」;「现在发布」按今天算 -> {tab.hero.big.text()} / {tab.hero.sub.text()} / {tab.b_pub.text()}")
+    check(tab._quota_sub() == f"{tmr}还差 2 条", f"还差几条按这天算 -> {tab._quota_sub()}")
 
 
 def test_black_border(tmp: Path):

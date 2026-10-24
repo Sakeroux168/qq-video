@@ -932,11 +932,11 @@ class ApiTreeDelegate(QStyledItemDelegate):
             x = r.left() + 2
             q = None
             for p in parts:
-                m = re.match(r"今天 (\d+)/(\d+)", p)
+                m = re.match(r"(?:今天|\d+\.\d+) (\d+)/(\d+)", p)        # 「今天 20/20」或者「10.25 0/20」
                 if m:
                     q = (int(m.group(1)), int(m.group(2)))
                     continue
-                if p.startswith("今天"):
+                if p.startswith("今天") or re.match(r"\d+\.\d+ ", p):
                     x += draw_text(painter, QRectF(x, r.top(), r.right() - x, r.height()), p, t["mu"], 12) + 8
                     continue
                 n = re.match(r"能发 (\d+)", p)

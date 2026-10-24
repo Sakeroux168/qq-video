@@ -757,10 +757,12 @@ class ApiTab(QWidget):
                 sub += f" · 另外 {self._over} 条超过今天的规定条数,发够以后挪到明天"
         elif n + gone and sent + gone >= n + gone:
             big, sub, tone = "这天的都发完了 √", "", "good"
+        elif getattr(self, "_over", 0) and not self._is_today():
+            big, tone = f"这天 {self._over} 条能发:用「到点自动发…」", ""
+            sub = "「现在发布」是马上发、算今天的条数,今天各号都发够了;要发这天的就点「到点自动发…」定到这天"
         elif getattr(self, "_over", 0):
             big, tone = "今天都发够了 √", "good"
-            sub = (f"这天还有 {self._over} 条能发:现在发就超了今天的规定条数 —— 点「到点自动发…」定到明天发"
-                   if not self._is_today() else f"还没发的 {self._over} 条发够以后挪到明天")
+            sub = f"还没发的 {self._over} 条发够以后挪到明天"
             if bad:
                 sub += f" · 另有 {bad} 条要处理"
         elif bad:
@@ -779,7 +781,7 @@ class ApiTab(QWidget):
         if cats.get("o") and not self.busy():
             sub += ("\n" if sub else "") + f"其中 {cats['o']} 条标题里有别的平台的名字,要你自己改(列表里右键「改标题」)"
         if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)) and sub != self._fun \
-                and not big.startswith("今天都发够了"):
+                and not big.startswith(("今天都发够了", "这天 ")):
             sub = (sub + " · " if sub else "") + quota
         self.hero.set(big, sub, tone)
         idle = not n or checked < n or not self.day()
@@ -1104,6 +1106,7 @@ class ApiTab(QWidget):
         self._refresh_dups()
         # 这天已经发出去、挪走了的(列表里没有了,但记录里有):号那一行和上面卡片要算上
         self.today_sent = self.rec.sent_on(plan.today())
+        self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
         self.archived = {}
         if d:
             here = {pkey(v.path) for v in self.videos}
@@ -1335,8 +1338,7 @@ class ApiTab(QWidget):
         unsure = sum(1 for i in rows if self.state.get(i, "") == "结果不明")
         ok = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
         pk = "(手选文件夹)" if nick in self.picked(self.day()) else ""
-        g.setText(0, f"{nick}  {n} 条{pk}" + (" · 发完了" if self._done(nick) else
-                                               " · 今天发够了" if not self._is_today() and self._full_today(nick) else ""))
+        g.setText(0, f"{nick}  {n} 条{pk}" + (" · 发完了" if self._done(nick) else ""))
         g.setText(1, "")
         parts = []
         if not checked:
@@ -1360,21 +1362,38 @@ class ApiTab(QWidget):
             g.setBackground(c, col if col else QColor(0, 0, 0, 0))
         self._update_sum()
 
+    def _qday(self) -> str:
+        """看的这天是哪天(2026-10-25);没选 / 认不出 → 今天。"""
+        from datetime import date
+        try:
+            m, d = (int(x) for x in str(self.day() or "").split(".")[:2])
+            n = bj_now()
+            y = n.year + 1 if m < n.month - 6 else n.year - 1 if m > n.month + 6 else n.year
+            return date(y, m, d).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return plan.today()
+
+    def _day_sent(self) -> dict:
+        """这天每个号发了几条(看今天就是今天的)。"""
+        return (getattr(self, "today_sent", {}) or {}) if self._is_today() else (getattr(self, "day_sent", {}) or {})
+
     def _quota_text(self, nick: str) -> str:
-        q = plan.quota_on(self.st, nick)
-        t = (getattr(self, "today_sent", {}) or {}).get(nick, 0)
+        """号那一行的进度:看哪天就是哪天发了几条 / 这天规定几条。"""
+        q = plan.quota_on(self.st, nick, self._qday())
+        t = self._day_sent().get(nick, 0)
+        tag = "今天" if self._is_today() else (self.day() or "今天")
         if not q:
-            return f"今天 {t}" if t else ""
-        return f"今天 {t}/{q}" + (" √" if t >= q else "")
+            return f"{tag} {t}" if t else ""
+        return f"{tag} {t}/{q}" + (" √" if t >= q else "")
 
     def _quota_nicks(self) -> list[tuple[str, int]]:
         """有规定条数的号:[(号, 每天几条)]。账号还没搬(nicks 空)就用列表里出现的号(审查 14:原来没号可算时写「都发够了」)。"""
         names = apiacc.nicks() or sorted({v.account for v in self.videos})
-        return [(n, q) for n in names for q in (plan.quota_on(self.st, n),) if q]
+        return [(n, q) for n in names for q in (plan.quota_on(self.st, n, self._qday()),) if q]
 
     def _quota_card(self):
-        """「今天达标」卡片:有规定的号里今天发够了几个(按发出去的时间算)。"""
-        got = getattr(self, "today_sent", {}) or {}
+        """「今天达标」卡片:有规定的号里这天发够了几个(按发出去的时间算)。"""
+        got = self._day_sent()
         qs = self._quota_nicks()
         if not qs:
             return "–"
@@ -1382,12 +1401,13 @@ class ApiTab(QWidget):
         return (f"{ok} / {len(qs)}", "good" if ok == len(qs) else "")
 
     def _quota_sub(self) -> str:
-        got = getattr(self, "today_sent", {}) or {}
+        got = self._day_sent()
         qs = self._quota_nicks()
         if not qs:
             return "没有规定条数的号"
         short = sum(max(0, q - got.get(n, 0)) for n, q in qs)
-        return f"今天还差 {short} 条" if short else "今天都发够了 √"
+        tag = "今天" if self._is_today() else (self.day() or "今天")
+        return f"{tag}还差 {short} 条" if short else f"{tag}都发够了 √"
 
     def _update_sum(self):
         self._refresh_dups()
@@ -1763,6 +1783,7 @@ class ApiTab(QWidget):
         elif t:
             if t.startswith("已发") and not self.state.get(i, "").startswith("已发"):
                 self.today_sent = self.rec.sent_on(plan.today())
+                self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
                 v0 = self.videos[i]
                 self._sent_keys.setdefault(self._dkey(v0.account, v0.title), {"date": v0.date, "path": v0.path})
             self.state[i] = t
