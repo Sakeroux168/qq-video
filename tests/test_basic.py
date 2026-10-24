@@ -3583,7 +3583,8 @@ def test_verify(tmp: Path):
     src.mkdir(parents=True)
     arc.mkdir(parents=True)
     rows = {}
-    for k, (title, aid) in enumerate((("在的", "A1"), ("审核中的", "A2"), ("被删的", "A3"), ("没上去的", "A4"), ("G镇大写", "A5"))):
+    for k, (title, aid) in enumerate((("在的", "A1"), ("审核中的", "A2"), ("被删的", "A3"), ("没上去的", "A4"), ("G镇大写", "A5"),
+                                      ("后台搜得到", "A6"))):
         v = F.Video(path=str(src / f"{title}.mp4"), title=title, account="CSGO战神君", employee="", date="10.23")
         rid = rec.api_begin(v)
         rec.api_finish(rid, "已发", f"article_id={aid} vid=V{k}")
@@ -3605,16 +3606,28 @@ def test_verify(tmp: Path):
             return {"articles": arts if page == 1 else [], "total": "5"}
 
         def article_info(self, aid):
-            return {"article_info": {"article_pub_flag": {"A4": "未发布", "A5": "发布成功"}.get(aid, "未发布"),
-                                     "article_del_flag": "已删除" if aid == "A3" else "未删除"}}
+            return {"article_info": {"article_pub_flag": {"A4": "未发布", "A5": "发布成功", "A6": "发布成功"}.get(aid, "未发布"),
+                                     "article_del_flag": "已删除" if aid == "A3" else "未删除",
+                                     "article_pub_time": now if aid == "A6" else "2001-01-01 10:00:00"}}
     r = verify.check_account(Fake(), rec, "CSGO战神君", day)
     miss = {m["title"]: m["why"] for m in r["missing"]}
     sure = {m["title"]: m["sure"] for m in r["missing"]}
-    check(r["ours"] == 5 and r["live"] == 3 and r["ok"] == 2 and r["review"] == 1 and set(miss) == {"被删的", "没上去的", "G镇大写"}
+    check(r["ours"] == 6 and r["live"] == 4 and r["ok"] == 3 and r["review"] == 1 and set(miss) == {"被删的", "没上去的", "G镇大写"}
           and "已删除" in miss["被删的"] and "未发布" in miss["没上去的"] and sure["被删的"] and sure["没上去的"],
           f"核对:在的 / 审核中的 算对上;被删的、没上去的是假发成功(默认打勾) -> {r['ours']} {r['live']} {miss}")
-    check(not sure["G镇大写"] and "单查是「发布成功」" in miss["G镇大写"],
-          f"今天的列表里没有、单查说发布成功的:也列出来让人看(不默认打勾;用户 2026-10-24 软件 50、企鹅号 49 看不出是哪条)-> {miss['G镇大写']}")
+    check(not sure["G镇大写"] and "单查是「发布成功」" in miss["G镇大写"] and "不是这天" in miss["G镇大写"],
+          f"单查说发布成功、但发布时间不是这天的:列出来让人看(不默认打勾)-> {miss['G镇大写']}")
+    check("后台搜得到" not in miss, "列表里没读到、单查是这天发布成功的:算对上(用户 2026-10-24:后台一搜就在,不是假发成功)")
+
+    class Pages:
+        def list_articles(self, page, limit):
+            old = {"article_pub_flag": "发布成功", "article_pub_time": "2001-01-01 10:00:00", "article_title": "老"}
+            pages = {1: [{"article_id": "P1", "article_pub_flag": "已发布", "article_pub_time": now, "article_title": "一"}],
+                     2: [old] * 10, 3: [{"article_id": "P3", "article_pub_flag": "发布成功", "article_pub_time": now, "article_title": "三"}],
+                     4: [old] * 10, 5: [old] * 10, 6: [old] * 10, 7: [{"article_id": "P7", "article_pub_time": now}]}
+            return {"articles": pages.get(page, []), "total": "999"}
+    got = verify.platform_on(Pages(), day)
+    check([p["aid"] for p in got] == ["P1", "P3"], f"列表不严格按时间排:中间夹一页老的不停,连着 3 页老的才停 -> {[p['aid'] for p in got]}")
     check([e["title"] for e in r["extra"]] == ["手动发的"], f"企鹅号上有、软件没记的单独列 -> {[e['title'] for e in r['extra']]}")
     m = next(x for x in r["missing"] if x["title"] == "没上去的")
     check(verify.pull_back(rec, m) == "" and (src / "没上去的.mp4").is_file() and (src / "没上去的.jpg").is_file()
@@ -3625,7 +3638,7 @@ def test_verify(tmp: Path):
     shutil.rmtree(src)
     m2 = next(x for x in r["missing"] if x["title"] == "被删的")
     check(verify.pull_back(rec, m2) == "" and (src / "被删的.mp4").is_file(), "原来的日期文件夹发空被删了:建回来再挪")
-    check(len(rec.sent_on(day).items()) and rec.sent_on(day).get("CSGO战神君") == 3, "拎回来的不再算今天已发(发够就停的闸跟着让出名额)")
+    check(len(rec.sent_on(day).items()) and rec.sent_on(day).get("CSGO战神君") == 4, "拎回来的不再算今天已发(发够就停的闸跟着让出名额)")
     # 窗口:每日汇总「去企鹅号核对」→ 表 + 没发上的打勾 →「拎回来重发」
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])

@@ -10,7 +10,7 @@
 import os
 import re
 
-OK_FLAGS = ("发布成功", "审核中")
+OK_FLAGS = ("发布成功", "已发布", "审核中")
 
 
 def _aid_of(note: str) -> str:
@@ -47,6 +47,7 @@ def ours_on(rec, nick: str, day: str) -> list[dict]:
 def platform_on(cl, day: str, max_pages: int = 60) -> list[dict]:
     """企鹅号上这个号这天发的(按发布时间):[{aid, vid, title, flag, deleted, time}]。新的在前,翻到比这天早就停。"""
     out = []
+    old_pages = 0
     for page in range(1, max_pages + 1):
         d = cl.list_articles(page, 10)
         items = d.get("articles") or []
@@ -62,7 +63,9 @@ def platform_on(cl, day: str, max_pages: int = 60) -> list[dict]:
                             "time": t})
             elif t and t[:10] < day:
                 older += 1
-        if older == len(items):
+        # 连着 3 页都比这天早才停(用户 2026-10-24:企鹅号上今天 51 条,软件只读到 49 条 —— 列表不一定严格按时间排,一页就停会漏)
+        old_pages = old_pages + 1 if older == len(items) else 0
+        if old_pages >= 3:
             break
         try:
             if page * 10 >= int(d.get("total") or 0):
@@ -80,6 +83,7 @@ def check_account(cl, rec, nick: str, day: str) -> dict:
     aids = {p["aid"] for p in live if p["aid"]}
     vids = {p["vid"] for p in live if p["vid"]}
     missing = []
+    found = []                                             # 列表里没读到、单查是这天发布成功的:算对上(也算进实发)
     for r in ours:
         if (r["aid"] and r["aid"] in aids) or (r["vid"] and r["vid"] in vids):
             continue
@@ -91,8 +95,11 @@ def check_account(cl, rec, nick: str, day: str) -> dict:
                 info = (cl.article_info(r["aid"]) or {}).get("article_info") or {}
                 flag, dele = str(info.get("article_pub_flag") or ""), str(info.get("article_del_flag") or "") == "已删除"
                 t = str(info.get("article_pub_time") or "")
+                if flag in OK_FLAGS and not dele and t[:10] == day:
+                    found.append({"aid": r["aid"], "flag": flag})   # 用户 2026-10-24:后台一搜就在,这天发的 → 就是发上了
+                    continue
                 if flag in OK_FLAGS and not dele:
-                    why, sure = f"今天的列表里没有,单查是「{flag}」" + (f"(发布时间 {t[5:16]})" if t else "") + ",看一眼再决定", False
+                    why, sure = f"单查是「{flag}」,但发布时间是 {t[5:16] or '?'}(不是这天),看一眼再决定", False
                 else:
                     why = "已删除" if dele else (f"企鹅号上是「{flag}」" if flag else why)
             except Exception as e:
@@ -103,8 +110,9 @@ def check_account(cl, rec, nick: str, day: str) -> dict:
     our_aids = {r["aid"] for r in ours if r["aid"]}
     our_vids = {r["vid"] for r in ours if r["vid"]}
     extra = [p for p in live if not ((p["aid"] and p["aid"] in our_aids) or (p["vid"] and p["vid"] in our_vids))]
-    return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if p["flag"] == "发布成功"),
-            "review": sum(1 for p in live if p["flag"] == "审核中"), "missing": missing, "extra": extra}
+    every = live + found
+    return {"nick": nick, "ours": len(ours), "live": len(every), "ok": sum(1 for p in every if p["flag"] != "审核中"),
+            "review": sum(1 for p in every if p["flag"] == "审核中"), "missing": missing, "extra": extra}
 
 
 def _real_path(p: str) -> str:
