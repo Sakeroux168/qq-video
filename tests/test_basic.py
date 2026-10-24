@@ -4136,7 +4136,21 @@ def test_sched_notice(tmp: Path):
               "到点时软件没开着:也红字常驻")
         _wait(app, lambda: len(warns) > 1, 5)
         check(len(warns) == 2 and "软件没开着" in warns[-1], "到点时软件没开着:这次打开就弹一次")
-        for t in (tab, tab2, tab3, tab4):
+        # 用户 2026-10-24:10-21 那条红字挂了好几天 → 点一下看完就清;不是今天的不再挂
+        infos = []
+        real_i = QMessageBox.information
+        QMessageBox.information = staticmethod(lambda _p, t, x, *a, **k: infos.append(x))
+        try:
+            tab4._ack_notice()
+        finally:
+            QMessageBox.information = real_i
+        check(infos and "软件没开着" in infos[0] and tab4.lab_sched.text() == "", "点一下红字:说为什么,然后清掉")
+        st5 = Settings(tmp / "st_notice.json")
+        st5["sched_notice"] = {"api": {"at": "2026-10-21 09:12", "msg": "旧的", "popped": True}}
+        st5.save()
+        tab5 = T.ApiTab(st5, rec, lambda m: None)
+        check(tab5.lab_sched.text() == "" and not (st5.get("sched_notice") or {}).get("api"), "不是今天的提醒:不再挂着")
+        for t in (tab, tab2, tab3, tab4, tab5):
             t.deleteLater()
     finally:
         QMessageBox.warning = real_w

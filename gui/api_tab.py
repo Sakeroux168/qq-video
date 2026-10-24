@@ -212,6 +212,8 @@ class ApiTab(QWidget):
         a.addWidget(self.b_sched)
         self.lab_sched = QLabel("")
         self.lab_sched.setObjectName("warnText")
+        self.lab_sched.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lab_sched.mousePressEvent = self._ack_notice
         a.addWidget(self.lab_sched)
         a.addSpacing(28)
         self.b_unsel = QPushButton("")                  # 选中了东西时出来:「选中 1 条 × 取消选中」(老手 / 新员工试用 2026-10-21)
@@ -1689,6 +1691,9 @@ class ApiTab(QWidget):
         if self._stale():
             return
         self._quiet = False
+        p = getattr(self, "_pub", None)
+        if p and p.get("ok") and not p.get("end") and not self._auto:
+            self._clear_notice()                         # 定时没发成以后,人自己点「现在发布」发成了:提醒清掉
         self._pub_end(msg or "")
         self._busy(False)
         if msg:
@@ -1705,6 +1710,7 @@ class ApiTab(QWidget):
         if pop:
             QMessageBox.warning(self, pop[0], pop[1]) if pop[2] else QMessageBox.information(self, pop[0], pop[1])
         self._clean_empty_dirs()                          # 发空了的文件夹删掉(发了的已经在归档里,列表上「已发」照旧看得见,不用重读)
+        self._sched_changed()
         self._reorder()                                   # 发完的号沉底
         if getattr(self, "_reload_after", False):          # 多的挪到明天了:重读列表(挪走的不在这天了)
             self._reload_after = False
@@ -2804,7 +2810,10 @@ class ApiTab(QWidget):
     def _sched_changed(self):
         t = self.sched.label() if hasattr(self, "sched") else ""
         note = (self.st.get("sched_notice") or {}).get("api") or {}
-        bad = f"⏰ 上次定时({note.get('at', '')[5:]})没发成 / 没开始,鼠标放这看为什么" if note.get("msg") else ""
+        if note.get("msg") and str(note.get("at", ""))[:10] != bj_str()[:10]:
+            self._clear_notice()                         # 不是今天的:不再挂着(用户 2026-10-24:10-21 那条挂了好几天)
+            note = {}
+        bad = f"⏰ 上次定时({note.get('at', '')[5:]})没发成 / 没开始,点这看为什么" if note.get("msg") else ""
         self.lab_sched.setText(t or ("⏰ 定时发布正在自己发…" if self._auto else bad))
         self.lab_sched.setToolTip(note.get("msg", "") if bad and not t and not self._auto else "")
         self.b_sched.setText("取消定时" if t else "停下定时发布" if self._auto else "到点自动发…")
@@ -2836,6 +2845,15 @@ class ApiTab(QWidget):
         if s.pop("api", None):
             self.st["sched_notice"] = s
             self.st.save()
+
+    def _ack_notice(self, _e=None):
+        """点那行红字:说一遍为什么,点「知道了」就不再挂着。"""
+        note = (self.st.get("sched_notice") or {}).get("api") or {}
+        if not note.get("msg") or (hasattr(self, "sched") and self.sched.label()) or self._auto:
+            return
+        QMessageBox.information(self, "上次定时没发成", f"16 个号上次的定时({note.get('at', '')})没发成 / 没开始:\n\n{note['msg']}")
+        self._clear_notice()
+        self._sched_changed()
 
     def schedule_clicked(self):
         if self._auto:
