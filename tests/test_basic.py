@@ -3609,9 +3609,12 @@ def test_verify(tmp: Path):
                                      "article_del_flag": "已删除" if aid == "A3" else "未删除"}}
     r = verify.check_account(Fake(), rec, "CSGO战神君", day)
     miss = {m["title"]: m["why"] for m in r["missing"]}
-    check(r["ours"] == 5 and r["ok"] == 2 and r["review"] == 1 and set(miss) == {"被删的", "没上去的"}
-          and "已删除" in miss["被删的"] and "未发布" in miss["没上去的"],
-          f"核对:在的 / 审核中的 / 列表没翻到但单查是发布成功的 都算对上;被删的、没上去的列出来 -> {r['ours']} {r['ok']} {r['review']} {miss}")
+    sure = {m["title"]: m["sure"] for m in r["missing"]}
+    check(r["ours"] == 5 and r["live"] == 3 and r["ok"] == 2 and r["review"] == 1 and set(miss) == {"被删的", "没上去的", "G镇大写"}
+          and "已删除" in miss["被删的"] and "未发布" in miss["没上去的"] and sure["被删的"] and sure["没上去的"],
+          f"核对:在的 / 审核中的 算对上;被删的、没上去的是假发成功(默认打勾) -> {r['ours']} {r['live']} {miss}")
+    check(not sure["G镇大写"] and "单查是「发布成功」" in miss["G镇大写"],
+          f"今天的列表里没有、单查说发布成功的:也列出来让人看(不默认打勾;用户 2026-10-24 软件 50、企鹅号 49 看不出是哪条)-> {miss['G镇大写']}")
     check([e["title"] for e in r["extra"]] == ["手动发的"], f"企鹅号上有、软件没记的单独列 -> {[e['title'] for e in r['extra']]}")
     m = next(x for x in r["missing"] if x["title"] == "没上去的")
     check(verify.pull_back(rec, m) == "" and (src / "没上去的.mp4").is_file() and (src / "没上去的.jpg").is_file()
@@ -3641,8 +3644,9 @@ def test_verify(tmp: Path):
         dlg = VerifyDialog(rec, day)
         _wait(app, lambda: not dlg.w.isRunning(), 20)
         app.processEvents()
-        check(dlg.t.rowCount() == 1 and dlg.miss.count() == 1 and "G镇大写" in dlg.miss.item(0).text() and dlg.b_back.isEnabled(),
-              f"核对窗口:每个号一行,没发上的列出来打勾 -> {[dlg.miss.item(k).text() for k in range(dlg.miss.count())]}")
+        check(dlg.t.rowCount() == 1 and dlg.miss.count() == 1 and "G镇大写" in dlg.miss.item(0).text() and dlg.b_back.isEnabled()
+              and dlg.t.horizontalHeaderItem(1).text() == "应发" and dlg.t.horizontalHeaderItem(3).text() == "还差",
+              f"核对窗口:每个号一行(应发 / 实发 / 还差 …),假发成功的列出来打勾 -> {[dlg.miss.item(k).text() for k in range(dlg.miss.count())]}")
         dlg.pull_back()
         check((src / "G镇大写.mp4").is_file() and "拎回来 1 条" in dlg.lab_done.text(),
               f"点「拎回来重发」:挪回原文件夹,文件名大小写不变 -> {sorted(os.listdir(src))}")
@@ -3656,8 +3660,44 @@ def test_verify(tmp: Path):
               f"指定一个号核对:只查这一个 -> {[dlg2.t.item(k, 0).text() for k in range(dlg2.t.rowCount())]}")
         dlg3 = VerifyDialog(rec, day, nicks=["家长小天地"])
         check(dlg3.w is None and "教育号" in dlg3.lab_done.text(), "教育号指定核对:说清楚查不了")
+        # 应发 / 实发 / 还差(带设置)
+        from qe.config import Settings
+        st = Settings(tmp / "st_vf.json")
+        st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"PUBG突围君": 5, "CSGO战神君": 5}}]
+        dlg4 = VerifyDialog(rec, day, nicks=["PUBG突围君"], st=st)
+        _wait(app, lambda: not dlg4.w.isRunning(), 20)
+        app.processEvents()
+        row4 = [dlg4.t.item(0, c).text() for c in range(4)]
+        check(row4 == ["PUBG突围君", "5", "3", "2"], f"应发 5、企鹅号上实发 3、还差 2 -> {row4}")
     finally:
         omapi.Client = real
+
+
+def test_unsend(tmp: Path):
+    print("[已发的手动改回没发(用户 2026-10-24):视频挪回原文件夹、记录改没发成;视频找不到也改记录并说清楚]")
+    from qe import folders as F
+    from qe import verify
+    from qe.records import Records
+    rec = Records(tmp / "r_us.sqlite")
+    src = tmp / "us" / "src" / "10.24"
+    arc = tmp / "us" / "arc"
+    src.mkdir(parents=True)
+    arc.mkdir(parents=True)
+    v = F.Video(path=str(src / "a.mp4"), title="a", account="CSGO战神君", employee="", date="10.24")
+    rid = rec.api_begin(v)
+    rec.api_finish(rid, "已发", "article_id=X1 vid=Y1")
+    (arc / "a.mp4").write_bytes(b"x")
+    rec.mark_moved(rid, str(arc / "a.mp4"))
+    row = rec.sent_row(str(arc / "a.mp4"))
+    check(row and row["id"] == rid and rec.sent_row(str(src / "a.mp4"))["id"] == rid, "按原位置 / 挪去的位置都找得到这条已发记录")
+    check(verify.unsend(rec, row) == "" and (src / "a.mp4").is_file() and rec.status_of(str(src / "a.mp4")) == "",
+          "改回没发:视频挪回原来的文件夹,能再发")
+    w = F.Video(path=str(src / "b.mp4"), title="b", account="CSGO战神君", employee="", date="10.24")
+    rid2 = rec.api_begin(w)
+    rec.api_finish(rid2, "已发", "article_id=X2 vid=Y2")
+    rec.mark_moved(rid2, str(arc / "不见了.mp4"))
+    msg = verify.unsend(rec, rec.sent_row(str(arc / "不见了.mp4")))
+    check("视频没找到" in msg and rec.status_of(str(src / "b.mp4")) == "", f"视频找不到:记录照样改回没发,说清楚要自己放回去 -> {msg}")
 
 
 def test_black_border(tmp: Path):
@@ -4439,6 +4479,7 @@ if __name__ == "__main__":
     test_edit_quota(tmp)
     test_extra_vert_order(tmp)
     test_verify(tmp)
+    test_unsend(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

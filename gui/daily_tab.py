@@ -159,7 +159,7 @@ class DailyTab(QWidget):
     def verify(self, nicks: list[str] | None = None):
         """去企鹅号核对:不给号 = 16 个号全查;给了 = 只查这几个(右键一个号)。"""
         from gui.verify_dialog import VerifyDialog
-        VerifyDialog(self.rec, self.day(), self, nicks=nicks or None).exec()
+        VerifyDialog(self.rec, self.day(), self, nicks=nicks or None, st=self.st).exec()
         self.refresh()
 
     def _today(self):

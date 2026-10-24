@@ -247,6 +247,15 @@ class Records:
                 "SELECT account, employee, status, published_at FROM posts WHERE published_at LIKE ? "
                 "AND status IN ('已发','没发成') ORDER BY published_at", (f"{day}%",))]
 
+    def sent_row(self, path: str) -> dict | None:
+        """这条视频(原位置或者发完挪去的位置)的「已发」记录;没有给 None。"""
+        self._fill()
+        k = pkey(path)
+        with _LOCK:
+            r = self.conn.execute("SELECT * FROM posts WHERE status='已发' AND (pkey=? OR moved_pkey=?) ORDER BY id DESC LIMIT 1",
+                                  (k, k)).fetchone()
+        return dict(r) if r else None
+
     def mark_unsent(self, rid: int, note: str = "") -> None:
         """去企鹅号核对:记成已发、平台上其实没有的 → 改成「没发成」(能再发),挪走的位置清掉(视频挪回原处了)。"""
         with _LOCK:

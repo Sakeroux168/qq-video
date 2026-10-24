@@ -585,7 +585,11 @@ class MainWindow(QMainWindow):
         self.b_rec_unsent = QPushButton("标成没发出去")
         self.b_rec_unsent.setToolTip("你去企鹅号后台看了,没发出去:记成没发成,之后能再发")
         self.b_rec_unsent.clicked.connect(lambda: self.rec_mark(False))
-        for b in (self.b_rec_retry, self.b_rec_sent, self.b_rec_unsent):
+        self.b_rec_back = QPushButton("改回没发(拎回来重发)")
+        self.b_rec_back.setToolTip("选中的「已发」其实没发上(去企鹅号后台看了 / 核对出来的):视频挪回原来的文件夹,记录改成没发成,\n"
+                                   "之后在「16 个号」页刷新、再发就行。选好几条一起改。")
+        self.b_rec_back.clicked.connect(self.rec_unsend)
+        for b in (self.b_rec_retry, self.b_rec_sent, self.b_rec_unsent, self.b_rec_back):
             ra.addWidget(b)
         rv2.addLayout(ra)
         self._rec_sel()
@@ -2156,12 +2160,15 @@ class MainWindow(QMainWindow):
             txt = f"「{r['title'][:24]}」不确定发没发:先去企鹅号后台看一眼,再点下面的"
         elif bad:
             txt = f"「{r['title'][:24]}」没发成:{(r['note'] or '')[:40]}"
+        elif r["status"] == "已发":
+            txt = f"「{r['title'][:24]}」记成已发:后台其实没有的话,点「改回没发」拎回来重发"
         else:
             txt = ""
         self.lab_rec_sel.setText(txt)
         self.b_rec_retry.setVisible(api and bad and not unsure)
         self.b_rec_sent.setVisible(bad)
         self.b_rec_unsent.setVisible(unsure)
+        self.b_rec_back.setVisible(bool(r) and r["status"] == "已发")
 
     def rec_mark(self, sent: bool):
         r = self._rec_cur()
@@ -2182,6 +2189,32 @@ class MainWindow(QMainWindow):
         self.say(f"数据记录:「{r['title'][:30]}」{what}")
         if not self.api_tab.busy():
             self.api_tab.load()                       # 16 个号页的状态跟着变
+        self.refresh_records()
+
+    def rec_unsend(self):
+        """选中的「已发」改回没发:视频挪回原来的文件夹,记录改成没发成(用户 2026-10-24)。"""
+        recs = getattr(self, "_rec_rows", [])
+        rows = [recs[i] for i in sorted({ix.row() for ix in self.t_rec.selectedIndexes()}) if i < len(recs) and recs[i]["status"] == "已发"]
+        if not rows:
+            return
+        if self.api_tab.busy() and not getattr(self.api_tab, "_quiet", False):
+            QMessageBox.information(self, "数据记录", "16 个号那边正在发,发完再改。")
+            return
+        if not self._ask("改回没发", f"这 {len(rows)} 条记成已发的,其实没发上?\n\n" + "\n".join(f"· {r['title'][:30]}" for r in rows[:8]) +
+                         ("\n…" if len(rows) > 8 else "") + "\n\n视频挪回原来的文件夹、记录改成没发成,之后能再发(不会自己发)。",
+                         "改回没发", "先不", default_no=True):
+            return
+        from qe import verify
+        notes = []
+        for r in rows:
+            msg = verify.unsend(self.rec, r)
+            if msg:
+                notes.append(f"{r['title'][:20]}:{msg}")
+        self.say(f"数据记录:{len(rows)} 条改回没发" + (";" + ";".join(notes) if notes else ""))
+        if notes:
+            QMessageBox.information(self, "改回没发", "\n".join(notes))
+        if not self.api_tab.busy():
+            self.api_tab.load()
         self.refresh_records()
 
     def rec_retry(self):

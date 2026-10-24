@@ -579,10 +579,28 @@ class ApiTab(QWidget):
         full = sorted({v.account for v in self.videos if plan.left_today(self.rec, self.st, v.account, sent=sent) == 0})
         return sum(self._spill(n, only_day=today_md) for n in full) > 0
 
+    def unsend_rows(self, rows: list[int]):
+        """已发的改回没发(用户 2026-10-24):视频挪回原来的文件夹、记录改成没发成;之后刷新再发。"""
+        from qe import verify
+        recs = [(i, self.rec.sent_row(self.videos[i].path)) for i in rows]
+        recs = [(i, r) for i, r in recs if r]
+        if not recs:
+            QMessageBox.information(self, "改回没发", "选中的里没有记成已发的。")
+            return
+        if not ask(self, "改回没发", f"这 {len(recs)} 条记成已发的,其实没发上?\n\n" +
+                   "\n".join(f"· {self.videos[i].title[:30]}" for i, _r in recs[:8]) + ("\n…" if len(recs) > 8 else "") +
+                   "\n\n视频挪回原来的文件夹、记录改成没发成,之后能再发(不会自己发)。", "改回没发", "先不", default_no=True):
+            return
+        notes = [f"{r['title'][:20]}:{m}" for _i, r in recs for m in (verify.unsend(self.rec, r),) if m]
+        self.say(f"{len(recs)} 条改回没发" + (";" + ";".join(notes) if notes else "") + " —— 点刷新以后能再发")
+        if notes:
+            QMessageBox.information(self, "改回没发", "\n".join(notes))
+        self.load()
+
     def verify_one(self, nick: str):
         """去企鹅号核对这一个号今天的(只读);没发上的能拎回来重发。"""
         from gui.verify_dialog import VerifyDialog
-        VerifyDialog(self.rec, plan.today(), self, nicks=[nick]).exec()
+        VerifyDialog(self.rec, plan.today(), self, nicks=[nick], st=self.st).exec()
         self.load()
 
     def add_extra_today(self, nick: str, n: int | None = None) -> int:
@@ -1502,6 +1520,9 @@ class ApiTab(QWidget):
                 return
             # 老手试用 2026-10-21:原来 21 项、一屏放不下,常用的埋在下面 → 常用的放上面,不常用的收进子菜单,发布放最底下
             n_s = len(sel)
+            if i != -1 and self.state.get(i, "").startswith("已发") or (i != -1 and self.rec.sent_row(self.videos[i].path)):
+                m.addAction("改回没发(拎回来重发)…", lambda: self.unsend_rows(sel or [i])).setEnabled(not busy)
+                m.addSeparator()
             if i != -1:
                 m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not busy and not self._sent(i))
                 m.addAction("复制标题", lambda: self._copy(self.videos[i].title))

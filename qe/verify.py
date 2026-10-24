@@ -83,23 +83,27 @@ def check_account(cl, rec, nick: str, day: str) -> dict:
     for r in ours:
         if (r["aid"] and r["aid"] in aids) or (r["vid"] and r["vid"] in vids):
             continue
-        why = "企鹅号上没有这条"
-        if r["aid"]:                                       # 列表里没翻到:单查一下,别冤枉(列表可能有延迟)
+        # 用户 2026-10-24:软件记 50、企鹅号上 49,原来单查说「发布成功」就放过了,看不出是哪条 →
+        # 今天的列表里没有的都列出来;单查说发布成功的标「可疑」(不默认打勾),没发布 / 删了 / 查不到的默认打勾
+        why, sure = "企鹅号今天的列表里没有这条", True
+        if r["aid"]:
             try:
                 info = (cl.article_info(r["aid"]) or {}).get("article_info") or {}
                 flag, dele = str(info.get("article_pub_flag") or ""), str(info.get("article_del_flag") or "") == "已删除"
+                t = str(info.get("article_pub_time") or "")
                 if flag in OK_FLAGS and not dele:
-                    continue
-                why = "已删除" if dele else (f"企鹅号上是「{flag}」" if flag else why)
+                    why, sure = f"今天的列表里没有,单查是「{flag}」" + (f"(发布时间 {t[5:16]})" if t else "") + ",看一眼再决定", False
+                else:
+                    why = "已删除" if dele else (f"企鹅号上是「{flag}」" if flag else why)
             except Exception as e:
                 why = f"查不到这篇({str(e)[:40]})"
         else:
-            why = "软件没记下文章编号,企鹅号上也没找到同一条"
-        missing.append(dict(r, why=why))
+            why = "软件没记下文章编号,企鹅号今天的列表里也没有"
+        missing.append(dict(r, why=why, sure=sure))
     our_aids = {r["aid"] for r in ours if r["aid"]}
     our_vids = {r["vid"] for r in ours if r["vid"]}
     extra = [p for p in live if not ((p["aid"] and p["aid"] in our_aids) or (p["vid"] and p["vid"] in our_vids))]
-    return {"nick": nick, "ours": len(ours), "ok": sum(1 for p in live if p["flag"] == "发布成功"),
+    return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if p["flag"] == "发布成功"),
             "review": sum(1 for p in live if p["flag"] == "审核中"), "missing": missing, "extra": extra}
 
 
@@ -113,6 +117,17 @@ def _real_path(p: str) -> str:
     except OSError:
         pass
     return ""
+
+
+def unsend(rec, row: dict, why: str = "人手动改回没发") -> str:
+    """人手动把一条「已发」改回没发(用户 2026-10-24:「已发的视频不能手动改回来,应该加个按钮」):
+    能找到视频就挪回原来的文件夹(和拎回来重发一样);找不到视频也把记录改成没发成(要重发得自己把视频放回去)。
+    返回 ""(好了)或者一句提醒。"""
+    msg = pull_back(rec, dict(row, why=why))
+    if msg and msg.startswith("发布归档里找不到"):
+        rec.mark_unsent(row["id"], f"({why};视频没找到,要重发得自己放回原来的文件夹)")
+        return "记录改成没发了,但视频没找到(要重发得自己把视频放回原来的文件夹)"
+    return msg
 
 
 def pull_back(rec, row: dict) -> str:

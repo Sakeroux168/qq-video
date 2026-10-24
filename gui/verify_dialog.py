@@ -34,10 +34,10 @@ class VerifyWorker(QThread):
 
 
 class VerifyDialog(QDialog):
-    def __init__(self, rec, day: str, parent=None, nicks: list[str] | None = None):
-        """nicks = 只查这几个号(用户 2026-10-23「再加一个指定某某号核对」);不给 = 16 个号全查。"""
+    def __init__(self, rec, day: str, parent=None, nicks: list[str] | None = None, st=None):
+        """nicks = 只查这几个号(用户 2026-10-23「再加一个指定某某号核对」);不给 = 16 个号全查。st = 设置(算应发几条)。"""
         super().__init__(parent)
-        self.rec, self.day = rec, day
+        self.rec, self.day, self.st = rec, day, st
         self.setWindowTitle(f"去企鹅号核对 · {day}" + (f" · {'、'.join(nicks)}" if nicks else ""))
         self.resize(820, 620)
         v = QVBoxLayout(self)
@@ -45,13 +45,13 @@ class VerifyDialog(QDialog):
         self.lab.setObjectName("muted")
         self.lab.setWordWrap(True)
         v.addWidget(self.lab)
-        self.t = QTableWidget(0, 6)
-        self.t.setHorizontalHeaderLabels(["号", "软件记的已发", "企鹅号上发布成功", "审核中", "没发上", "软件没记的"])
+        self.t = QTableWidget(0, 8)                       # 用户 2026-10-24:改成 应发 / 实发 / 还差,再说哪些是假发成功
+        self.t.setHorizontalHeaderLabels(["号", "应发", "实发(企鹅号上)", "还差", "软件记的已发", "假发成功", "审核中", "软件没记的"])
         self.t.verticalHeader().setVisible(False)
         self.t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.t.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         v.addWidget(self.t, 2)
-        v.addWidget(QLabel("软件里记成已发、企鹅号上其实没有的(打勾的拎回来重发):"))
+        v.addWidget(QLabel("假发成功:软件里记成已发、企鹅号今天的列表里没有的(打勾的拎回来重发;「看一眼再决定」的没打勾):"))
         self.miss = QListWidget()
         v.addWidget(self.miss, 2)
         self.lab_extra = QLabel("")
@@ -87,25 +87,33 @@ class VerifyDialog(QDialog):
     def _one(self, r: dict):
         k = self.t.rowCount()
         self.t.insertRow(k)
+        q = 0
+        if self.st is not None:
+            from qe import plan
+            q = plan.quota_on(self.st, r["nick"], self.day)
         if r.get("error"):
-            vals = [r["nick"], "", "", "", f"查不了:{r['error']}", ""]
+            vals = [r["nick"], str(q or ""), "", "", "", f"查不了:{r['error']}", "", ""]
         else:
-            vals = [r["nick"], str(r["ours"]), str(r["ok"]), str(r["review"]) if r["review"] else "",
-                    str(len(r["missing"])) if r["missing"] else "✓", str(len(r["extra"])) if r["extra"] else ""]
+            live = r.get("live", r["ok"] + r["review"])
+            diff = (f"多发 {live - q}" if live > q else str(q - live) if q > live else "✓") if q else ""
+            vals = [r["nick"], str(q) if q else "—", str(live), diff, str(r["ours"]),
+                    str(len(r["missing"])) if r["missing"] else "✓", str(r["review"]) if r["review"] else "",
+                    str(len(r["extra"])) if r["extra"] else ""]
         for c, t in enumerate(vals):
             it = QTableWidgetItem(t)
             if c:
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.t.setItem(k, c, it)
-        if r.get("missing"):
+        bad = r.get("missing") or (not r.get("error") and q and r.get("live", 0) < q)
+        if bad or r.get("error"):
             from gui.theme import cur
             from PySide6.QtGui import QBrush, QColor
-            for c in range(6):
-                self.t.item(k, c).setBackground(QBrush(QColor(cur()["rows"]["red"])))
+            for c in range(8):
+                self.t.item(k, c).setBackground(QBrush(QColor(cur()["rows"]["red" if r.get("missing") or r.get("error") else "yellow"])))
         for m in r.get("missing") or []:
             it = QListWidgetItem(f"{m['account']} · {m['title']} —— {m['why']}")
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(Qt.CheckState.Checked)
+            it.setCheckState(Qt.CheckState.Checked if m.get("sure", True) else Qt.CheckState.Unchecked)
             it.setData(Qt.ItemDataRole.UserRole, len(self.rows))
             self.rows.append(m)
             self.miss.addItem(it)
@@ -113,8 +121,10 @@ class VerifyDialog(QDialog):
 
     def _end(self):
         n = len(self.rows)
-        self.lab_done.setText(f"查完了:{n} 条软件记成已发、企鹅号上没有" if n else "查完了:软件记的已发,企鹅号上都有 ✓")
-        self.b_back.setText(f"拎回来重发({n} 条)" if n else "拎回来重发")
+        sure = sum(1 for m in self.rows if m.get("sure", True))
+        self.lab_done.setText((f"查完了:{n} 条假发成功(软件记成已发、企鹅号今天的列表里没有)" + (f",其中 {n - sure} 条要你看一眼" if n > sure else ""))
+                              if n else "查完了:软件记的已发,企鹅号上都有 ✓")
+        self.b_back.setText("拎回来重发(打勾的)" if n else "拎回来重发")
         self.b_back.setEnabled(bool(n))
         if self.extra:
             self.lab_extra.setText(f"企鹅号上今天还有 {len(self.extra)} 条软件没记的(手动发的 / 别的软件发的,不用管):" +
