@@ -1,5 +1,5 @@
 // 《大脑的账本》横屏 1920×1080。时间轴对齐 debt/audio/voice_final.wav（已在 19.85s 处插 1.6s 给标题卡）。
-const DUR = 202.4;
+const DUR = 206.0;
 const SUBS = [
   [0.12, 2.15, '最近一个欠你钱的人，是谁？'], [2.33, 3.5, '一秒就想起来了吧。'],
   [3.65, 5.6, '那你最近，欠了谁的钱？'], [6.22, 6.95, '卡住了吧。'],
@@ -10,6 +10,7 @@ const SUBS = [
   [21.85, 24.2, '钱最好对账，偏偏它最先对不上。'],
   [24.37, 26.55, '2022年，有学者做了一系列实验；'], [26.72, 29.5, '更早，还有人调查过朋友之间真实的借钱。'],
   [29.69, 30.4, '结论一样：'], [30.55, 32.05, '借出去的人记得更牢，'], [32.24, 33.9, '欠钱的人更容易忘。'],
+  ...SUBS2,
 ];
 
 // ============ 开场：手机里的室友（0–7.0）
@@ -81,7 +82,7 @@ function slip(x, y, str, a, ink = 1, rot = 0) {
     ctx.globalAlpha *= ink; ctx.font = `76px ${HAND}`; ctx.fillStyle = C.pen; ctx.textAlign = 'center'; ctx.fillText(str, 0, 26); ctx.restore(); });
 }
 function sceneMoney(t) {
-  const a = vis(t, 21.7, 40, 0.35); if (a <= 0.01) return;
+  const a = vis(t, 21.7, 37.6, 0.35); if (a <= 0.01) return;
   withAlpha(a, () => {
     // 对账：两张单据，一张清楚一张糊
     const sa = vis(t, 21.85, 24.6, 0.3);
@@ -97,19 +98,28 @@ function sceneMoney(t) {
     withAlpha(vis(t, 29.69, 30.6, 0.2), () => { text('=', 980, 560, { size: 120, weight: 900, color: C.gold, glow: 0.4 }); });
     // 借出的人 vs 欠钱的人
     const fa = vis(t, 30.5, 40, 0.3);
+    // 他以为还了多少 vs 实际
+    const ba = vis(t, 34.15, 37.6, 0.3);
+    bars(820, 250, 520, ba, [['他记得还了', 0.72, C.gold], ['实际还了', 0.3, 'rgba(243,230,211,0.7)']], (t - 34.8) / 0.8);
     figure(620, 905, 1.2, t, { pose: 'hips', face: 'smug', a: fa, hair: 0, seed: 2 });
     figure(1300, 905, 1.2, t, { pose: poseAt(t, [[0, 'stand'], [32.24, 'scratch']]), face: t > 32.24 ? 'confused' : 'neutral', a: fa * easeOut((t - 30.8) / 0.3), hair: 1, seed: 3, flip: true });
-    bubble(770, 290, 360, 160, vis(t, 30.7, 40, 0.25), () => { ctx.font = `80px ${HAND}`; ctx.fillStyle = C.ink; ctx.textAlign = 'center'; ctx.fillText('¥200', 0, 28); ctx.lineWidth = 3; ctx.strokeStyle = C.ink; ctx.strokeText('¥200', 0, 28); }, -0.4);
-    bubble(1150, 290, 360, 160, vis(t, 32.3, 40, 0.25), () => { ctx.font = `80px ${HAND}`; ctx.fillStyle = C.ink; ctx.textAlign = 'center'; ctx.globalAlpha *= lerp(0.8, 0.12, ease((t - 32.6) / 1.0)); ctx.fillText('¥200', 0, 28); }, 0.4);
+    bubble(770, 290, 360, 160, vis(t, 30.7, 34.05, 0.25), () => { ctx.font = `80px ${HAND}`; ctx.fillStyle = C.ink; ctx.textAlign = 'center'; ctx.fillText('¥200', 0, 28); ctx.lineWidth = 3; ctx.strokeStyle = C.ink; ctx.strokeText('¥200', 0, 28); }, -0.4);
+    bubble(1150, 290, 360, 160, vis(t, 32.3, 34.05, 0.25), () => { ctx.font = `80px ${HAND}`; ctx.fillStyle = C.ink; ctx.textAlign = 'center'; ctx.globalAlpha *= lerp(0.8, 0.12, ease((t - 32.6) / 1.0)); ctx.fillText('¥200', 0, 28); }, 0.4);
   });
 }
 
+const PAGES = [[21.8, '01', '钱', 'MONEY'], [57.6, '02', '人情', 'FAVORS'], [80.6, '03', '功劳', 'CREDIT'], [115.3, '04', '伤害', 'HURT'], [152.9, '05', '他的账本', 'HIS LEDGER'], [193.0, '', '', '']];
+function hudAt(t) {
+  let cur = null, nxt = 999; for (let i = 0; i < PAGES.length; i++) if (t >= PAGES[i][0]) { cur = PAGES[i]; nxt = PAGES[i + 1] ? PAGES[i + 1][0] : 999; }
+  if (!cur || !cur[1]) return; hud(vis(t, cur[0], nxt, 0.4), cur[1], cur[2], cur[3]);
+}
 window.draw = function (t) {
   const spot = t < 7 ? 820 : t < 13.3 ? 1000 : t < 21.7 ? 1060 : 960;
   stage(t, { spot, ring: t < 7 || t > 30.4 ? 1 : 0.4 });
   sceneOpen(t); sceneLedger(t); scenePages(t); sceneMoney(t);
-  hud(vis(t, 21.8, 999, 0.4), '01', '钱', 'MONEY');
-  hudRight(vis(t, 7.0, 999, 0.5));
+  sceneRoommate(t); sceneFavors(t); sceneCredit(t); sceneHurt(t); sceneHis(t); sceneEnd(t);
+  hudAt(t);
+  hudRight(vis(t, 7.0, 202.6, 0.5));
   subtitles(t, SUBS);
   titleCard(t, 19.85, 1.95);
   finishFrame(t);

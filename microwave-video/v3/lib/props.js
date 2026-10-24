@@ -73,11 +73,11 @@ function ledgerPage(title, rows, ink, write, bold = 0, cursor = false, t = 0) {
   if (cursor && Math.floor(t * 2.2) % 2 === 0) { const i = rows.findIndex(r => !r[0]); const y = 230 + (i < 0 ? 3 : i) * 118; ctx.fillStyle = C.red; ctx.fillRect(78, y - 58, 6, 72); }
 }
 // 摊开的账本：中心 (cx, cy)，宽 bw；L/R 是两页的绘制函数；open 0..1 控制翻开
-function book(cx, cy, bw, L, R, { open = 1, a = 1, glowL = 0 } = {}) {
+function book(cx, cy, bw, L, R, { open = 1, a = 1, glowL = 0, cover = '#4A1E17' } = {}) {
   withAlpha(a, () => {
     const ph = bw * 0.52, topW = bw * 0.39, botW = bw * 0.5, ty = cy - ph / 2, by = cy + ph / 2;
     ctx.save(); ctx.filter = 'blur(28px)'; ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.beginPath(); ctx.ellipse(cx, by + 30, bw * 0.55, 70, 0, 0, 6.283); ctx.fill(); ctx.restore();
-    ctx.fillStyle = '#4A1E17'; ctx.beginPath(); ctx.moveTo(cx - botW - 22, by + 16); ctx.lineTo(cx - topW - 14, ty - 8); ctx.lineTo(cx + topW + 14, ty - 8); ctx.lineTo(cx + botW + 22, by + 16); ctx.lineTo(cx, by + 30); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = cover; ctx.beginPath(); ctx.moveTo(cx - botW - 22, by + 16); ctx.lineTo(cx - topW - 14, ty - 8); ctx.lineTo(cx + topW + 14, ty - 8); ctx.lineTo(cx + botW + 22, by + 16); ctx.lineTo(cx, by + 30); ctx.closePath(); ctx.fill();
     // 右页先画（翻开时左页从右边翻过来）
     drawToPage(R); warp(PG, 900, 700, [cx + 6, ty + 10], [cx + topW, ty], [cx + 6, by + 18], [cx + botW, by]);
     const k = ease(open), lx = lerp(cx + topW, cx - topW, k), lbx = lerp(cx + botW, cx - botW, k);
