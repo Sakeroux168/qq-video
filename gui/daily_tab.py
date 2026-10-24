@@ -64,6 +64,11 @@ class DailyTab(QWidget):
         b.setToolTip("复制还没发够的号和差几条,发给对应的人")
         b.clicked.connect(self.copy_short)
         top.addWidget(b)
+        b = QPushButton("去企鹅号核对")
+        b.setToolTip("16 个号:去企鹅号读一下这天每个号真发了几条,和软件记的对一对(只读,不发不删)。\n"
+                     "软件记成已发、企鹅号上其实没有的,能「拎回来重发」。教育号查不了。")
+        b.clicked.connect(self.verify)
+        top.addWidget(b)
         v.addLayout(top)
 
         self.cards = StatCards([("游戏", "游戏"), ("教育", "教育"), ("动漫", "动漫"), ("总", "总发布量")],
@@ -147,6 +152,11 @@ class DailyTab(QWidget):
                     tab._update_sum()
             except Exception:
                 pass
+
+    def verify(self):
+        from gui.verify_dialog import VerifyDialog
+        VerifyDialog(self.rec, self.day(), self).exec()
+        self.refresh()
 
     def _today(self):
         n = bj_now()

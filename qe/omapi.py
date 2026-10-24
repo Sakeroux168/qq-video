@@ -136,6 +136,15 @@ class Client:
             raise ApiError(f"{what}失败:{msg}(code {code})", code)
         return {}
 
+    # ---------------- 只读:核对用(qe/verify.py) ----------------
+    def list_articles(self, page: int = 1, limit: int = 10) -> dict:
+        """这个号的文章列表(新的在前):{articles:[…], page, limit, total}。"""
+        return self._call("GET", "/article/clientlist", "查文章列表", params={"page": page, "limit": limit})
+
+    def article_info(self, article_id: str) -> dict:
+        """一篇文章的状态:{article_info:{article_pub_flag 发布成功/审核中/未发布, article_del_flag 未删除/已删除, …}}。"""
+        return self._call("GET", "/article/infoclient", "查文章", params={"article_id": article_id})
+
     # ---------------- 发一条 ----------------
     def upload(self, path: str, on_progress=None, stop=None) -> str:
         """分片传视频,返回 transaction_id。"""

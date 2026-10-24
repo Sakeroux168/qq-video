@@ -247,6 +247,12 @@ class Records:
                 "SELECT account, employee, status, published_at FROM posts WHERE published_at LIKE ? "
                 "AND status IN ('已发','没发成') ORDER BY published_at", (f"{day}%",))]
 
+    def mark_unsent(self, rid: int, note: str = "") -> None:
+        """去企鹅号核对:记成已发、平台上其实没有的 → 改成「没发成」(能再发),挪走的位置清掉(视频挪回原处了)。"""
+        with _LOCK:
+            self.conn.execute("UPDATE posts SET status='没发成', moved_pkey=NULL, note=note || ? WHERE id=?", (note, rid))
+            self.conn.commit()
+
     def problems_on(self, day: str) -> dict:
         """「今天出问题」那张卡(老板试用 2026-10-21):这天没发成的(后来发成了的不算)、
         还不确定发没发的、摆好了还没确认的(后两样不管哪天的,没处理就一直算)。day = 2026-10-21。"""

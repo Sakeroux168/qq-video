@@ -3570,6 +3570,86 @@ def test_extra_vert_order(tmp: Path):
         check(True, "(没有 ffmpeg,转竖屏那段跳过)")
 
 
+def test_verify(tmp: Path):
+    print("[去企鹅号核对(用户 2026-10-23):软件记的已发 vs 企鹅号上的;没发上的拎回来重发(挪回原文件夹、改没发成)]")
+    from qe import folders as F
+    from qe import verify
+    from qe.config import bj_now
+    from qe.records import Records
+    day = bj_now().strftime("%Y-%m-%d")
+    rec = Records(tmp / "r_vf.sqlite")
+    src = tmp / "vf" / "游戏视频" / "CSGO--CSGO战神君" / "10.23"
+    arc = tmp / "vf" / "发布" / "CSGO"
+    src.mkdir(parents=True)
+    arc.mkdir(parents=True)
+    rows = {}
+    for k, (title, aid) in enumerate((("在的", "A1"), ("审核中的", "A2"), ("被删的", "A3"), ("没上去的", "A4"), ("G镇大写", "A5"))):
+        v = F.Video(path=str(src / f"{title}.mp4"), title=title, account="CSGO战神君", employee="", date="10.23")
+        rid = rec.api_begin(v)
+        rec.api_finish(rid, "已发", f"article_id={aid} vid=V{k}")
+        (arc / f"{title}.mp4").write_bytes(b"x")
+        (arc / f"{title}.jpg").write_bytes(b"j")
+        rec.mark_moved(rid, str(arc / f"{title}.mp4"))
+        rows[title] = rid
+    now = bj_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    class Fake:
+        def list_articles(self, page, limit):
+            arts = [{"article_url": "http://kuaibao.qq.com/s/A100", "article_pub_flag": "发布成功", "article_pub_time": now,
+                     "article_title": "在的", "article_video_info": {"vid": "V0"}},
+                    {"article_id": "A2", "article_pub_flag": "审核中", "article_pub_time": now, "article_title": "审核中的"},
+                    {"article_id": "A3", "article_pub_flag": "发布成功", "article_del_flag": "已删除", "article_pub_time": now,
+                     "article_title": "被删的"},
+                    {"article_id": "B9", "article_pub_flag": "发布成功", "article_pub_time": now, "article_title": "手动发的"},
+                    {"article_id": "A5", "article_pub_flag": "发布成功", "article_pub_time": "2001-01-01 10:00:00", "article_title": "老的"}]
+            return {"articles": arts if page == 1 else [], "total": "5"}
+
+        def article_info(self, aid):
+            return {"article_info": {"article_pub_flag": {"A4": "未发布", "A5": "发布成功"}.get(aid, "未发布"),
+                                     "article_del_flag": "已删除" if aid == "A3" else "未删除"}}
+    r = verify.check_account(Fake(), rec, "CSGO战神君", day)
+    miss = {m["title"]: m["why"] for m in r["missing"]}
+    check(r["ours"] == 5 and r["ok"] == 2 and r["review"] == 1 and set(miss) == {"被删的", "没上去的"}
+          and "已删除" in miss["被删的"] and "未发布" in miss["没上去的"],
+          f"核对:在的 / 审核中的 / 列表没翻到但单查是发布成功的 都算对上;被删的、没上去的列出来 -> {r['ours']} {r['ok']} {r['review']} {miss}")
+    check([e["title"] for e in r["extra"]] == ["手动发的"], f"企鹅号上有、软件没记的单独列 -> {[e['title'] for e in r['extra']]}")
+    m = next(x for x in r["missing"] if x["title"] == "没上去的")
+    check(verify.pull_back(rec, m) == "" and (src / "没上去的.mp4").is_file() and (src / "没上去的.jpg").is_file()
+          and not (arc / "没上去的.mp4").exists() and rec.status_of(str(src / "没上去的.mp4")) == ""
+          and rec.status_of(str(src / "在的.mp4")) == "已发",
+          "拎回来重发:视频和封面挪回原来的文件夹(文件夹没了也建),记录改成没发成,能再发;别的不动")
+    import shutil
+    shutil.rmtree(src)
+    m2 = next(x for x in r["missing"] if x["title"] == "被删的")
+    check(verify.pull_back(rec, m2) == "" and (src / "被删的.mp4").is_file(), "原来的日期文件夹发空被删了:建回来再挪")
+    check(len(rec.sent_on(day).items()) and rec.sent_on(day).get("CSGO战神君") == 3, "拎回来的不再算今天已发(发够就停的闸跟着让出名额)")
+    # 窗口:每日汇总「去企鹅号核对」→ 表 + 没发上的打勾 →「拎回来重发」
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi
+    from gui.verify_dialog import VerifyDialog
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    real = omapi.Client
+    omapi.Client = lambda *a, **k: Fake()
+    try:
+        rid = rows["G镇大写"]
+        rec.mark_unsent(rid, "")
+        rec.conn.execute("UPDATE posts SET status='已发' WHERE id=?", (rid,))       # 再造一条「记成已发、平台没有」
+        rec.conn.execute("UPDATE posts SET note='article_id=A9 vid=V9', moved_pkey=? WHERE id=?",
+                         (os.path.normcase(str(arc / "G镇大写.mp4")), rid))
+        rec.conn.commit()
+        dlg = VerifyDialog(rec, day)
+        _wait(app, lambda: not dlg.w.isRunning(), 20)
+        app.processEvents()
+        check(dlg.t.rowCount() == 1 and dlg.miss.count() == 1 and "G镇大写" in dlg.miss.item(0).text() and dlg.b_back.isEnabled(),
+              f"核对窗口:每个号一行,没发上的列出来打勾 -> {[dlg.miss.item(k).text() for k in range(dlg.miss.count())]}")
+        dlg.pull_back()
+        check((src / "G镇大写.mp4").is_file() and "拎回来 1 条" in dlg.lab_done.text(),
+              f"点「拎回来重发」:挪回原文件夹,文件名大小写不变 -> {sorted(os.listdir(src))}")
+    finally:
+        omapi.Client = real
+
+
 def test_black_border(tmp: Path):
     print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
     from PIL import Image, ImageDraw
@@ -4334,6 +4414,7 @@ if __name__ == "__main__":
     test_black_border(tmp)
     test_edit_quota(tmp)
     test_extra_vert_order(tmp)
+    test_verify(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)
