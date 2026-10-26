@@ -125,7 +125,7 @@ class DailyTab(QWidget):
         nick = self.t.item(r, 1).text()
         m.addAction(f"改「{nick}」每天规定几条…", lambda: self.edit_quota(r))
         from qe import apiacc
-        if nick in apiacc.nicks():
+        if nick in apiacc.nicks() or apiacc.qfind(nick):      # 教育号取了钥匙(只查不发)的也能单查
             m.addAction(f"去企鹅号核对「{nick}」这天发了几条", lambda: self.verify([nick]))
         w = self.window()
         if hasattr(w, "add_extra") and self.day() == plan.today():

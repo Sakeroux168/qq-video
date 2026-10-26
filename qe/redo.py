@@ -130,6 +130,9 @@ def pull_back(st, rec, row: dict, md: str) -> tuple[str, str]:
     dst = target_dir(st, row, md)
     if not dst:
         return "", "找不到这个号的素材文件夹"
+    if os.path.normcase(os.path.normpath(os.path.dirname(src))) == os.path.normcase(os.path.normpath(dst)):
+        rec.mark_unsent(row["id"], f"(找视频重发:就在 {md} 的文件夹里,没挪)")   # 还没挪去归档、就在那天的文件夹:不挪(免得变成「(2)」)
+        return src, ""
     try:
         os.makedirs(dst, exist_ok=True)
         moved = [p for p in extras(src)]

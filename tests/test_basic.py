@@ -4739,6 +4739,77 @@ def test_find_redo(tmp: Path):
     _ = app
 
 
+def test_edu_verify(tmp: Path):
+    print("[教育号也能核对(用户 2026-10-26):钥匙单独存、只查不发;按标题对;打回的打勾、对不上的不打勾;拎回来挪回今天的文件夹]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, verify
+    from qe import folders as F
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    from gui.verify_dialog import VerifyDialog
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    apiacc.set_qkey("家长研习空间", "ce", "se")
+    check("家长研习空间" not in apiacc.nicks() and all(a["nick"] != "家长研习空间" for a in apiacc.load()),
+          "教育号的钥匙不进 16 个号的名单:发布那边看不到,不可能被接口发")
+    ca = {a["nick"]: a for a in apiacc.check_accounts()}
+    check(ca["家长研习空间"].get("query_only") and not ca["CSGO战神君"].get("query_only") and apiacc.unseal(ca["家长研习空间"]["secret"]) == "se",
+          "核对的名单:16 个号 + 教育号(标着只查不发,钥匙加密存)")
+    n = bj_now()
+    day, md = n.strftime("%Y-%m-%d"), f"{n.month}.{n.day}"
+    root = tmp / "eduv" / "小学生教育类"
+    d = root / md / "家长研习空间"
+    d.mkdir(parents=True)
+    st = Settings(tmp / "st_eduv.json")
+    st["material_root"] = str(root)
+    st["archive_root"] = str(tmp / "eduv" / "归档" / "{month}月")
+    rec = Records(tmp / "r_eduv.sqlite")
+    titles = {"A": "孩子写作业磨蹭怎么办 #家庭教育", "B": "幼小衔接必备:上学前一定要会的十件事,家长赶紧收藏", "C": "被打回的那条", "D": "标题对不上的那条"}
+    for k, t in titles.items():
+        (d / f"{t}.mp4").write_bytes(b"x")
+        rec.manual_published(F.Video(path=str(d / f"{t}.mp4"), title=t, account="家长研习空间", employee="小王", date=md))
+    t0 = f"{day} 10:00:00"
+    arts = [{"article_title": "孩子写作业磨蹭怎么办#家庭教育", "article_pub_time": t0, "article_pub_flag": "发布成功"},
+            {"article_title": "幼小衔接必备:上学前一定要会的十件事", "article_pub_time": t0, "article_pub_flag": "发布成功"},  # 平台截短了
+            {"article_title": "被打回的那条", "article_pub_time": t0, "article_pub_flag": "审核不通过"},
+            {"article_title": "人在后台手动发的", "article_pub_time": t0, "article_pub_flag": "发布成功"}]
+
+    class C:
+        def __init__(self, cid, sec, **k):
+            self.cid = cid
+
+        def list_articles(self, page=1, limit=10):
+            return {"articles": arts if page == 1 and self.cid == "ce" else [], "total": len(arts)}
+
+        def article_info(self, aid):
+            return {}
+    r = verify.check_edu(C("ce", "se"), rec, "家长研习空间", day)
+    why = {m["title"]: (m["why"], m["sure"]) for m in r["missing"]}
+    check(r["ours"] == 4 and r["live"] == 3 and len(r["extra"]) == 1 and set(why) == {titles["C"], titles["D"]},
+          f"按标题对:去空格标点一样的、被平台截短的都算对上;后台多出来的列为软件没记的 -> {r['ours']} {r['live']} {why}")
+    check(why[titles["C"]] == ("企鹅号上是「审核不通过」", True) and why[titles["D"]][1] is False,
+          "被打回的:打勾(能拎回来);标题哪儿都找不到的:不打勾,看一眼再决定")
+    real = omapi.Client
+    omapi.Client = C
+    try:
+        dlg = VerifyDialog(rec, day, st=st)
+        _wait(app, lambda: dlg.w is None or dlg.w.isFinished())
+        app.processEvents()
+        check("家长研习空间" in dlg.results and dlg.results["家长研习空间"].get("edu") and "CSGO战神君" in dlg.results,
+              "「去企鹅号核对」16 个号和教育号一起查")
+        check(dlg.miss.count() == 2, f"假发成功列了 2 条 -> {dlg.miss.count()}")
+        dlg.pull_back()
+        check(rec.status_of(str(d / f"{titles['C']}.mp4")) == "" and (d / f"{titles['C']}.mp4").is_file()
+              and not list(d.glob("*(2).mp4")),
+              "拎回来:被打回的改成没发,视频就在今天的文件夹里的不挪(不会变成「(2)」)")
+        check(rec.status_of(str(d / f"{titles['D']}.mp4")) == "已发", "没打勾的(标题对不上)不动")
+        rows = verify.table_rows(st, rec, day, dlg.results)
+        check(any(nick == "家长研习空间" and a == 3 for _c, nick, _q, a, _t in rows), "导出表格:教育号用企鹅号上的实发")
+        dlg.close()
+    finally:
+        omapi.Client = real
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -4809,6 +4880,7 @@ if __name__ == "__main__":
     test_api_cover(tmp)
     test_wm_detect_unit(tmp)
     test_find_redo(tmp)
+    test_edu_verify(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

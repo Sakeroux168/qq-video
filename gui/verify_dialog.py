@@ -28,7 +28,10 @@ class VerifyWorker(QThread):
             self.step.emit(f"正在查「{nick}」({k + 1} / {len(self.accounts)})…")
             try:
                 cl = omapi.Client(a["client_id"], apiacc.unseal(a["secret"]))
-                self.one.emit(verify.check_account(cl, self.rec, nick, self.day))
+                if a.get("query_only"):                    # 教育号:只查不发,按标题对
+                    self.one.emit(verify.check_edu(cl, self.rec, nick, self.day))
+                else:
+                    self.one.emit(verify.check_account(cl, self.rec, nick, self.day))
             except Exception as e:
                 self.one.emit({"nick": nick, "error": omapi.redact(str(e))[:80] if hasattr(omapi, "redact") else str(e)[:80]})
 
@@ -54,7 +57,9 @@ class VerifyDialog(QDialog):
         top.addWidget(b)
         top.addStretch(1)
         v.addLayout(top)
-        self.lab = QLabel("只是去企鹅号读一下,不发、不删。教育号走创作罐头,查不了。")
+        edu_n = len(apiacc.qload())
+        self.lab = QLabel("只是去企鹅号读一下,不发、不删。" + (f"教育号 {edu_n} 个一起查(按标题对)。" if edu_n else
+                          "教育号还没取钥匙,查不了(左下角「设置」→「登录取钥匙…」选教育号,扫一次码就行)。"))
         self.lab.setObjectName("muted")
         self.lab.setWordWrap(True)
         v.addWidget(self.lab)
@@ -104,11 +109,11 @@ class VerifyDialog(QDialog):
         self.b_back.setEnabled(False)
         self.b_xls.setEnabled(False)
         self.rows, self.extra, self.results = [], [], {}
-        accs = [a for a in apiacc.load() if a.get("enabled", True) and a.get("client_id")]
+        accs = apiacc.check_accounts()                   # 16 个号 + 取了钥匙的教育号(只查不发)
         if self.nicks:
             accs = [a for a in accs if a.get("nick") in self.nicks]
         if not accs:
-            self.lab_done.setText("这个号不是 16 个号里的(教育号走创作罐头,查不了)" if self.nicks else "还没有 16 个号的账号(去设置里搬账号)")
+            self.lab_done.setText("这个号还没有钥匙(教育号:设置里「登录取钥匙…」选它,扫一次码)" if self.nicks else "还没有 16 个号的账号(去设置里搬账号)")
             self.w = None
             return
         self.w = VerifyWorker(self.rec, day, accs, self)
@@ -191,7 +196,14 @@ class VerifyDialog(QDialog):
             if it.checkState() != Qt.CheckState.Checked or it.data(Qt.ItemDataRole.UserRole + 1):
                 continue
             row = self.rows[it.data(Qt.ItemDataRole.UserRole)]
-            why = verify.pull_back(self.rec, row)
+            if row.get("employee") != "接口" and self.st is not None:
+                # 教育号:那天的文件夹整个挪去归档了 → 用「找视频重发」那套,连封面挪回今天的文件夹(结构照原样)
+                from qe import redo
+                from qe.config import bj_now
+                n = bj_now()
+                _new, why = redo.pull_back(self.st, self.rec, row, f"{n.month}.{n.day}")
+            else:
+                why = verify.pull_back(self.rec, row)
             if why:
                 bad.append(f"{row['title'][:20]}:{why}")
                 it.setText(it.text() + f"  ✗ {why}")
@@ -200,7 +212,7 @@ class VerifyDialog(QDialog):
                 it.setText("✓ 拎回来了 · " + it.text())
                 it.setData(Qt.ItemDataRole.UserRole + 1, True)
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
-        self.lab_done.setText(f"拎回来 {done} 条(挪回原来的文件夹、改成没发成)→ 去「16 个号」点刷新、发布" +
+        self.lab_done.setText(f"拎回来 {done} 条(改成没发成;16 个号挪回原来的文件夹,教育号挪回今天的文件夹)→ 去那页刷新、再发" +
                               (f";{len(bad)} 条没拎回来" if bad else ""))
         self.b_back.setEnabled(False)
         w = self.parent()
@@ -209,6 +221,7 @@ class VerifyDialog(QDialog):
         if w is not None and done:
             try:
                 w.api_tab.load()
+                w._load_dates()
             except Exception:
                 pass
 

@@ -106,3 +106,42 @@ def find(nick: str) -> dict | None:
 
 def nicks() -> list[str]:
     return [a["nick"] for a in load() if a.get("enabled", True)]
+
+
+# ---------------- 只查不发的号(教育号;用户 2026-10-26:「教育用 api 查今天的真实发布数据,发布始终还是用创作罐头」) ----------------
+# 单独一个文件,不进上面的名单:发布那边(load / nicks)根本看不到它们,不可能被接口发出去。只给「去企鹅号核对」用。
+
+def qstore_path():
+    return data_dir() / "只查账号.json"
+
+
+def qload() -> list[dict]:
+    """[{nick, client_id, secret(加密的)}]"""
+    try:
+        data = json.loads(qstore_path().read_text("utf-8-sig"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [a for a in data if isinstance(a, dict) and str(a.get("nick") or "").strip() and a.get("client_id")]
+
+
+def set_qkey(nick: str, client_id: str, secret: str) -> None:
+    accs = [a for a in qload() if a.get("nick") != nick]
+    accs.append({"nick": nick, "client_id": client_id, "secret": seal(secret)})
+    p = qstore_path()
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(accs, ensure_ascii=False, indent=1), "utf-8")
+    os.replace(tmp, p)
+
+
+def qfind(nick: str) -> dict | None:
+    return next((a for a in qload() if a.get("nick") == nick), None)
+
+
+def check_accounts() -> list[dict]:
+    """「去企鹅号核对」查哪些号:16 个号(开着的)+ 只查不发的教育号(带 query_only=True)。"""
+    out = [a for a in load() if a.get("enabled", True) and a.get("client_id")]
+    have = {a["nick"] for a in out}
+    out += [dict(a, query_only=True) for a in qload() if a["nick"] not in have]
+    return out

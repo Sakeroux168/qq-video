@@ -5,7 +5,7 @@
 - 软件记的已发,企鹅号上「发布成功 / 审核中」且没删 → 对上了
 - 企鹅号上没有 / 未发布 / 已删除 → 「没发上」,能「拎回来重发」:视频(和同名封面)从发布归档挪回原来的文件夹,记录改成「没发成」
 - 企鹅号上今天有、软件没记的 → 「软件没记的」(手动发的 / 别的软件发的),只列出来
-教育号走创作罐头,不走接口,查不了。
+教育号:发布走创作罐头;在「登录取钥匙」里取了钥匙(只查不发,存在 只查账号.json)的,也能查,按标题对(check_edu)。
 """
 import os
 import re
@@ -35,13 +35,60 @@ def _aid_of_item(a: dict) -> str:
     return s[:-2] if len(s) > 14 and s.endswith("00") else s
 
 
-def ours_on(rec, nick: str, day: str) -> list[dict]:
-    """软件记的:这个号这天(2026-10-23)用接口发出去的「已发」。"""
-    rows = [r for r in rec.rows(account=nick) if r["status"] == "已发" and r["employee"] == "接口"
+def ours_on(rec, nick: str, day: str, edu: bool = False) -> list[dict]:
+    """软件记的:这个号这天(2026-10-23)发出去的「已发」。16 个号 = 接口发的;edu = 教育号(罐头发的,同一个视频只算一次)。"""
+    rows = [r for r in rec.rows(account=nick) if r["status"] == "已发" and ((r["employee"] != "接口") if edu else (r["employee"] == "接口"))
             and str(r.get("published_at") or "").startswith(day)]
+    if edu:
+        seen, uniq = set(), []
+        for r in rows:
+            k = r.get("pkey") or r["path"]
+            if k not in seen:
+                seen.add(k)
+                uniq.append(r)
+        rows = uniq
     for r in rows:
         r["aid"], r["vid"] = _aid_of(r.get("note")), _vid_of(r.get("note"))
     return rows
+
+
+def _tkey(t: str) -> str:
+    from .folders import norm_name
+    return norm_name(t)
+
+
+def check_edu(cl, rec, nick: str, day: str) -> dict:
+    """教育号(用户 2026-10-26:钥匙只用来查,发布照旧走罐头):罐头发的记录没有文章编号,按标题对。
+    先对完全一样的(去掉空格标点),再对一个是另一个开头的(企鹅号可能把长标题截短)。
+    企鹅号上同标题是「审核不通过 / 已删除」的 → 没发上(打勾);标题哪儿都找不到的 → 也列出来,但不打勾(可能是标题对不上,看一眼再决定)。"""
+    ours = ours_on(rec, nick, day, edu=True)
+    plat = platform_on(cl, day)
+    live = [p for p in plat if p["flag"] in OK_FLAGS and not p["deleted"]]
+    left = list(live)
+    todo = []
+    for r in ours:                                            # 第一遍:标题完全一样
+        k = _tkey(r["title"])
+        hit = next((p for p in left if _tkey(p["title"]) == k), None)
+        if hit is not None:
+            left.remove(hit)
+        else:
+            todo.append(r)
+    missing = []
+    for r in todo:                                            # 第二遍:一个是另一个的开头(至少 8 个字)
+        k = _tkey(r["title"])
+        hit = next((p for p in left if min(len(k), len(_tkey(p["title"]))) >= 8
+                    and (k.startswith(_tkey(p["title"])) or _tkey(p["title"]).startswith(k))), None)
+        if hit is not None:
+            left.remove(hit)
+            continue
+        bad = next((p for p in plat if _tkey(p["title"]) == k and p not in live), None)
+        if bad is not None:
+            why, sure = ("已删除" if bad["deleted"] else f"企鹅号上是「{bad['flag']}」"), True
+        else:
+            why, sure = "企鹅号这天的列表里没找到这个标题(罐头发的,按标题对的,看一眼再决定)", False
+        missing.append(dict(r, why=why, sure=sure))
+    return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if p["flag"] != "审核中"),
+            "review": sum(1 for p in live if p["flag"] == "审核中"), "missing": missing, "extra": left, "edu": True}
 
 
 def platform_on(cl, day: str, max_pages: int = 400) -> list[dict]:
@@ -124,7 +171,7 @@ CAT_NAME = {"教育": "小学生家长教育", "动漫": "动漫"}
 
 def table_rows(st, rec, day: str, results: dict) -> list[tuple]:
     """导出用的行:[(品类, 号, 规定, 实发, 是不是小计)]。实发:16 个号用核对出来的(企鹅号上实发),
-    没查到的 / 教育号(走罐头查不了)用软件记录。"""
+    没查到的(教育号没取钥匙的)用软件记录。"""
     from . import plan
     sent = rec.sent_on(day)
     out, tq, ta = [], 0, 0
@@ -178,7 +225,9 @@ def export_xlsx(path: str, st, rec, day: str, results: dict) -> str:
         if j > k:
             ws.merge_cells(start_row=k, start_column=1, end_row=j, end_column=1)
         k = j + 1
-    ws.cell(r + 1, 1, "说明:16 个号是去企鹅号核对出来的实发条数;教育号走创作罐头查不了,按软件记录。").font = Font(color="6B7280")
+    edu_ok = any((results.get(n) or {}).get("edu") and not (results.get(n) or {}).get("error") for n in results)
+    ws.cell(r + 1, 1, "说明:去企鹅号核对出来的实发条数(按真正发出去的时间,审核不通过、删掉的不算)" +
+            ("。" if edu_ok else ";教育号还没取钥匙的,按软件记录。")).font = Font(color="6B7280")
     for col, w in (("A", 16), ("B", 18), ("C", 14), ("D", 12)):
         ws.column_dimensions[col].width = w
     wb.save(path)

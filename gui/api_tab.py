@@ -31,6 +31,7 @@ ROW = Qt.ItemDataRole.UserRole            # 视频那一行:存它在 self.video
 NICK = Qt.ItemDataRole.UserRole + 1       # 号那一行:存号的昵称
 CLEAR = "-"                               # emit(i, CLEAR):把这行的状态清掉(回到按检查结果显示)
 PROGRESS = -2                             # emit(PROGRESS, 文字):发布进度,写在下面那行绿字里
+EDU_TAG = "(教育号 · 只查不发)"                # 登录取钥匙名单里教育号的后缀(用户 2026-10-26)
 FAILED = ("没发成", "没发:", "转竖屏失败")      # 「没发:号的密钥坏了」= 原来的「没轮到」
 
 
@@ -3071,13 +3072,22 @@ class ApiTab(QWidget):
             QMessageBox.information(parent, "登录取钥匙", "后台还在发布 / 处理,做完再弄。")
             return
         names = apiacc.nicks()
-        if not names:
+        # 教育号(用户 2026-10-26):取了钥匙只用来「去企鹅号核对」,单独存,发布那边看不到;视频照旧在创作罐头里发
+        from qe import plan as P
+        edu = [n for g in P.plan(self.st) if g.get("cat") == "教育" for n in (g.get("accounts") or {}) if n not in names]
+        labels = names + [n + EDU_TAG for n in edu]
+        if not labels:
             QMessageBox.information(parent, "登录取钥匙", "还没有号。先「从旧软件搬账号…」。")
             return
-        nick, ok = QInputDialog.getItem(parent, "登录取钥匙", "哪个号的钥匙要重新取?(一般是发布报「号的密钥不对」的那个)", names, 0, False)
+        pick, ok = QInputDialog.getItem(parent, "登录取钥匙", "哪个号的钥匙要取?\n"
+                                        "16 个号:一般是发布报「号的密钥不对」的那个。\n"
+                                        "教育号:取了钥匙,「去企鹅号核对」就能连教育号一起查(只查不发,视频照旧在罐头里发)。",
+                                        labels, 0, False)
         if not ok:
             return
-        acc = apiacc.find(nick) or {}
+        query = pick.endswith(EDU_TAG)
+        nick = pick[:-len(EDU_TAG)] if query else pick
+        acc = (apiacc.qfind(nick) if query else apiacc.find(nick)) or {}
         try:
             proc, port = omlogin.launch(nick)
         except Exception as e:
@@ -3124,6 +3134,13 @@ class ApiTab(QWidget):
             same = k["client_id"] == acc.get("client_id") and k["secret"] == apiacc.unseal(acc.get("secret") or "")
         except Exception:
             same = False
+        if query:                                   # 教育号:只查不发,直接存(不进发布名单)
+            if not same:
+                apiacc.set_qkey(nick, k["client_id"], k["secret"])
+            self.say(f"登录取钥匙「{nick}」(教育号,只查不发):" + ("和原来的一样" if same else "存好了"))
+            QMessageBox.information(parent, "登录取钥匙", f"「{nick}」的钥匙存好了(只查不发)。\n\n"
+                                    "以后「去企鹅号核对」会连它一起查。视频照旧在创作罐头里发,软件不会用接口发它。")
+            return
         if same:
             QMessageBox.information(parent, "登录取钥匙", f"「{nick}」的钥匙读到了,和现在用的一样,不用换。\n\n"
                                                        "(如果发布还报「密钥不对」,可能是企鹅号那边的问题,去后台看看这个号的状态)")
