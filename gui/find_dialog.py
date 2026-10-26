@@ -117,7 +117,9 @@ class FindDialog(QDialog):
         if why:
             QMessageBox.warning(self, "挪回去重发", why)
             return
-        self.lab.setText(f"挪回去了:{new}")
+        from qe import plan
+        room = plan.room_for_redo(self.st, r, plan.md_to_day(md))     # 补发不占那天的规定条数(用户 2026-10-26)
+        self.lab.setText(f"挪回去了:{new}" + (f"\n「{r['account']}」{md} 多加了 1 条(补发的这条不占那天的规定条数)" if room else ""))
         if self.after:
             try:
                 self.after()

@@ -4810,6 +4810,29 @@ def test_edu_verify(tmp: Path):
         omapi.Client = real
 
 
+def test_redo_room(tmp: Path):
+    print("[补发不占规定条数(用户 2026-10-26):拎回来重发的是以前哪天发的 → 那天给这个号多加 1 条;当天发的不加;没规定条数的不管]")
+    from datetime import timedelta
+    from qe import plan
+    from qe.config import Settings, bj_now
+    st = Settings(tmp / "st_room.json")
+    st["daily_plan"] = [{"cat": "教育", "label": "教育总发布量", "accounts": {"家长研习空间": 102}}]
+    st["quota_open"] = False
+    n = bj_now()
+    today, yday = n.strftime("%Y-%m-%d"), (n - timedelta(days=1)).strftime("%Y-%m-%d")
+    row = {"account": "家长研习空间", "published_at": f"{yday} 18:00:00"}
+    check(plan.room_for_redo(st, row) == 1 and plan.quota_on(st, "家长研习空间", today) == 103,
+          "昨天发的被打回、今天补发:今天这个号多加 1 条(今天找好的 102 条照样全发)")
+    check(plan.room_for_redo(st, dict(row, published_at=f"{today} 09:00:00")) == 0 and plan.quota_on(st, "家长研习空间", today) == 103,
+          "今天发的今天拎回来:不加(改回没发以后今天自然空出一条)")
+    check(plan.room_for_redo(st, dict(row, account="没规定条数的号")) == 0, "没规定条数的号不管")
+    tmr = n + timedelta(days=1)
+    check(plan.md_to_day(f"{tmr.month}.{tmr.day}") == tmr.strftime("%Y-%m-%d") and plan.md_to_day("乱写") == "",
+          "「10.27」认成那天的日期")
+    check(plan.room_for_redo(st, row, tmr.strftime("%Y-%m-%d")) == 1 and plan.quota_on(st, "家长研习空间", tmr.strftime("%Y-%m-%d")) == 103,
+          "挪回明天重发:加在明天")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -4881,6 +4904,7 @@ if __name__ == "__main__":
     test_wm_detect_unit(tmp)
     test_find_redo(tmp)
     test_edu_verify(tmp)
+    test_redo_room(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

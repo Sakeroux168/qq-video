@@ -77,6 +77,31 @@ def add_extra(st, nick: str, n: int, day: str = "") -> int:
     return m[day][nick]
 
 
+def md_to_day(md: str) -> str:
+    """「10.27」→「2026-10-27」(按北京时间今年;跨年:月份比今天小半年以上的算明年)。认不出 → ""。"""
+    try:
+        m, d = (int(x) for x in str(md).split(".")[:2])
+    except ValueError:
+        return ""
+    n = bj_now()
+    y = n.year + (1 if m < n.month - 6 else 0)
+    return f"{y}-{m:02d}-{d:02d}"
+
+
+def room_for_redo(st, row: dict, day: str = "") -> int:
+    """补发(用户 2026-10-26:「拎回来重发后,原本今天要发 80 条,就变成了 79,今天找的 80 条会多出一条发不出去」):
+    拎回来 / 找视频重发 / 改回没发的那条,要是以前哪天发的,再发出去会占掉 day(默认今天)的规定条数 →
+    day 给这个号临时多发 1 条(「今天临时多发」那个,只管这一天)。原来就是 day 发的不加(改回没发那天自然空出一条);
+    没规定条数的号不管。返回加了几条。"""
+    day = day or today()
+    nick = row.get("account") or ""
+    pub = str(row.get("published_at") or "")[:10]
+    if not nick or not quota_of(st, nick) or not pub or pub == day:
+        return 0
+    add_extra(st, nick, 1, day)
+    return 1
+
+
 def _days_ago(n: int) -> str:
     from datetime import timedelta
     return (bj_now() - timedelta(days=n)).strftime("%Y-%m-%d")

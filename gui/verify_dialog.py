@@ -190,7 +190,7 @@ class VerifyDialog(QDialog):
 
     def pull_back(self):
         """打勾的:视频挪回原来的文件夹、记录改成没发成。"""
-        done, bad = 0, []
+        done, bad, room = 0, [], 0
         for k in range(self.miss.count()):
             it = self.miss.item(k)
             if it.checkState() != Qt.CheckState.Checked or it.data(Qt.ItemDataRole.UserRole + 1):
@@ -209,11 +209,15 @@ class VerifyDialog(QDialog):
                 it.setText(it.text() + f"  ✗ {why}")
             else:
                 done += 1
+                if self.st is not None:
+                    from qe import plan
+                    room += plan.room_for_redo(self.st, row)   # 补发不占今天的规定条数(用户 2026-10-26)
                 it.setText("✓ 拎回来了 · " + it.text())
                 it.setData(Qt.ItemDataRole.UserRole + 1, True)
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         self.lab_done.setText(f"拎回来 {done} 条(改成没发成;16 个号挪回原来的文件夹,教育号挪回今天的文件夹)→ 去那页刷新、再发" +
-                              (f";{len(bad)} 条没拎回来" if bad else ""))
+                              (f";{len(bad)} 条没拎回来" if bad else "") +
+                              (f";补发的 {room} 条今天另外加了额度,不占今天的规定条数" if room else ""))
         self.b_back.setEnabled(False)
         w = self.parent()
         while w is not None and not hasattr(w, "api_tab"):

@@ -594,8 +594,15 @@ class ApiTab(QWidget):
                    "\n".join(f"· {self.videos[i].title[:30]}" for i, _r in recs[:8]) + ("\n…" if len(recs) > 8 else "") +
                    "\n\n视频挪回原来的文件夹、记录改成没发成,之后能再发(不会自己发)。", "改回没发", "先不", default_no=True):
             return
-        notes = [f"{r['title'][:20]}:{m}" for _i, r in recs for m in (verify.unsend(self.rec, r),) if m]
-        self.say(f"{len(recs)} 条改回没发" + (";" + ";".join(notes) if notes else "") + " —— 点刷新以后能再发")
+        notes, room = [], 0
+        for _i, r in recs:
+            m = verify.unsend(self.rec, r)
+            if m:
+                notes.append(f"{r['title'][:20]}:{m}")
+            if not m or m.startswith("记录改成没发了"):
+                room += plan.room_for_redo(self.st, r)      # 补发不占今天的规定条数(用户 2026-10-26)
+        self.say(f"{len(recs)} 条改回没发" + (";" + ";".join(notes) if notes else "") + " —— 点刷新以后能再发" +
+                 (f";补发的 {room} 条今天另外加了额度" if room else ""))
         if notes:
             QMessageBox.information(self, "改回没发", "\n".join(notes))
         self.load()
