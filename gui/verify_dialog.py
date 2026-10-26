@@ -214,15 +214,16 @@ class VerifyDialog(QDialog):
             self.by_day[r["nick"]] = r["by_day"]
         k = self.t.rowCount()
         self.t.insertRow(k)
-        q = 0
-        if self.st is not None:
+        q = qb = 0                                            # q = 这天要发(含补发 / 临时多发,算还差用);qb = 原本的规定(「应发」那栏写它,
+        if self.st is not None:                               # 用户 2026-10-26:「80 是应发,实发肯定是 81」)
             from qe import plan
             q = sum(plan.quota_on(self.st, r["nick"], d) for d in (r.get("days") or [self.day]))
+            qb = plan.quota_of(self.st, r["nick"]) * len(r.get("days") or [self.day])
         need = sum(1 for m in r.get("missing") or [] if m.get("sure", True))      # 要补的(打勾的)
         look = len(r.get("missing") or []) - need                                     # 看一眼的 / 已经补发过的
         short = over = 0
         if r.get("error"):
-            vals = [r["nick"], str(q or ""), "", "", "", f"查不了:{r['error']}", "", ""]
+            vals = [r["nick"], str(qb or ""), "", "", "", f"查不了:{r['error']}", "", ""]
         else:
             live = r.get("live", r["ok"] + r["review"])
             if self.st is not None and r.get("by_day"):     # 一段日子:一天一天算少发 / 多发再加起来(审查:一天多 5 一天少 5 不能显示 ✓)
@@ -235,7 +236,9 @@ class VerifyDialog(QDialog):
             elif q:
                 short, over = max(0, q - live), max(0, live - q)
             diff = ((str(short) if short else "") + (("、" if short else "") + f"多发 {over}" if over else "")) or ("✓" if q else "")
-            vals = [r["nick"], str(q) if q else "—", str(live), diff, str(r["ours"]),
+            if diff == "✓" and q > qb:
+                diff = f"✓(含补发 {q - qb})"
+            vals = [r["nick"], str(qb) if q else "—", str(live), diff, str(r["ours"]),
                     (str(need) if need else "✓") + (f"(+{look} 看一眼)" if look else ""),
                     str(r["review"]) if r["review"] else "", str(len(r["extra"])) if r["extra"] else ""]
         for c, t in enumerate(vals):

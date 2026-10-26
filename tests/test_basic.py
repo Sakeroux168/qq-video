@@ -4858,6 +4858,11 @@ def test_redo_room(tmp: Path):
           "挪回明天重发:加在明天")
     check(plan.room_for_redo(st, dict(row, status="没发成")) == 0 and plan.quota_on(st, "家长研习空间", today) == 103,
           "已经拎回来过(没发成)再挪一次:不再加(上次加过了)")
+    from qe.records import Records
+    s = plan.summary(Records(tmp / "r_room.sqlite"), st, today)
+    tsv = plan.as_tsv(s)
+    check("教育总发布量\t102\t0" in tsv and "总发布量\t102\t0" in tsv.splitlines()[-1] and s["rows"][0][1] == 103 and s["extra"] == {"家长研习空间": 1},
+          f"复制到企业微信的「规定」写原本的 102(补发加的那 1 条不算;用户 2026-10-26「规定的 80」),还差几条照样按 103 算 -> {tsv!r}")
     # 16 个号拎回来:那天给这个号手选过文件夹的,就放进手选的那个(用户 2026-10-26:挪回老日期文件夹,今天的页面看不到)
     from qe import redo
     md = f"{n.month}.{n.day}"

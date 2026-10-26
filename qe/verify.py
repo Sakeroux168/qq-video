@@ -350,7 +350,7 @@ def table_rows(st, rec, day: str, results: dict) -> list[tuple]:
     for g in plan.plan(st):
         cq = ca = 0
         for nick, q in (g.get("accounts") or {}).items():
-            q = plan.quota_on(st, nick, day) if q else 0
+            q = plan.quota_of(st, nick) if q else 0             # 规定写原本的(补发 / 临时多发加的不算;用户 2026-10-26「规定的 80」)
             r = results.get(nick) or {}
             a = r["live"] if ("live" in r and not r.get("error")) else sent.get(nick, 0)
             cat = ACC_CAT.get(nick) or CAT_NAME.get(g.get("cat"), g.get("cat") or "")

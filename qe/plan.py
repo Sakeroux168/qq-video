@@ -185,19 +185,27 @@ def day_counts(rec, day: str) -> dict[str, int]:
 
 
 def summary(rec, st, day: str) -> dict:
-    """{"day", "rows": [(品类标签, 规定, 实际)], "total": (规定, 实际), "accounts": [(品类, 号, 规定, 实际)]}。"""
+    """{"day", "rows": [(品类标签, 这天要发, 实际)], "total": (这天要发, 实际), "accounts": [(品类, 号, 这天要发, 实际)],
+    "extra": {号: 这天临时多发 / 补发加的}, "rows_extra": [和 rows 对齐的加的条数], "total_extra": 加的一共几条}。
+    「这天要发」= 规定 + 临时多发(还差几条、发够就停按它算);给企业微信表的「规定」用 规定 = 这天要发 - 加的
+    (用户 2026-10-26:「规定的 80」—— 补发多加的那 1 条不写进规定)。"""
     got = day_counts(rec, day)
-    rows, accs = [], []
-    tq = ta = 0
+    rows, accs, rex, ex = [], [], [], {}
+    tq = ta = te = 0
     for g in plan(st):
-        q = cat_total(g) + sum(extra_of(st, n, day) for n, nq in (g.get("accounts") or {}).items() if nq)
+        e = 0
+        for n, nq in (g.get("accounts") or {}).items():
+            if nq and extra_of(st, n, day):
+                ex[n] = extra_of(st, n, day)
+                e += ex[n]
+        q = cat_total(g) + e
         a = sum(got.get(n, 0) for n in (g.get("accounts") or {}))
         rows.append((g.get("label") or g["cat"], q, a))
-        tq += q
-        ta += a
+        rex.append(e)
+        tq, ta, te = tq + q, ta + a, te + e
         for n, nq in (g.get("accounts") or {}).items():
-            accs.append((g["cat"], n, int(nq or 0) + (extra_of(st, n, day) if nq else 0), got.get(n, 0)))
-    return {"day": day, "rows": rows, "total": (tq, ta), "accounts": accs}
+            accs.append((g["cat"], n, int(nq or 0) + (ex.get(n, 0) if nq else 0), got.get(n, 0)))
+    return {"day": day, "rows": rows, "total": (tq, ta), "accounts": accs, "extra": ex, "rows_extra": rex, "total_extra": te}
 
 
 def short_day(day: str) -> str:
@@ -212,10 +220,11 @@ def short_day(day: str) -> str:
 def as_tsv(s: dict) -> str:
     """复制到企业微信表的文字:一行一格用 Tab 隔开,贴进去正好占 日期 / 工作内容 / 品类 / 规定 / 实际 五列。"""
     lines = []
-    for k, (lab, q, a) in enumerate(s["rows"]):
-        lines.append("\t".join([short_day(s["day"]) if k == 0 else "", WORK if k == 0 else "", lab, str(q), str(a)]))
+    rex = s.get("rows_extra") or [0] * len(s["rows"])
+    for k, (lab, q, a) in enumerate(s["rows"]):                 # 规定写原本的(补发 / 临时多发加的不算;用户 2026-10-26)
+        lines.append("\t".join([short_day(s["day"]) if k == 0 else "", WORK if k == 0 else "", lab, str(q - rex[k]), str(a)]))
     tq, ta = s["total"]
-    lines.append("\t".join(["", "", "总发布量", str(tq), str(ta)]))
+    lines.append("\t".join(["", "", "总发布量", str(tq - s.get("total_extra", 0)), str(ta)]))
     return "\n".join(lines)
 
 

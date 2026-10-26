@@ -170,14 +170,19 @@ class DailyTab(QWidget):
     def refresh(self):
         s = plan.summary(self.rec, self.st, self.day())
         self._s = s
-        for lab, q, a in s["rows"]:
+        # 「/ 后面」写原本的规定(和企业微信表一样,用户 2026-10-26「规定的 80」);还差几条按 规定 + 补发 / 临时多发 算
+        rex = s.get("rows_extra") or [0] * len(s["rows"])
+        for (lab, q, a), e in zip(s["rows"], rex):
             key = lab.replace("总发布量", "")
-            self.cards.set(**{key: (f"{a} / {q}", "warn" if q and a > q else "good" if a >= q else ""),
-                              f"{key}_sub": f"多发 {a - q} 条" if q and a > q else "够了 √" if a >= q else f"还差 {q - a} 条"})
+            note = f"(含补发 / 临时多发 {e})" if e else ""
+            self.cards.set(**{key: (f"{a} / {q - e}", "warn" if q and a > q else "good" if a >= q else ""),
+                              f"{key}_sub": f"多发 {a - q} 条" if q and a > q else ("够了 √" + note if e else "够了 √") if a >= q
+                              else f"还差 {q - a} 条{note}"})
             self.cards.set_ring(key, a / q if q else 0)
         tq, ta = s["total"]
-        self.cards.set(总=(f"{ta} / {tq}", "good" if ta >= tq else ""),
-                       总_sub="都够了 √" if ta >= tq else f"还差 {tq - ta} 条")
+        te = s.get("total_extra", 0)
+        self.cards.set(总=(f"{ta} / {tq - te}", "good" if ta >= tq else ""),
+                       总_sub="都够了 √" if ta >= tq else f"还差 {tq - ta} 条" + (f"(含补发 / 临时多发 {te})" if te else ""))
         self.cards.set_ring("总", ta / tq if tq else 0)
         short = plan.short_list(s)
         if short:
@@ -200,9 +205,11 @@ class DailyTab(QWidget):
         from gui.theme import cur
         red, green = QBrush(QColor(cur()["rows"]["red"])), QBrush(QColor(cur()["rows"]["green"]))
         yellow = QBrush(QColor(cur()["rows"]["yellow"]))
+        ex = s.get("extra") or {}
         for i, (cat, n, q, a) in enumerate(accs):
-            diff = "" if not q else (f"多发 {a - q}" if a > q else "够了 √" if a >= q else f"还差 {q - a}")
-            for c, txt in enumerate([cat, n, str(q) if q else "—", str(a), diff]):
+            e = ex.get(n, 0)
+            diff = "" if not q else (f"多发 {a - q}" if a > q else "够了 √" if a >= q else f"还差 {q - a}" + (f"(含补发 {e})" if e else ""))
+            for c, txt in enumerate([cat, n, str(q - e) if q else "—", str(a), diff]):
                 it = QTableWidgetItem(txt)
                 if c >= 2:
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
