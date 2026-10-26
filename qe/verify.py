@@ -17,8 +17,17 @@ BAD_FLAGS = ("审核不通过", "审核未通过", "未通过", "未发布", "�
 
 
 def _on(p: dict) -> bool:
-    """这篇在企鹅号上(发了 / 审核中 / 定时没到点…),不算没发上。"""
-    return not p.get("deleted") and p.get("flag") not in BAD_FLAGS
+    """这篇在企鹅号上(发了 / 审核中 / 定时没到点…),不算没发上。状态是空的不算(认不出,让人看一眼;审查 2026-10-26)。"""
+    return not p.get("deleted") and bool(p.get("flag")) and p.get("flag") not in BAD_FLAGS
+
+
+def _bad_kind(p: dict) -> str:
+    """不在线的这篇是怎么回事:「删了」/「没发上」(未发布、发布失败)/「打回」/「认不出」(状态是空的)。"""
+    if p.get("deleted"):
+        return "删了"
+    if p.get("flag") in ("未发布", "发布失败"):
+        return "没发上"
+    return "打回" if p.get("flag") else "认不出"
 
 
 def _wait(p: dict) -> bool:
@@ -72,21 +81,63 @@ def _tkey(t: str) -> str:
     return norm_name(t)
 
 
-def _redone(k: str, later: list[tuple[str, str]]) -> str:
-    """later 里有标题一样 / 很像(相似度 ≥ 0.75)的 → 返回那条的日期(10-23),没有 → ""。"""
+def _redone(k: str, later: list[tuple[str, str, str]]) -> tuple[str, str]:
+    """later 里有标题一样 / 很像的(相似度 ≥ 0.85,而且里面的数字一样 ——「第12期」「第13期」不算)→ (那条的日期 10-23, 那条的标题);
+    没有 → ("", "")。审查 2026-10-26:原来 0.75 会把同一系列的不同期认成「已经补发过了」。"""
     from difflib import SequenceMatcher
-    for lk, when in later:
-        if lk == k or (min(len(k), len(lk)) >= 6 and SequenceMatcher(None, k, lk).ratio() >= 0.75):
-            return when
-    return ""
+    nums = re.findall(r"\d+", k)
+    for lk, when, title in later:
+        if lk == k or (min(len(k), len(lk)) >= 6 and re.findall(r"\d+", lk) == nums
+                       and SequenceMatcher(None, k, lk).ratio() >= 0.85):
+            return when, title
+    return "", ""
 
 
-def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None) -> dict:
+def _later_rows(rec, nick: str, r: dict) -> list[tuple[str, str, str]]:
+    """这个号在这条之后(按发布时间,同一天晚些时候也算)又发过的:[(标题 key, 日期, 标题)]。不管是接口发的还是罐头发的。"""
+    t0 = str(r.get("published_at") or "")
+    return [(_tkey(x["title"]), str(x["published_at"])[5:10], x["title"]) for x in rec.rows(account=nick)
+            if x["status"] == "已发" and x["id"] != r.get("id") and str(x.get("published_at") or "") > t0]
+
+
+def _settle(rec, nick: str, missing: list[dict], live: list[dict], near: list[dict]) -> list[dict]:
+    """没对上的最后过一遍(审查 2026-10-26:只有确定没发上的才打勾,别让人把发上去的视频再发一遍):
+    ① 这天 / 前后一天企鹅号上有同标题在线的 → 不算没发上(跨半夜 / 编号对不上 / 删掉的是重复的那条)
+    ② 后来又发过同样 / 很像标题的 → 已经补发过了,不打勾
+    ③ 打回 / 删了的 → 列出来,不打勾(打回的再发多半还会被打回;删的多半是人自己删的)
+    sure=None(还没定的)→ 按调用方传进来的定。"""
+    on_titles = {_tkey(p["title"]): p for p in live + [p for p in near if _on(p)]}
+    out = []
+    for m in missing:
+        k = _tkey(m["title"])
+        same = on_titles.get(k)
+        if same is not None and same in near:
+            continue                                         # 前后一天有(跨半夜):就是发上了
+        if same is not None:
+            m["why"], m["sure"] = f"企鹅号这天已经有同标题的一条在线了({same['time'][5:16]}),不用补", False
+        else:
+            when, title = _redone(k, _later_rows(rec, nick, m))
+            if when:
+                m["why"], m["sure"], m["redone"] = f"这天没发上,但 {when} 已经补发过了(「{title[:24]}」),不用再拎回来", False, True
+            elif m.get("bad") == "删了":
+                m["why"], m["sure"] = "在企鹅号上被删了(多半是人自己删的:重复的 / 横屏的…);真要补就自己勾上", False
+            elif m.get("bad") == "认不出":
+                m["why"], m["sure"] = "企鹅号上这条的状态是空的 / 认不出,看一眼再决定", False
+            elif m.get("bad") == "打回":
+                m["why"], m["sure"] = (f"被审核打回了(企鹅号上是「{m.get('flag')}」;再发多半还会被打回,换一条补更好;"
+                                       "真要重发就自己勾上)"), False
+        out.append(m)
+    return out
+
+
+def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None, near: list[dict] | None = None) -> dict:
     """教育号(用户 2026-10-26:钥匙只用来查,发布照旧走罐头):罐头发的记录没有文章编号,按标题对。
     先对完全一样的(去掉空格标点),再对一个是另一个开头的(企鹅号可能把长标题截短)。
-    企鹅号上同标题是「审核不通过 / 已删除」的 → 没发上(打勾);标题哪儿都找不到的 → 也列出来,但不打勾(可能是标题对不上,看一眼再决定)。"""
+    plat = 这天的后台列表,near = 前后一天的(跨半夜用);不给就自己去读。"""
+    if plat is None:
+        plat, near = _day_and_near(cl, day)
+    near = near or []
     ours = ours_on(rec, nick, day, edu=True)
-    plat = platform_on(cl, day) if plat is None else plat
     live = [p for p in plat if _on(p)]
     left = list(live)
     todo = []
@@ -105,103 +156,143 @@ def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None) -> d
         if hit is not None:
             left.remove(hit)
             continue
-        bad = next((p for p in plat if _tkey(p["title"]) == k and p not in live), None)
+        bad = next((p for p in plat + near if _tkey(p["title"]) == k and not _on(p)), None)
         if bad is not None:
-            why, sure = ("已删除" if bad["deleted"] else f"企鹅号上是「{bad['flag']}」"), True
+            kind = _bad_kind(bad)
+            if kind == "没发上":
+                missing.append(dict(r, why=f"企鹅号上是「{bad['flag']}」—— 没发上", sure=True))
+            else:
+                missing.append(dict(r, why="", sure=None, bad=kind, flag=bad["flag"]))
         else:
-            why, sure = "", None                              # 标题哪儿都找不到:看这天后台有没有多出来的(下面定)
-        missing.append(dict(r, why=why, sure=sure))
-    # 用户 2026-10-26:标题找不到,而这天后台也没有多出来、软件没记的 → 不可能是在罐头里改了标题发的,就是没发上(打勾);
+            missing.append(dict(r, why="", sure=None))
+    missing = _settle(rec, nick, missing, live, near)
+    # 用户 2026-10-26:标题找不到,而这天后台也没有多出来、软件没记的 → 不可能是改了标题发的,就是没发上(打勾);
     # 这天后台有多出来的 → 可能是改了标题发的,不打勾,提示看一眼
-    # 同一个号、后来又发过同样 / 差不多标题的(补发过了):别再拎回来,不然重复发。
-    # 用户 2026-10-23 的「精选8条视频」就是 19~22 号没发上的,标题为了躲查重稍微改过(三项→三种、参考→攻略):按相似度认
-    later = [(_tkey(x["title"]), str(x["published_at"])[5:10]) for x in rec.rows(account=nick)
-             if x["status"] == "已发" and str(x.get("published_at") or "")[:10] > day]
     for m in missing:
-        again = _redone(_tkey(m["title"]), later)
-        if again:
-            m["why"], m["sure"] = f"这天没发上,但 {again} 已经补发过了,不用再拎回来", False
-            m["redone"] = True
-        elif m["sure"] is None:
+        if m["sure"] is None:
             if left:
                 m["why"], m["sure"] = (f"企鹅号这天没找到这个标题;这天后台有 {len(left)} 条软件没记的,"
                                        "可能是在罐头里改了标题发的,看一眼再决定"), False
             else:
-                m["why"], m["sure"] = "企鹅号这天没有这个标题,这天后台也没有别的多出来 —— 没发上", True
+                m["why"], m["sure"] = "企鹅号这天和前后一天都没有这个标题,这天后台也没有别的多出来 —— 没发上", True
     return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if not _wait(p)),
             "review": sum(1 for p in live if _wait(p)), "missing": missing, "extra": left, "edu": True}
 
 
-def platform_on(cl, day: str, max_pages: int = 400) -> list[dict]:
+def _shift(day: str, n: int) -> str:
+    from datetime import date, timedelta
+    return (date.fromisoformat(day) + timedelta(days=n)).isoformat()
+
+
+def _day_and_near(cl, day: str, stopped=None) -> tuple[list[dict], list[dict]]:
+    """读这天 + 前后一天的后台列表(一遍):返回 (这天的, 前后一天的)。"""
+    allp = platform_between(cl, _shift(day, -1), _shift(day, 1), stopped=stopped)
+    return [p for p in allp if p["time"][:10] == day], [p for p in allp if p["time"][:10] != day]
+
+
+def platform_on(cl, day: str, max_pages: int = 2000) -> list[dict]:
     """企鹅号上这个号这天发的(按发布时间):[{aid, vid, title, flag, deleted, time}]。新的在前,翻到比这天早就停。"""
     return platform_between(cl, day, day, max_pages)
+
+
+class ListTooLong(RuntimeError):
+    """翻到页数上限还没翻到要查的日子以前:列表没读全,不能当成查完了(审查 2026-10-26)。"""
 
 
 def platform_between(cl, start: str, end: str, max_pages: int = 2000, stopped=None) -> list[dict]:
     """企鹅号上这个号 start~end(含,2026-10-10 ~ 2026-10-25)发的(按发布时间)。一页 10 条,新的在前,
     连着 3 页都比 start 早才停(用户 2026-10-24:列表不一定严格按时间排,一页就停会漏)。
-    用户 2026-10-26「批量查询,从 10 号查到 25 号」:一个号只翻一遍,不用一天一天地翻。stopped() 返回 True 就停。"""
-    out = []
+    用户 2026-10-26「批量查询,从 10 号查到 25 号」:一个号只翻一遍,不用一天一天地翻。stopped() 返回 True 就停。
+    翻页要好几分钟,中间有新文章进来整张表会往下挪,同一篇会读到两次 → 按文章编号(没有就按视频编号)去重(审查 2026-10-26)。
+    翻满 max_pages 还没翻到 start 以前 → 抛 ListTooLong(查不了),不当成读完了。"""
+    out, seen = [], set()
     old_pages = 0
+    done = False
     for page in range(1, max_pages + 1):
         if stopped and stopped():
+            done = True
             break
         d = cl.list_articles(page, 10)
         items = d.get("articles") or []
         if not items:
+            done = True
             break
         older = 0
         for a in items:
             t = str(a.get("article_pub_time") or "")
             if start <= t[:10] <= end:
                 vi = a.get("article_video_info") or {}
-                out.append({"aid": _aid_of_item(a), "vid": str(vi.get("vid") or ""), "title": str(a.get("article_title") or ""),
-                            "flag": str(a.get("article_pub_flag") or ""), "deleted": str(a.get("article_del_flag") or "") == "已删除",
-                            "time": t})
+                p = {"aid": _aid_of_item(a), "vid": str(vi.get("vid") or ""), "title": str(a.get("article_title") or ""),
+                     "flag": str(a.get("article_pub_flag") or ""), "deleted": str(a.get("article_del_flag") or "") == "已删除",
+                     "time": t}
+                key = p["aid"] or (("v:" + p["vid"]) if p["vid"] else "")
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                out.append(p)
             elif t and t[:10] < start:
                 older += 1
         old_pages = old_pages + 1 if older == len(items) else 0
         if old_pages >= 3:
+            done = True
             break
         try:
             if page * 10 >= int(d.get("total") or 0):
+                done = True
                 break
         except (TypeError, ValueError):
             pass
+    if not done:
+        raise ListTooLong(f"后台列表翻了 {max_pages} 页还没翻到 {start[5:]} 以前,没读全,这个号这次查不了")
     return out
 
 
 def check_range(cl, rec, nick: str, days: list[str], edu: bool = False, stopped=None) -> dict:
-    """一段日子(批量查询):这个号的后台列表只读一遍,再一天一天对。返回 {day: check_account / check_edu 的结果}。"""
-    plat = platform_between(cl, days[0], days[-1], stopped=stopped)
+    """一段日子(批量查询):这个号的后台列表只读一遍(多读前后各一天,跨半夜用),再一天一天对。
+    返回 {day: check_account / check_edu 的结果}。"""
+    plat = platform_between(cl, _shift(days[0], -1), _shift(days[-1], 1), stopped=stopped)
     out = {}
     for d in days:
         if stopped and stopped():
             break
+        near_days = (_shift(d, -1), _shift(d, 1))
         one = [p for p in plat if p["time"][:10] == d]
-        out[d] = check_edu(cl, rec, nick, d, plat=one) if edu else check_account(cl, rec, nick, d, plat=one)
+        near = [p for p in plat if p["time"][:10] in near_days]
+        out[d] = (check_edu(cl, rec, nick, d, plat=one, near=near) if edu
+                  else check_account(cl, rec, nick, d, plat=one, near=near))
     return out
 
 
-def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None) -> dict:
-    """一个号:{nick, ours, ok, review, missing:[记录+why], extra:[企鹅号上的]}。plat = 已经读好的这天的后台列表(批量查询用)。"""
+def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None, near: list[dict] | None = None) -> dict:
+    """一个号:{nick, ours, ok, review, missing:[记录+why], extra:[企鹅号上的]}。
+    plat = 已经读好的这天的后台列表、near = 前后一天的(批量查询用);不给就自己去读。"""
+    if plat is None:
+        plat, near = _day_and_near(cl, day)
+    near = near or []
     ours = ours_on(rec, nick, day)
-    plat = platform_on(cl, day) if plat is None else plat
     live = [p for p in plat if _on(p)]
     aids = {p["aid"] for p in live if p["aid"]}
     vids = {p["vid"] for p in live if p["vid"]}
+    near_ids = {p["aid"] for p in near if _on(p) and p["aid"]} | {p["vid"] for p in near if _on(p) and p["vid"]}
     missing = []
     found = []                                             # 列表里没读到、单查是这天发布成功的:算对上(也算进实发)
     for r in ours:
         if (r["aid"] and r["aid"] in aids) or (r["vid"] and r["vid"] in vids):
             continue
-        p0 = next((p for p in plat if r["aid"] and p["aid"] == r["aid"]), None)
-        if p0 is not None:                                 # 这天的列表里有这篇,但不是发布成功(打回 / 删了):不用单查
-            missing.append(dict(r, why="已删除" if p0["deleted"] else f"企鹅号上是「{p0['flag']}」", sure=True))
+        if (r["aid"] and r["aid"] in near_ids) or (r["vid"] and r["vid"] in near_ids):
+            continue                                       # 前后一天在线(跨半夜):发上了
+        p0 = next((p for p in plat + near if r["aid"] and p["aid"] == r["aid"]), None)
+        if p0 is not None:                                 # 列表里有这篇,但不在线
+            kind = _bad_kind(p0)
+            if kind == "没发上":
+                missing.append(dict(r, why=f"企鹅号上是「{p0['flag']}」—— 没发上", sure=True))
+            else:
+                missing.append(dict(r, why="", sure=None, bad=kind, flag=p0["flag"]))
             continue
         # 用户 2026-10-24:软件记 50、企鹅号上 49,原来单查说「发布成功」就放过了,看不出是哪条 →
-        # 这天的列表里没有的都列出来;单查说发布成功的标「可疑」(不默认打勾),没发布 / 删了 / 查不到的默认打勾
-        why, sure = "企鹅号这天的列表里没有这条", True
+        # 这天的列表里没有的都列出来;只有单查明确说「未发布 / 发布失败」的才打勾,
+        # 单查出错 / 回空 / 认不出的都让人看一眼(审查 2026-10-26:原来网一抖就默认打勾)
         if r["aid"]:
             try:
                 info = (cl.article_info(r["aid"]) or {}).get("article_info") or {}
@@ -210,37 +301,34 @@ def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None) 
                 if flag and flag not in BAD_FLAGS and not dele and t[:10] == day:
                     found.append({"aid": r["aid"], "flag": flag})   # 用户 2026-10-24:后台一搜就在,这天发的 → 就是发上了
                     continue
-                if flag and flag not in BAD_FLAGS and not dele:
-                    why, sure = f"单查是「{flag}」,但发布时间是 {t[5:16] or '?'}(不是这天),看一眼再决定", False
+                if dele:
+                    missing.append(dict(r, why="", sure=None, bad="删了", flag=flag))
+                elif flag in ("未发布", "发布失败"):
+                    missing.append(dict(r, why=f"企鹅号上是「{flag}」—— 没发上", sure=True))
+                elif flag in BAD_FLAGS:
+                    missing.append(dict(r, why="", sure=None, bad="打回", flag=flag))
+                elif flag:
+                    missing.append(dict(r, why=f"单查是「{flag}」,但发布时间是 {t[5:16] or '?'}(不是这天),看一眼再决定", sure=False))
                 else:
-                    why = "已删除" if dele else (f"企鹅号上是「{flag}」" if flag else why)
+                    missing.append(dict(r, why="企鹅号这天的列表里没有这条,单查也没查出状态,看一眼再决定", sure=False))
             except Exception as e:
-                why = f"查不到这篇({str(e)[:40]})"
+                missing.append(dict(r, why=f"企鹅号这天的列表里没有这条,单查又没查成({str(e)[:40]}),看一眼再决定", sure=False))
         else:
-            why = "软件没记下文章编号,企鹅号这天的列表里也没有"
-        missing.append(dict(r, why=why, sure=sure))
+            missing.append(dict(r, why="软件没记下文章编号,企鹅号这天的列表里也没有,看一眼再决定", sure=False))
     our_aids = {r["aid"] for r in ours if r["aid"]}
     our_vids = {r["vid"] for r in ours if r["vid"]}
     extra = [p for p in live if not ((p["aid"] and p["aid"] in our_aids) or (p["vid"] and p["vid"] in our_vids))]
     # 编号对不上的,按标题再认一遍(用户 2026-10-26 批量查询:10.17 那批记录没存下文章编号 / 编号变了,后台其实有同标题的)
     for m in list(missing):
-        if m["why"] == "已删除" or m["why"].startswith("企鹅号上是"):
-            continue
         k = _tkey(m["title"])
         hit = next((p for p in extra if _tkey(p["title"]) == k), None)
         if hit is not None:
             extra.remove(hit)
             missing.remove(m)                                 # 就是这条(已经算在实发里了)
-            continue
-        if any(_tkey(p["title"]) == k for p in live):
-            m["why"], m["sure"] = "企鹅号这天已经有同标题的一条了(可能重复发过一次),不用补", False
-    # 后来又用同样 / 差不多的标题补发过的:别再拎回来(和教育号一样)
-    later = [(_tkey(x["title"]), str(x["published_at"])[5:10]) for x in rec.rows(account=nick)
-             if x["status"] == "已发" and x["employee"] == "接口" and str(x.get("published_at") or "")[:10] > day]
+    missing = _settle(rec, nick, missing, live, near)
     for m in missing:
-        again = _redone(_tkey(m["title"]), later)
-        if again:
-            m["why"], m["sure"], m["redone"] = f"这天没发上,但 {again} 已经补发过了,不用再拎回来", False, True
+        if m["sure"] is None:
+            m["why"], m["sure"] = "企鹅号这天的列表里没有这条,看一眼再决定", False
     every = live + found
     return {"nick": nick, "ours": len(ours), "live": len(every), "ok": sum(1 for p in every if not _wait(p)),
             "review": sum(1 for p in every if _wait(p)), "missing": missing, "extra": extra}
@@ -291,12 +379,18 @@ def export_xlsx(path: str, st, rec, day: str, results: dict) -> str:
         x = ws.cell(1, c, h)
         x.font, x.alignment, x.border = Font(bold=True), mid, box
     r = 2
+    gray = PatternFill("solid", fgColor="E7E6E6")
+    unchecked = []
     for cat, nick, q, a, total in rows:
         vals = [cat, nick, q, a]
         for c, val in enumerate(vals, 1):
             x = ws.cell(r, c, val)
             x.alignment, x.border = mid, box
             x.font = Font(bold=True) if total else blue if c <= 2 else Font()
+        res = results.get(nick) or {}
+        if nick and not ("live" in res and not res.get("error")):   # 这个号没查成 / 没查:用的软件记录,标灰(审查 2026-10-26)
+            ws.cell(r, 4).fill = gray
+            unchecked.append(nick)
         if cat == "总发布量":
             ws.cell(r, 1).fill = PatternFill("solid", fgColor="8DD8F8")
         r += 1
@@ -309,9 +403,9 @@ def export_xlsx(path: str, st, rec, day: str, results: dict) -> str:
         if j > k:
             ws.merge_cells(start_row=k, start_column=1, end_row=j, end_column=1)
         k = j + 1
-    edu_ok = any((results.get(n) or {}).get("edu") and not (results.get(n) or {}).get("error") for n in results)
     ws.cell(r + 1, 1, "说明:去企鹅号核对出来的实发条数(按真正发出去的时间,审核不通过、删掉的不算)" +
-            ("。" if edu_ok else ";教育号还没取钥匙的,按软件记录。")).font = Font(color="6B7280")
+            (f";标灰的 {len(unchecked)} 个号没查成 / 没查({'、'.join(unchecked[:6])}{'…' if len(unchecked) > 6 else ''}),"
+             "用的软件记录,要核实再查一次。" if unchecked else "。")).font = Font(color="6B7280")
     for col, w in (("A", 16), ("B", 18), ("C", 14), ("D", 12)):
         ws.column_dimensions[col].width = w
     wb.save(path)
@@ -369,8 +463,14 @@ def export_range_xlsx(path: str, st, rec, days: list[str], by_day: dict) -> str:
                 tot[k] += a
             cq += q or 0
             r += 1
-        if r - first > 1:
-            ws.merge_cells(start_row=first, start_column=1, end_row=r - 1, end_column=1)
+        k = first                                          # 只合并相邻、品类一样的(审查:游戏 12 个号的品类各不相同)
+        while k < r:
+            j = k
+            while j + 1 < r and ws.cell(j + 1, 1).value == ws.cell(k, 1).value:
+                j += 1
+            if j > k:
+                ws.merge_cells(start_row=k, start_column=1, end_row=j, end_column=1)
+            k = j + 1
         for c, v in enumerate([g.get("label") or f"{g.get('cat')}总发布量", "", cq] + tot, 1):
             x = ws.cell(r, c, v)
             x.font, x.alignment, x.border = Font(bold=True), mid, box

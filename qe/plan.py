@@ -68,7 +68,7 @@ def quota_on(st, nick: str, day: str = "") -> int:
 def add_extra(st, nick: str, n: int, day: str = "") -> int:
     """这天这个号再临时多发 n 条(累加),只管这一天;老的日子(7 天前)顺手清掉。返回这天一共多发几条。"""
     day = day or today()
-    m = {k: dict(v) for k, v in (st.get("quota_extra") or {}).items() if k >= _days_ago(7)}
+    m = {k: dict(v) for k, v in (st.get("quota_extra") or {}).items() if k >= _days_ago(60)}   # 批量核对看以前的日子要用(审查 2026-10-26:原来只留 7 天)
     m.setdefault(day, {})
     m[day][nick] = max(0, extra_of(st, nick, day) + int(n))
     st["quota_extra"] = m
@@ -100,7 +100,30 @@ def room_for_redo(st, row: dict, day: str = "") -> int:
         return 0
     if row.get("status") and row["status"] != "已发":       # 已经拎回来过(没发成)再挪一次:额度上次已经加过了,不再加
         return 0
+    rid = str(row.get("id") or "")
+    given = dict(st.get("redo_room") or {})                  # 给哪条记录加过额度:之后「标成已发」能退回去(审查 2026-10-26)
+    if rid and rid in given:
+        return 0
     add_extra(st, nick, 1, day)
+    if rid:
+        given = {k: v for k, v in given.items() if v.get("day", "") >= _days_ago(60)}
+        given[rid] = {"day": day, "nick": nick}
+        st["redo_room"] = given
+        if hasattr(st, "save"):
+            st.save()
+    return 1
+
+
+def undo_room(st, rid) -> int:
+    """拎回来加过额度的那条,后来又「标成已发」了(其实发上了):把那天多加的 1 条退回去。返回退了几条。"""
+    given = dict(st.get("redo_room") or {})
+    g = given.pop(str(rid), None)
+    if not g:
+        return 0
+    add_extra(st, g["nick"], -1, g["day"])
+    st["redo_room"] = given
+    if hasattr(st, "save"):
+        st.save()
     return 1
 
 

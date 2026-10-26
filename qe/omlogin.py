@@ -125,7 +125,7 @@ def try_read(port: int) -> tuple[str, list[dict], str]:
         p = Page(pages[0], timeout=10)
         js = ("fetch(%s, {credentials: 'include'}).then(r => r.text()).catch(e => 'ERR ' + e)" % json.dumps(OAUTH_LIST))
         txt = p.ev(js, timeout=20) or ""
-    except CdpError:
+    except Exception:                                # 审查 2026-10-26:CdpError 以外的(按了 F12、连接被重置)也当没页面接着等,别把线程弄死
         return "没页面", [], ""
     finally:
         if p:
@@ -168,7 +168,16 @@ def match(keys: list[dict], nick: str, source_id: str = "", old_client_id: str =
     for k in keys:
         if source_id and k.get("media_id") == str(source_id):
             return k
-    for k in keys:
-        if nick and k.get("name") and (k["name"] == nick or nick in k["name"] or k["name"] in nick):
-            return k
-    return keys[0] if len(keys) == 1 else None
+    exact = [k for k in keys if nick and str(k.get("name") or "").strip() == nick]
+    if len(exact) == 1:                              # 先认名字完全一样的(审查:「国漫解说馆」会先命中「国漫解说馆z」)
+        return exact[0]
+    part = [k for k in keys if nick and k.get("name") and (nick in k["name"] or k["name"] in nick)]
+    if len(part) == 1:
+        return part[0]
+    return keys[0] if len(keys) == 1 else None       # 只有一个:先给它,扫错号的由 name_ok / 登录取钥匙那边拦
+
+
+def name_ok(k: dict, nick: str) -> bool:
+    """读到的这把钥匙是不是这个号的:回话里没名字的没法判断(算行);有名字就要对得上(一样 / 包含)。"""
+    name = str(k.get("name") or "").strip()
+    return not name or name == nick or nick in name or name in nick

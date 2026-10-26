@@ -31,6 +31,22 @@ ROW = Qt.ItemDataRole.UserRole            # 视频那一行:存它在 self.video
 NICK = Qt.ItemDataRole.UserRole + 1       # 号那一行:存号的昵称
 CLEAR = "-"                               # emit(i, CLEAR):把这行的状态清掉(回到按检查结果显示)
 PROGRESS = -2                             # emit(PROGRESS, 文字):发布进度,写在下面那行绿字里
+def unsend_to_today(st, rec, row: dict) -> tuple[str, int]:
+    """「改回没发」(16 个号页 / 数据记录页):视频连封面挪进今天该发的文件夹(审查 2026-10-26:原来挪回老日期文件夹,
+    今天的页面看不到),记录改成没发成;补发以前哪天的给今天加 1 条额度。视频找不到也把记录改成没发,说清楚。
+    返回 (提醒的话 或 "", 加了几条额度)。"""
+    from qe import redo
+    n = bj_now()
+    out = {}
+    new, why = redo.pull_back(st, rec, row, f"{n.month}.{n.day}", out)
+    if why.startswith("找不到这个视频"):
+        rec.mark_unsent(row["id"], "(人手动改回没发;视频没找到,要重发得自己放回去)")
+        return "记录改成没发了,但视频没找到(要重发得自己把视频放进今天的文件夹)", 0
+    if why:
+        return why, 0
+    return ";".join(out.get("warn") or []), out.get("room", 0)
+
+
 EDU_TAG = "(教育号 · 只查不发)"                # 登录取钥匙名单里教育号的后缀(用户 2026-10-26)
 FAILED = ("没发成", "没发:", "转竖屏失败")      # 「没发:号的密钥坏了」= 原来的「没轮到」
 
@@ -583,7 +599,7 @@ class ApiTab(QWidget):
         return sum(self._spill(n, only_day=today_md) for n in full) > 0
 
     def unsend_rows(self, rows: list[int]):
-        """已发的改回没发(用户 2026-10-24):视频挪回原来的文件夹、记录改成没发成;之后刷新再发。"""
+        """已发的改回没发(用户 2026-10-24):视频挪进今天的文件夹、记录改成没发成;之后刷新再发。"""
         from qe import verify
         recs = [(i, self.rec.sent_row(self.videos[i].path)) for i in rows]
         recs = [(i, r) for i, r in recs if r]
@@ -592,15 +608,14 @@ class ApiTab(QWidget):
             return
         if not ask(self, "改回没发", f"这 {len(recs)} 条记成已发的,其实没发上?\n\n" +
                    "\n".join(f"· {self.videos[i].title[:30]}" for i, _r in recs[:8]) + ("\n…" if len(recs) > 8 else "") +
-                   "\n\n视频挪回原来的文件夹、记录改成没发成,之后能再发(不会自己发)。", "改回没发", "先不", default_no=True):
+                   "\n\n视频连封面挪进今天的文件夹、记录改成没发成,之后能再发(不会自己发)。", "改回没发", "先不", default_no=True):
             return
         notes, room = [], 0
         for _i, r in recs:
-            m = verify.unsend(self.rec, r)
+            m, got = unsend_to_today(self.st, self.rec, r)   # 挪进今天的文件夹(和核对的「拎回来」一样;额度在里面加)
             if m:
                 notes.append(f"{r['title'][:20]}:{m}")
-            if not m or m.startswith("记录改成没发了"):
-                room += plan.room_for_redo(self.st, r)      # 补发不占今天的规定条数(用户 2026-10-26)
+            room += got
         self.say(f"{len(recs)} 条改回没发" + (";" + ";".join(notes) if notes else "") + " —— 点刷新以后能再发" +
                  (f";补发的 {room} 条今天另外加了额度" if room else ""))
         if notes:
@@ -2625,6 +2640,13 @@ class ApiTab(QWidget):
                 QMessageBox.information(self, "发布", "选的这些里没有能发的(有问题的 / 发过的不发)。" if picked else "没有能发的。")
             return
         accs = {a["nick"]: a for a in apiacc.load()}
+        # 硬闸(审查 2026-10-26):教育号只在创作罐头里发,不管名单里怎么来的,接口绝不发它
+        edu = {x for g in plan.plan(self.st) if g.get("cat") == "教育" for x in (g.get("accounts") or {})}
+        if any(self.videos[i].account in edu for i in rows):
+            QMessageBox.warning(self, "发布", "这里面有教育号的视频(" + "、".join(sorted({self.videos[i].account for i in rows
+                                                                              if self.videos[i].account in edu})) +
+                                ")。教育号只在创作罐头里发,这里不发。")
+            return
         miss = sorted({self.videos[i].account for i in rows if self.videos[i].account not in accs})
         if miss:
             QMessageBox.warning(self, "发布", "这些号还没搬账号:" + "、".join(miss))
@@ -3131,12 +3153,30 @@ class ApiTab(QWidget):
                                                    "现在的钥匙没动。把日志里那句发给做软件的人看看。")
             return
         k = omlogin.match(keys, nick, str(acc.get("source_id") or ""), str(acc.get("client_id") or ""))
-        if k is None:
-            labels = [f"{x.get('name') or '没名字'}({x.get('media_id') or '?'})" for x in keys]
+        if k is None:                               # 审查 2026-10-26:没名字的几行一模一样,按文字找永远是第一个 → 加序号、按位置取
+            labels = [f"{j + 1}. {x.get('name') or '没名字'}(号 ID {x.get('media_id') or '?'},钥匙尾号 {str(x.get('client_id') or '')[-4:]})"
+                      for j, x in enumerate(keys)]
             pick, ok = QInputDialog.getItem(parent, "登录取钥匙", f"这个账号下有 {len(keys)} 个号,哪个是「{nick}」?", labels, 0, False)
             if not ok:
                 return
             k = keys[labels.index(pick)]
+        # 硬拦(审查 2026-10-26):扫错了号 / 16 个号和教育号的钥匙串了 → 不换,钥匙不动。
+        # 不拦的话:选 PUBG 扫成教育号,点「换上」以后 PUBG 的视频全用接口发进教育号;反过来核对全错
+        edu_names = {n for g in P.plan(self.st) if g.get("cat") == "教育" for n in (g.get("accounts") or {})}
+        edu_names |= {a["nick"] for a in apiacc.qload()}
+        other = str(k.get("name") or "").strip()
+        why = ""
+        if not omlogin.name_ok(k, nick):
+            why = f"扫码登录的是「{other}」,不是「{nick}」。"
+        elif query and any(a.get("client_id") == k["client_id"] for a in apiacc.load()):
+            why = "读到的是 16 个号里某个号的钥匙,不是教育号的。"
+        elif not query and (any(a.get("client_id") == k["client_id"] for a in apiacc.qload()) or (other and other in edu_names)):
+            why = "读到的是教育号的钥匙(教育号只在罐头里发,绝不能用接口发)。"
+        if why:
+            self.say(f"登录取钥匙「{nick}」:{why}钥匙没动")
+            QMessageBox.warning(parent, "登录取钥匙", why + "\n\n钥匙没动。\n\n"
+                                f"在刚才打开的那个浏览器里退出登录,用「{nick}」的号重新扫码,再点一次「登录取钥匙…」。")
+            return
         try:
             same = k["client_id"] == acc.get("client_id") and k["secret"] == apiacc.unseal(acc.get("secret") or "")
         except Exception:
@@ -3167,7 +3207,9 @@ class ApiTab(QWidget):
             if not db:
                 return
         try:
-            n = apiacc.migrate(db)
+            from qe import plan as P
+            edu = {x for g in P.plan(self.st) if g.get("cat") == "教育" for x in (g.get("accounts") or {})}
+            n = apiacc.migrate(db, skip=edu)                # 教育号只在罐头里发,不搬进接口发布名单
         except Exception as e:
             QMessageBox.warning(self, "搬账号", f"没搬成:{e}")
             return

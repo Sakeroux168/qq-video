@@ -630,7 +630,7 @@ class MainWindow(QMainWindow):
         self.b_rec_unsent.setToolTip("你去企鹅号后台看了,没发出去:记成没发成,之后能再发")
         self.b_rec_unsent.clicked.connect(lambda: self.rec_mark(False))
         self.b_rec_back = QPushButton("改回没发(拎回来重发)")
-        self.b_rec_back.setToolTip("选中的「已发」其实没发上(去企鹅号后台看了 / 核对出来的):视频挪回原来的文件夹,记录改成没发成,\n"
+        self.b_rec_back.setToolTip("选中的「已发」其实没发上(去企鹅号后台看了 / 核对出来的):视频连封面挪进今天的文件夹,记录改成没发成,\n"
                                    "之后在「16 个号」页刷新、再发就行。选好几条一起改。")
         self.b_rec_back.clicked.connect(self.rec_unsend)
         for b in (self.b_rec_retry, self.b_rec_sent, self.b_rec_unsent, self.b_rec_back):
@@ -2253,6 +2253,9 @@ class MainWindow(QMainWindow):
             self.rec.resolve_unsure(r["path"], sent)
         elif sent:
             self.rec.mark_sent(r["id"])
+            from qe import plan
+            if plan.undo_room(self.st, r["id"]):           # 拎回来时给今天多加过 1 条额度:其实发上了,退回去(审查 2026-10-26)
+                self.say(f"数据记录:「{r['title'][:30]}」拎回来时多加的 1 条额度退回去了")
         self.say(f"数据记录:「{r['title'][:30]}」{what}")
         if not self.api_tab.busy():
             self.api_tab.load()                       # 16 个号页的状态跟着变
@@ -2270,7 +2273,7 @@ class MainWindow(QMainWindow):
         FindDialog(self.rec, self.st, self, after=after).exec()
 
     def rec_unsend(self):
-        """选中的「已发」改回没发:视频挪回原来的文件夹,记录改成没发成(用户 2026-10-24)。"""
+        """选中的「已发」改回没发:视频挪进今天的文件夹,记录改成没发成(用户 2026-10-24;10-26 改成挪进今天的)。"""
         recs = getattr(self, "_rec_rows", [])
         rows = [recs[i] for i in sorted({ix.row() for ix in self.t_rec.selectedIndexes()}) if i < len(recs) and recs[i]["status"] == "已发"]
         if not rows:
@@ -2279,17 +2282,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "数据记录", "16 个号那边正在发,发完再改。")
             return
         if not self._ask("改回没发", f"这 {len(rows)} 条记成已发的,其实没发上?\n\n" + "\n".join(f"· {r['title'][:30]}" for r in rows[:8]) +
-                         ("\n…" if len(rows) > 8 else "") + "\n\n视频挪回原来的文件夹、记录改成没发成,之后能再发(不会自己发)。",
+                         ("\n…" if len(rows) > 8 else "") + "\n\n视频连封面挪进今天的文件夹、记录改成没发成,之后能再发(不会自己发)。",
                          "改回没发", "先不", default_no=True):
             return
-        from qe import plan, verify
+        from gui.api_tab import unsend_to_today
         notes, room = [], 0
         for r in rows:
-            msg = verify.unsend(self.rec, r)
+            msg, got = unsend_to_today(self.st, self.rec, r)   # 挪进今天的文件夹(和核对的「拎回来」一样;额度在里面加)
             if msg:
                 notes.append(f"{r['title'][:20]}:{msg}")
-            if not msg or msg.startswith("记录改成没发了"):
-                room += plan.room_for_redo(self.st, r)      # 补发不占今天的规定条数(用户 2026-10-26)
+            room += got
         self.say(f"数据记录:{len(rows)} 条改回没发" + (";" + ";".join(notes) if notes else "") +
                  (f";补发的 {room} 条今天另外加了额度" if room else ""))
         if notes:

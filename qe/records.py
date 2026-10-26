@@ -163,18 +163,29 @@ class Records:
         with _LOCK:
             self._fill()
             cur = self.conn.execute(
-                "UPDATE posts SET status=?, published_at=CASE WHEN ?='已发' THEN ? ELSE published_at END, "
+                "UPDATE posts SET status=?, published_at=CASE WHEN ?='已发' THEN COALESCE(NULLIF(published_at, ''), NULLIF(prepared_at, ''), ?) "
+                "ELSE published_at END, "
                 "note=note || '(人去后台确认过)' WHERE pkey=? AND status IN ('发布中','结果不明')",
                 ("已发" if sent else "没发成", "已发" if sent else "", bj_str(), pkey(path)))
             self.conn.commit()
             return cur.rowcount
+
+    def repath(self, rid: int, new_path: str) -> None:
+        """视频被挪回素材盘重发了(找视频重发 / 拎回来):记录的位置改成现在那里,原来的位置写进备注。"""
+        with _LOCK:
+            r = self.conn.execute("SELECT path FROM posts WHERE id=?", (rid,)).fetchone()
+            if r is None or pkey(r["path"]) == pkey(new_path):
+                return
+            self.conn.execute("UPDATE posts SET path=?, pkey=?, moved_pkey=NULL, note=note || ? WHERE id=?",
+                              (new_path, pkey(new_path), f"(原来在 {r['path']})", rid))
+            self.conn.commit()
 
     def mark_sent(self, rid: int) -> None:
         """数据记录页:人去后台看了,这条「没发成」的其实发出去了 → 记成已发。
         原来记着发布时间的(发出去过、被拎回来 / 改回没发的)保留原来的;没有的才记成现在(补记)。
         用户 2026-10-26:原来一律改成现在,10.24 发的标成已发就变成了今天发的,核对今天说它没发上。"""
         with _LOCK:
-            self.conn.execute("UPDATE posts SET status='已发', published_at=COALESCE(NULLIF(published_at, ''), ?), "
+            self.conn.execute("UPDATE posts SET status='已发', published_at=COALESCE(NULLIF(published_at, ''), NULLIF(prepared_at, ''), ?), "
                               "note=note || '(人去后台看过,标成已发)' WHERE id=?", (bj_str(), rid))
             self.conn.commit()
 

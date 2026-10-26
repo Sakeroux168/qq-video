@@ -89,10 +89,19 @@ class FindDialog(QDialog):
         k = self.lst.currentRow()
         return self.rows[k] if 0 <= k < len(self.rows) else None
 
+    def _md(self) -> str:
+        """挪回哪天:按点的时候算(窗口开着跨过半夜,「今天」也跟着变;审查 2026-10-26)。"""
+        t = bj_now() + timedelta(days=max(0, self.c_day.currentIndex()))
+        return f"{t.month}.{t.day}"
+
     def _sel(self):
         r = self._cur()
         self.b_copy.setEnabled(bool(r))
-        self.b_back.setEnabled(bool(r) and bool(redo.locate(self.st, r)))
+        no = redo.why_not_movable(r) if r else ""
+        self.b_back.setEnabled(bool(r) and not no and bool(redo.locate(self.st, r)))
+        self.b_back.setToolTip(no or "视频和封面挪回那天的文件夹,记录改成没发,之后能再发(不会自己发)")
+        if r and no:
+            self.lab.setText(no)
         self.b_del.setEnabled(bool(r) and redo.is_api(r) and r["status"] == "已发")
         self.b_del.setVisible(not r or redo.is_api(r))
 
@@ -106,20 +115,24 @@ class FindDialog(QDialog):
         r = self._cur()
         if not r:
             return
-        md = self.c_day.currentData()
+        md = self._md()
+        no = redo.why_not_movable(r) or redo.busy_reason(self)
+        if no:
+            QMessageBox.information(self, "挪回去重发", no)
+            return
         dst = redo.target_dir(self.st, r, md)
         from gui.api_tab import ask
         if not ask(self, "挪回去重发", f"「{r['title'][:40]}」\n\n视频和封面挪到:\n{dst}\n\n记录改成没发,之后在"
                    + ("「16 个号」" if redo.is_api(r) else "「教育号」") + f"页选 {md} 就能再发(不会自己发)。\n"
                    "企鹅号上原来那条要删的话,记得去后台删(或者先点「在企鹅号上删掉」)。", "挪回去", "先不"):
             return
-        new, why = redo.pull_back(self.st, self.rec, r, md)
+        out = {}
+        new, why = redo.pull_back(self.st, self.rec, r, md, out)    # 补发不占那天的规定条数:额度在里面加(用户 2026-10-26)
         if why:
             QMessageBox.warning(self, "挪回去重发", why)
             return
-        from qe import plan
-        room = plan.room_for_redo(self.st, r, plan.md_to_day(md))     # 补发不占那天的规定条数(用户 2026-10-26)
-        self.lab.setText(f"挪回去了:{new}" + (f"\n「{r['account']}」{md} 多加了 1 条(补发的这条不占那天的规定条数)" if room else ""))
+        self.lab.setText(f"挪回去了:{new}" + (f"\n「{r['account']}」{md} 多加了 1 条(补发的这条不占那天的规定条数)" if out.get("room") else "")
+                         + ("\n" + ";".join(out["warn"]) if out.get("warn") else ""))
         if self.after:
             try:
                 self.after()
@@ -132,7 +145,12 @@ class FindDialog(QDialog):
         if not r or not redo.is_api(r):
             return
         from gui.api_tab import ask
-        if not ask(self, "在企鹅号上删掉", f"「{r['title'][:40]}」({r['account']})\n\n在企鹅号上删掉这条?删了找不回来。",
+        import re
+        m = re.search(r"article_id=(\w+)", r.get("note") or "")
+        when = str(r.get("published_at") or "")[5:16] or "?"
+        # 审查 2026-10-26:同一个位置发过两次时容易删错 —— 写清楚是哪天发的、文章编号多少
+        if not ask(self, "在企鹅号上删掉", f"「{r['title'][:40]}」({r['account']})\n发布时间 {when} · 文章编号 {m.group(1) if m else '?'}\n\n"
+                   "在企鹅号上删掉这条?删了找不回来。\n(同一个视频发过好几次的,先去后台对一下是不是这一条)",
                    "删掉", "先不", default_no=True, danger=True):
             return
         why = redo.delete_on_platform(r)

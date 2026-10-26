@@ -28,7 +28,7 @@ def _crypt(data: bytes, protect: bool) -> bytes:
     out = _Blob()
     fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
     if not fn(ctypes.byref(src), None, None, None, None, 0, ctypes.byref(out)):
-        raise OSError("DPAPI 加解密失败(换了电脑或 Windows 用户?请重新搬一次账号)")
+        raise OSError("DPAPI 加解密失败(换了电脑或 Windows 用户?16 个号请重新搬一次账号,教育号请重新「登录取钥匙」)")
     try:
         return ctypes.string_at(out.pbData, out.cbData)
     finally:
@@ -48,14 +48,16 @@ def store_path():
 
 
 def load() -> list[dict]:
-    """[{nick, source_name, source_id, client_id, secret(加密的), category, enabled}]"""
+    """[{nick, source_name, source_id, client_id, secret(加密的), category, enabled}]。
+    只查不发的号(教育号,只查账号.json 里有的)不在这里出现:发布那边看不到它们(审查 2026-10-26 兜底)。"""
     try:
         data = json.loads(store_path().read_text("utf-8-sig"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, list):
         return []
-    return [a for a in data if isinstance(a, dict) and str(a.get("nick") or "").strip()]
+    q = {a["nick"] for a in qload()}
+    return [a for a in data if isinstance(a, dict) and str(a.get("nick") or "").strip() and a["nick"] not in q]
 
 
 def save(accs: list[dict]):
@@ -65,8 +67,9 @@ def save(accs: list[dict]):
     os.replace(tmp, p)
 
 
-def migrate(db: str = OLD_DB) -> int:
-    """从旧数据库搬(只读打开)。已经有的号更新,返回搬了几个。"""
+def migrate(db: str = OLD_DB, skip=()) -> int:
+    """从旧数据库搬(只读打开)。返回搬了几个。skip = 不搬的号(教育号:只在罐头里发,绝不能进接口发布名单)。
+    已经有的号:钥匙 / 开关不动(审查 2026-10-26:原来会把「登录取钥匙」换好的新钥匙改回旧库里的老钥匙),只补名字、类别这些。"""
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         rows = con.execute("select nick, source_name, source_id, client_id, client_secret, category, enabled "
@@ -74,20 +77,30 @@ def migrate(db: str = OLD_DB) -> int:
     finally:
         con.close()
     have = {a["nick"]: a for a in load()}
+    skip = set(skip) | {a["nick"] for a in qload()}
+    n = 0
     for nick, sname, sid, cid, sec, cat, en in rows:
         nick = (nick or sname or "").strip()
-        if not nick or not cid or not sec:
+        if not nick or not cid or not sec or nick in skip:
             continue
-        a = have.get(nick, {})
-        a.update({"nick": nick, "source_name": sname or "", "source_id": str(sid or ""), "client_id": cid,
-                  "secret": seal(sec), "category": int(cat or 0), "enabled": bool(en)})
+        a = have.get(nick)
+        if a and a.get("client_id") and a.get("secret"):
+            a.update({"source_name": sname or a.get("source_name", ""), "source_id": str(sid or a.get("source_id", "")),
+                      "category": int(cat or a.get("category") or 0)})
+        else:
+            a = dict(a or {}, nick=nick, source_name=sname or "", source_id=str(sid or ""), client_id=cid,
+                     secret=seal(sec), category=int(cat or 0), enabled=bool(en))
         have[nick] = a
+        n += 1
     save(list(have.values()))
-    return len(rows)
+    return n
 
 
 def set_key(nick: str, client_id: str, secret: str) -> bool:
-    """换上新钥匙(登录取钥匙读到的),加密存。返回这个号在不在。"""
+    """换上新钥匙(登录取钥匙读到的),加密存。返回这个号在不在。
+    这把钥匙是只查不发的号(教育号)的 → 不换(审查 2026-10-26:扫错号,教育号的钥匙会进发布名单)。"""
+    if any(a.get("client_id") == client_id for a in qload()):
+        raise ValueError("这把钥匙是教育号(只查不发)的,不能给 16 个号用")
     accs = load()
     for a in accs:
         if a.get("nick") == nick:
@@ -127,6 +140,8 @@ def qload() -> list[dict]:
 
 
 def set_qkey(nick: str, client_id: str, secret: str) -> None:
+    if any(a.get("client_id") == client_id for a in load()):
+        raise ValueError("这把钥匙是 16 个号里的,不能给教育号用")
     accs = [a for a in qload() if a.get("nick") != nick]
     accs.append({"nick": nick, "client_id": client_id, "secret": seal(secret)})
     p = qstore_path()

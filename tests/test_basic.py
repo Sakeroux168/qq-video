@@ -3613,8 +3613,8 @@ def test_verify(tmp: Path):
     miss = {m["title"]: m["why"] for m in r["missing"]}
     sure = {m["title"]: m["sure"] for m in r["missing"]}
     check(r["ours"] == 6 and r["live"] == 4 and r["ok"] == 3 and r["review"] == 1 and set(miss) == {"被删的", "没上去的", "G镇大写"}
-          and "已删除" in miss["被删的"] and "未发布" in miss["没上去的"] and sure["被删的"] and sure["没上去的"],
-          f"核对:在的 / 审核中的 算对上;被删的、没上去的是假发成功(默认打勾) -> {r['ours']} {r['live']} {miss}")
+          and "删了" in miss["被删的"] and "未发布" in miss["没上去的"] and not sure["被删的"] and sure["没上去的"],
+          f"核对:在的 / 审核中的 算对上;没上去的默认打勾,被删的列出来不打勾(多半是人自己删的)-> {r['ours']} {r['live']} {miss}")
     check(not sure["G镇大写"] and "单查是「发布成功」" in miss["G镇大写"] and "不是这天" in miss["G镇大写"],
           f"单查说发布成功、但发布时间不是这天的:列出来让人看(不默认打勾)-> {miss['G镇大写']}")
     check("后台搜得到" not in miss, "列表里没读到、单查是这天发布成功的:算对上(用户 2026-10-24:后台一搜就在,不是假发成功)")
@@ -4659,7 +4659,7 @@ def test_find_redo(tmp: Path):
     rows = redo.search(rec, "衔接必备")
     check(len(rows) == 1 and rows[0]["title"] == t and redo.search(rec, "  ") == [], "标题里的几个字就找得到;空的不找")
     check(redo.locate(st, rows[0]) == str(arc / f"{t}.mp4"), f"教育号:从归档里认出视频现在在哪 -> {redo.locate(st, rows[0])}")
-    check(sorted(os.path.basename(p) for p in redo.extras(str(arc / f"{t}.mp4"))) == sorted([f"{t}.jpg", t]),
+    check(sorted(os.path.basename(p) for p, _k, _r in redo.extras(str(arc / f"{t}.mp4"))) == sorted([f"{t}.jpg", t]),
           "跟着一起挪的:同名的图 + 封面文件夹,别的视频不带")
     (root / "10.25(星期六)").mkdir()
     check(redo.target_dir(st, rows[0], "10.25") == str(root / "10.25(星期六)" / "家长研习社"),
@@ -4787,8 +4787,9 @@ def test_edu_verify(tmp: Path):
     why = {m["title"]: (m["why"], m["sure"]) for m in r["missing"]}
     check(r["ours"] == 4 and r["live"] == 3 and len(r["extra"]) == 1 and set(why) == {titles["C"], titles["D"]},
           f"按标题对:去空格标点一样的、被平台截短的都算对上;后台多出来的列为软件没记的 -> {r['ours']} {r['live']} {why}")
-    check(why[titles["C"]] == ("企鹅号上是「审核不通过」", True) and why[titles["D"]][1] is False and "改了标题" in why[titles["D"]][0],
-          "被打回的:打勾(能拎回来);标题找不到、这天后台又有多出来的:不打勾,提示可能改了标题")
+    check("被审核打回" in why[titles["C"]][0] and why[titles["C"]][1] is False and why[titles["D"]][1] is False
+          and "改了标题" in why[titles["D"]][0],
+          "被打回的:列出来不打勾(再发多半还会被打回);标题找不到、这天后台又有多出来的:不打勾,提示可能改了标题")
     extra_one = arts.pop()                                     # 这天后台没有多出来的 → 找不到的就是没发上,打勾
     r2 = verify.check_edu(C("ce", "se"), rec, "家长研习空间", day)
     why2 = {m["title"]: (m["why"], m["sure"]) for m in r2["missing"]}
@@ -4816,6 +4817,12 @@ def test_edu_verify(tmp: Path):
         check("家长研习空间" in dlg.results and dlg.results["家长研习空间"].get("edu") and "CSGO战神君" in dlg.results,
               "「去企鹅号核对」16 个号和教育号一起查")
         check(dlg.miss.count() == 2, f"假发成功列了 2 条 -> {dlg.miss.count()}")
+        from PySide6.QtCore import Qt
+        its = [dlg.miss.item(k) for k in range(dlg.miss.count())]
+        check(all(it.checkState() == Qt.CheckState.Unchecked for it in its), "打回的、标题对不上的:默认都不打勾")
+        for it in its:
+            if "被打回的那条" in it.text():
+                it.setCheckState(Qt.CheckState.Checked)       # 人确定要重发:自己勾上
         dlg.pull_back()
         check(rec.status_of(str(d / f"{titles['C']}.mp4")) == "" and (d / f"{titles['C']}.mp4").is_file()
               and not list(d.glob("*(2).mp4")),
@@ -4908,7 +4915,7 @@ def test_verify_range(tmp: Path):
             return {"articles": a[(page - 1) * limit: page * limit], "total": len(a)}
 
         def article_info(self, aid):
-            return {}
+            return {"article_info": {"article_pub_flag": "未发布", "article_del_flag": "未删除"}}
     # 用户 2026-10-26 当天核对:定时还没到点的,企鹅号状态是代号「10」—— 不能当成没发上(原来默认打勾,差点拎回来重发)
     v = F.Video(path=str(tmp / "vr" / "定时的.mp4"), title="定时的", account="CSGO战神君", employee="", date=days[-1][5:])
     rid = rec.api_begin(v)
@@ -4990,6 +4997,276 @@ def test_mark_sent_keep(tmp: Path):
     check(r["ours"] == 1 and not r["missing"], f"教育号同一天同标题记了两条:算一条,不报没发上 -> ours={r['ours']} {[m['why'] for m in r['missing']]}")
 
 
+def test_key_guards(tmp: Path):
+    print("[钥匙串号的硬拦(审查 2026-10-26):扫错号不换、教育号进不了发布名单、搬账号不改回旧钥匙、选择框按位置取]")
+    import sqlite3
+    from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omlogin
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    apiacc.save([{"nick": "PUBG突围君", "client_id": "CID_PUBG", "secret": apiacc.seal("SP"), "category": 1604, "enabled": True},
+                 {"nick": "家长研习空间", "client_id": "CID_X", "secret": apiacc.seal("SX"), "category": 1, "enabled": True}])
+    apiacc.set_qkey("家长研习空间", "CID_EDU", "SE")
+    check([a["nick"] for a in apiacc.load()] == ["PUBG突围君"] and "家长研习空间" not in apiacc.nicks(),
+          "只查不发的号就算混进了接口账号.json,发布那边也看不到")
+    for f, why in ((lambda: apiacc.set_key("PUBG突围君", "CID_EDU", "SE"), "教育号的钥匙换给 16 个号"),
+                   (lambda: apiacc.set_qkey("家长小天地", "CID_PUBG", "SP"), "16 个号的钥匙存给教育号")):
+        try:
+            f()
+            ok = False
+        except ValueError:
+            ok = True
+        check(ok, f"{why}:拒绝")
+    keys = [{"name": "国漫解说馆", "client_id": "A"}, {"name": "国漫解说馆z", "client_id": "B"}]
+    check(omlogin.match(keys, "国漫解说馆z")["client_id"] == "B" and omlogin.name_ok({"name": "家长研习空间"}, "PUBG突围君") is False
+          and omlogin.name_ok({"name": ""}, "PUBG突围君"), "名字完全一样的先认;名字对不上的算扫错号")
+    # 搬账号:教育号不搬;已经有钥匙的号不改回旧库里的老钥匙
+    db = tmp / "kg_old.db"
+    con = sqlite3.connect(db)
+    con.execute("create table accounts(nick, source_name, source_id, client_id, client_secret, category, enabled, sort_order, id)")
+    con.executemany("insert into accounts values(?,?,?,?,?,?,?,?,?)",
+                    [("PUBG突围君", "PUBG", "1", "OLD", "OLDSEC", 1604, 0, 1, 1), ("家长小天地", "家", "2", "C2", "S2", 1, 1, 2, 2),
+                     ("CSGO战神君", "CSGO", "3", "C3", "S3", 1604, 1, 3, 3)])
+    con.commit()
+    con.close()
+    apiacc.migrate(str(db), skip={"家长小天地"})
+    p = apiacc.find("PUBG突围君")
+    check(p["client_id"] == "CID_PUBG" and p["enabled"] is True and apiacc.find("CSGO战神君")["client_id"] == "C3"
+          and apiacc.find("家长小天地") is None, "搬账号:已有的号钥匙 / 开关不动,新号照搬,教育号不搬")
+    # 登录取钥匙:选 PUBG、扫的是教育号 → 不换;选教育号、扫的是 PUBG → 不存
+    st = Settings(tmp / "st_kg.json")
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏", "accounts": {"PUBG突围君": 20}},
+                        {"cat": "教育", "label": "教育", "accounts": {"家长研习空间": 102, "家长小天地": 54}}]
+    tab = T.ApiTab(st, Records(tmp / "r_kg.sqlite"), lambda m: None)
+    scanned = {}
+
+    class P:
+        def terminate(self):
+            pass
+    real = (omlogin.launch, omlogin.wait_keys, QInputDialog.getItem, QMessageBox.warning, QMessageBox.information, T.ask)
+    warned = []
+    omlogin.launch = lambda nick: (P(), 1)
+    omlogin.wait_keys = lambda port, stopped=None: ("读到了", [scanned["k"]], "")
+    QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(a[2]))
+    QMessageBox.information = staticmethod(lambda *a, **k: None)
+    T.ask = lambda *a, **k: True
+    try:
+        scanned["k"] = {"name": "家长研习空间", "client_id": "CID_EDU2", "secret": "SE2", "media_id": "9"}
+        QInputDialog.getItem = staticmethod(lambda *a, **k: ("PUBG突围君", True))
+        tab.relogin_key()
+        check(apiacc.find("PUBG突围君")["client_id"] == "CID_PUBG" and warned and "不是「PUBG突围君」" in warned[-1],
+              f"选 PUBG、手机扫的是教育号:不换,说清楚 -> {warned[-1:] }")
+        scanned["k"] = {"name": "", "client_id": "CID_EDU", "secret": "SE", "media_id": ""}
+        tab.relogin_key()
+        check(apiacc.find("PUBG突围君")["client_id"] == "CID_PUBG" and "教育号" in warned[-1], "回话里没名字、但钥匙是教育号的:也不换")
+        scanned["k"] = {"name": "PUBG突围君", "client_id": "CID_PUBG", "secret": "SP", "media_id": "1"}
+        QInputDialog.getItem = staticmethod(lambda *a, **k: ("家长小天地" + T.EDU_TAG, True))
+        tab.relogin_key()
+        check(apiacc.qfind("家长小天地") is None and "不是「家长小天地」" in warned[-1], "选教育号、扫成 PUBG:不存")
+        scanned["k"] = {"name": "家长小天地", "client_id": "CID_XTD", "secret": "SX2", "media_id": "8"}
+        tab.relogin_key()
+        check(apiacc.qfind("家长小天地") and apiacc.qfind("家长小天地")["client_id"] == "CID_XTD", "扫对了:照常存")
+        # 一个账号下两个没名字的号:选第二个就是第二个
+        two = [{"name": "", "client_id": "CID_A1", "secret": "a", "media_id": ""}, {"name": "", "client_id": "CID_B2", "secret": "b", "media_id": ""}]
+        omlogin.wait_keys = lambda port, stopped=None: ("读到了", two, "")
+        answers = iter(["PUBG突围君", None])
+
+        def pick(parent, title, text, items, *a, **k):
+            v = next(answers)
+            return (v, True) if v else (items[1], True)
+        QInputDialog.getItem = staticmethod(pick)
+        tab.relogin_key()
+        check(apiacc.find("PUBG突围君")["client_id"] == "CID_B2", f"几个没名字的号:选第二个换上的就是第二个 -> {apiacc.find('PUBG突围君')['client_id']}")
+    finally:
+        omlogin.launch, omlogin.wait_keys, QInputDialog.getItem, QMessageBox.warning, QMessageBox.information, T.ask = real
+    _ = app
+
+
+def test_audit_redo(tmp: Path):
+    print("[审查 2026-10-26 拎回来重发:不丢文件 / 不加(2) / 用原名 / 不进脏话文件夹 / 不确定的不挪 / 记录跟着走 / 封面跟着走 / 额度能退]")
+    from qe import folders as F
+    from qe import plan, redo
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    n = bj_now()
+    md, today = f"{n.month}.{n.day}", n.strftime("%Y-%m-%d")
+    rec = Records(tmp / "r_ar.sqlite")
+    st = Settings(tmp / "st_ar.json")
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏", "accounts": {"CSGO战神君": 20}},
+                        {"cat": "教育", "label": "教育", "accounts": {"家长研习空间": 102}}]
+    root = tmp / "ar" / "游戏视频"
+    acc = root / "CSGO--CSGO战神君"
+    (acc / "10.20").mkdir(parents=True)
+    (acc / f"{md} 脏话").mkdir()
+    (acc / f"{md}（星期一）").mkdir()
+    st["api_roots"] = [str(root)]
+    arc = tmp / "ar" / "归档"
+    arc.mkdir(parents=True)
+
+    def api_row(title, arc_name):
+        v = F.Video(path=str(acc / "10.20" / f"{title}.mp4"), title=title, account="CSGO战神君", employee="", date="10.20")
+        rid = rec.api_begin(v)
+        rec.api_finish(rid, "已发", f"article_id=A{rid} vid=V{rid}")
+        rec.conn.execute("UPDATE posts SET published_at='2026-10-20 10:00:00' WHERE id=?", (rid,))
+        rec.conn.commit()
+        (arc / f"{arc_name}.mp4").write_bytes(b"x")
+        (arc / f"{arc_name}.jpg").write_bytes(b"j")
+        rec.mark_moved(rid, str(arc / f"{arc_name}.mp4"))
+        return dict(rec.conn.execute("SELECT * FROM posts WHERE id=?", (rid,)).fetchone())
+    r1 = api_row("好标题", "好标题 (2)")
+    check(redo.target_dir(st, r1, md) == str(acc / f"{md}（星期一）"), "认今天的文件夹和发布页一样:「脏话」那个不算")
+    out = {}
+    new, why = redo.pull_back(st, rec, r1, md, out)
+    check(why == "" and os.path.basename(new) == "好标题.mp4" and (acc / f"{md}（星期一）" / "好标题.jpg").is_file()
+          and not list((acc / f"{md}（星期一）").glob("*(2)*")), f"归档里叫「好标题 (2)」的:挪回来用原名,封面跟着改名 -> {new} {why}")
+    got = rec.conn.execute("SELECT status, path, moved_pkey FROM posts WHERE id=?", (r1["id"],)).fetchone()
+    check(got[0] == "没发成" and os.path.normcase(got[1]) == os.path.normcase(new) and got[2] is None and out.get("room") == 1,
+          "记录改成没发成、位置改成新的;补发以前的给今天加 1 条")
+    from qe.records import pkey
+    check(rec.status_of(new) == "" and rec.conn.execute("SELECT count(*) FROM posts WHERE pkey=? AND status='没发成'", (pkey(new),)).fetchone()[0] == 1
+          and plan.quota_on(st, "CSGO战神君", today) == 21, "新位置认得出这条、能再发(之后重发成了就不再挂着没发成)")
+    check(plan.undo_room(st, r1["id"]) == 1 and plan.quota_on(st, "CSGO战神君", today) == 20 and plan.undo_room(st, r1["id"]) == 0,
+          "拎回来以后又标成已发:多加的那 1 条退回去(只退一次)")
+    # 目标已经有同名的:停下来,原处不动,不加 (2)
+    r2 = api_row("撞名的", "撞名的")
+    (acc / f"{md}（星期一）" / "撞名的.mp4").write_bytes(b"y")
+    new2, why2 = redo.pull_back(st, rec, r2, md)
+    check(new2 == "" and "已经有" in why2 and (arc / "撞名的.mp4").is_file()
+          and rec.conn.execute("SELECT status FROM posts WHERE id=?", (r2["id"],)).fetchone()[0] == "已发",
+          f"今天的文件夹里已经有同名的:不挪、不加 (2)、记录不动 -> {why2}")
+    # 不确定发没发 / 摆好的:不让挪
+    r3 = api_row("不确定的", "不确定的")
+    rec.conn.execute("UPDATE posts SET status='结果不明' WHERE id=?", (r3["id"],))
+    rec.conn.commit()
+    new3, why3 = redo.pull_back(st, rec, dict(r3, status="结果不明"), md)
+    check(new3 == "" and "不确定发没发" in why3 and (arc / "不确定的.mp4").is_file(), f"「不确定发没发」的不让挪 -> {why3}")
+    # 同一个视频两条「已发」记录:一起改,额度只加一次
+    r4 = api_row("两条记录", "两条记录")
+    rid_b = rec.api_begin(F.Video(path=r4["path"], title="两条记录", account="CSGO战神君", employee="", date="10.20"))
+    rec.api_finish(rid_b, "已发", "")
+    rec.conn.execute("UPDATE posts SET published_at='2026-10-20 11:00:00', moved_pkey=? WHERE id=?", (r4["moved_pkey"], rid_b))
+    rec.conn.commit()
+    o4 = {}
+    redo.pull_back(st, rec, r4, md, o4)
+    o4b = {}
+    redo.pull_back(st, rec, dict(rec.conn.execute("SELECT * FROM posts WHERE id=?", (rid_b,)).fetchone()), md, o4b)
+    check([x[0] for x in rec.conn.execute("SELECT status FROM posts WHERE id IN (?,?)", (r4["id"], rid_b))] == ["没发成", "没发成"]
+          and o4.get("room") == 1 and not o4b.get("room"), "同一个视频的两条记录一起改成没发;额度只加一次")
+    # 号的视频直接放在号文件夹里(没日期文件夹、名单里也找不到):挪回原文件夹
+    flat = tmp / "ar" / "别处" / "电竞赛事"
+    flat.mkdir(parents=True)
+    v = F.Video(path=str(flat / "赛事.mp4"), title="赛事", account="不在名单的号", employee="", date="10.20")
+    rid5 = rec.api_begin(v)
+    rec.api_finish(rid5, "已发", "")
+    (arc / "赛事.mp4").write_bytes(b"x")
+    rec.mark_moved(rid5, str(arc / "赛事.mp4"))
+    check(redo.target_dir(st, dict(rec.conn.execute("SELECT * FROM posts WHERE id=?", (rid5,)).fetchone()), md) == str(flat),
+          "没日期文件夹的号:挪回原来的文件夹(原来直接报找不到)")
+    # 教育号:封面在「梁\\封面\\标题\\」;原来套了一层同名日期
+    eroot = tmp / "ar" / "小学生教育类"
+    st["material_root"] = str(eroot)
+    st["archive_root"] = str(tmp / "ar" / "教育归档" / "{month}月")
+    day = eroot / "10.20"
+    (day / "10.20" / "家长研习空间" / "梁" / "视频").mkdir(parents=True)
+    vp = day / "10.20" / "家长研习空间" / "梁" / "视频" / "孩子磨蹭.mp4"
+    vp.write_bytes(b"x")
+    (day / "10.20" / "家长研习空间" / "梁" / "封面" / "孩子磨蹭").mkdir(parents=True)
+    (day / "10.20" / "家长研习空间" / "梁" / "封面" / "孩子磨蹭" / "横屏16x9.png").write_bytes(b"p")
+    rec.manual_published(F.Video(path=str(vp), title="孩子磨蹭", account="家长研习空间", employee="梁", date="10.20"))
+    F.move_date(st, "10.20")
+    er = dict(rec.conn.execute("SELECT * FROM posts WHERE title='孩子磨蹭'").fetchone())
+    (eroot / f"{md}不能用").mkdir(parents=True)
+    tdir = redo.target_dir(st, er, md)
+    check(tdir == str(eroot / md / "家长研习空间" / "梁" / "视频"), f"教育号:不进「不能用」,去掉套着的同名日期那层 -> {tdir}")
+    o5 = {}
+    new5, why5 = redo.pull_back(st, rec, er, md, o5)
+    check(why5 == "" and (eroot / md / "家长研习空间" / "梁" / "封面" / "孩子磨蹭" / "横屏16x9.png").is_file(),
+          f"教育号放在「梁\\封面\\标题\\」的封面跟着挪 -> {why5} {o5.get('warn')}")
+
+
+def test_audit_verify(tmp: Path):
+    print("[审查 2026-10-26 核对:只有确定没发上的才打勾(跨半夜 / 翻页重复 / 单查出错 / 删掉的重复 / 系列标题 / 空状态)]")
+    from qe import folders as F
+    from qe import verify
+    from qe.records import Records
+    rec = Records(tmp / "r_av.sqlite")
+    d0 = "2026-10-20"
+
+    def put(title, edu=False, aid="", at=f"{d0} 10:00:00", acc="CSGO战神君"):
+        v = F.Video(path=str(tmp / "av" / f"{title}.mp4"), title=title, account=acc, employee="小王" if edu else "", date="10.20")
+        if edu:
+            rec.manual_published(v)
+            rid = rec.conn.execute("SELECT max(id) FROM posts").fetchone()[0]
+        else:
+            rid = rec.api_begin(v)
+            rec.api_finish(rid, "已发", f"article_id={aid} vid=V{aid}" if aid else "")
+        rec.conn.execute("UPDATE posts SET published_at=? WHERE id=?", (at, rid))
+        rec.conn.commit()
+
+    class C:
+        def __init__(self, arts, info=None, dup_first=False):
+            self.arts, self.info, self.dup_first = sorted(arts, key=lambda a: a["article_pub_time"], reverse=True), info, dup_first
+
+        def list_articles(self, page=1, limit=10):
+            a = self.arts
+            if self.dup_first and page == 2:                 # 翻页中间有新文章进来:整张表往下挪,第 1 页最后一条又出现
+                a = [a[0]] + a
+            return {"articles": a[(page - 1) * limit: page * limit], "total": len(self.arts) + 1}
+
+        def article_info(self, aid):
+            if self.info == "err":
+                raise RuntimeError("查文章:网络连不上")
+            return {}
+
+    def art(t, at, flag="发布成功", aid="", dele=""):
+        return {"article_id": aid, "article_title": t, "article_pub_time": at, "article_pub_flag": flag, "article_del_flag": dele}
+    # 跨半夜(教育号):记录记在 20 号,企鹅号上是 21 号 00:05
+    put("跨半夜的", edu=True, at=f"{d0} 23:55:00", acc="家长研习空间")
+    r = verify.check_edu(C([art("跨半夜的", "2026-10-21 00:05:00")]), rec, "家长研习空间", d0)
+    check(not r["missing"], f"跨半夜发的:前后一天有就算发上了 -> {[m['why'] for m in r['missing']]}")
+    # 翻页重复:同一篇不算两次
+    many = [art(f"t{k}", f"{d0} 0{k % 9}:00:00", aid=f"P{k}") for k in range(15)]
+    got = verify.platform_between(C(many, dup_first=True), d0, d0)
+    check(len(got) == len({p["aid"] for p in got}) == 15, f"翻页中间表往下挪:同一篇只算一次 -> {len(got)}")
+    # 翻到上限还没翻完:报查不了,不当成读完
+    try:
+        verify.platform_between(C([art("x", f"{d0} 10:00:00", aid=f"Q{k}") for k in range(30)]), "2020-01-01", d0, max_pages=2)
+        ok = False
+    except verify.ListTooLong:
+        ok = True
+    check(ok, "翻满页数上限还没翻到那天以前:报「查不了」")
+    # 单查出错:不打勾
+    put("单查出错的", aid="E1")
+    r = verify.check_account(C([], info="err"), rec, "CSGO战神君", d0)
+    m = next(x for x in r["missing"] if x["title"] == "单查出错的")
+    check(m["sure"] is False and "看一眼" in m["why"], f"列表里没有、单查又出错:不打勾 -> {m['why']}")
+    # 删掉的是重复的那条:同标题的在线 → 不打勾
+    put("发重了", aid="D1", at=f"{d0} 11:00:00")
+    put("发重了", aid="D2", at=f"{d0} 11:05:00")
+    r = verify.check_account(C([art("发重了", f"{d0} 11:00:00", aid="D1"), art("发重了", f"{d0} 11:05:00", aid="D2", dele="已删除")]),
+                             rec, "CSGO战神君", d0)
+    m = next((x for x in r["missing"] if x["title"] == "发重了"), None)
+    check(m is not None and m["sure"] is False and "同标题" in m["why"], f"删掉的是发重了的那条:不打勾 -> {m and m['why']}")
+    # 被打回的:列出来,不打勾
+    put("被打回的", aid="R1")
+    r = verify.check_account(C([art("被打回的", f"{d0} 10:00:00", flag="审核不通过", aid="R1")]), rec, "CSGO战神君", d0)
+    m = next(x for x in r["missing"] if x["title"] == "被打回的")
+    check(m["sure"] is False and "打回" in m["why"], "被打回的:不打勾(再发多半还会被打回)")
+    # 系列标题:第12集被打回,第13集后来发了 → 不算「已经补发过了」
+    put("三角洲行动高光时刻第12集", aid="S12")
+    put("三角洲行动高光时刻第13集", aid="S13", at="2026-10-21 10:00:00")
+    r = verify.check_account(C([art("三角洲行动高光时刻第12集", f"{d0} 10:00:00", flag="未发布", aid="S12")]), rec, "CSGO战神君", d0)
+    m = next(x for x in r["missing"] if x["title"] == "三角洲行动高光时刻第12集")
+    check(m["sure"] is True and not m.get("redone"), f"第12集没发上、第13集后来发了:不认成补发过,照样打勾 -> {m['why']}")
+    # 状态是空的:认不出,不打勾,也不算在线
+    put("状态空的", aid="N1")
+    r = verify.check_account(C([art("状态空的", f"{d0} 10:00:00", flag="", aid="N1")]), rec, "CSGO战神君", d0)
+    m = next((x for x in r["missing"] if x["title"] == "状态空的"), None)
+    check(m is not None and m["sure"] is False and "认不出" in m["why"], f"状态是空的:列出来看一眼 -> {m and m['why']}")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -5064,6 +5341,9 @@ if __name__ == "__main__":
     test_redo_room(tmp)
     test_verify_range(tmp)
     test_mark_sent_keep(tmp)
+    test_key_guards(tmp)
+    test_audit_redo(tmp)
+    test_audit_verify(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

@@ -66,7 +66,7 @@ class DailyTab(QWidget):
         top.addWidget(b)
         b = QPushButton("去企鹅号核对")
         b.setToolTip("16 个号:去企鹅号读一下这天每个号真发了几条,和软件记的对一对(只读,不发不删)。\n"
-                     "软件记成已发、企鹅号上其实没有的,能「拎回来重发」。教育号查不了。\n只查一个号:表里右键那个号「去企鹅号核对…」")
+                     "软件记成已发、企鹅号上其实没有的,能「拎回来重发」。教育号取了钥匙的也一起查。\n只查一个号:表里右键那个号「去企鹅号核对…」")
         b.clicked.connect(lambda: self.verify())
         top.addWidget(b)
         v.addLayout(top)
