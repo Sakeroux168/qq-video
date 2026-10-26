@@ -4787,8 +4787,26 @@ def test_edu_verify(tmp: Path):
     why = {m["title"]: (m["why"], m["sure"]) for m in r["missing"]}
     check(r["ours"] == 4 and r["live"] == 3 and len(r["extra"]) == 1 and set(why) == {titles["C"], titles["D"]},
           f"按标题对:去空格标点一样的、被平台截短的都算对上;后台多出来的列为软件没记的 -> {r['ours']} {r['live']} {why}")
-    check(why[titles["C"]] == ("企鹅号上是「审核不通过」", True) and why[titles["D"]][1] is False,
-          "被打回的:打勾(能拎回来);标题哪儿都找不到的:不打勾,看一眼再决定")
+    check(why[titles["C"]] == ("企鹅号上是「审核不通过」", True) and why[titles["D"]][1] is False and "改了标题" in why[titles["D"]][0],
+          "被打回的:打勾(能拎回来);标题找不到、这天后台又有多出来的:不打勾,提示可能改了标题")
+    extra_one = arts.pop()                                     # 这天后台没有多出来的 → 找不到的就是没发上,打勾
+    r2 = verify.check_edu(C("ce", "se"), rec, "家长研习空间", day)
+    why2 = {m["title"]: (m["why"], m["sure"]) for m in r2["missing"]}
+    check(why2[titles["D"]][1] is True and "没发上" in why2[titles["D"]][0], f"标题找不到、这天也没多出来的:打勾 -> {why2}")
+    arts.append(extra_one)
+    from datetime import timedelta
+    from qe.config import bj_str
+    yday = (n - timedelta(days=1)).strftime("%Y-%m-%d")
+    rec.conn.execute("UPDATE posts SET published_at=? WHERE title=?", (f"{yday} 18:00:00", titles["D"]))   # D 改成昨天发的、昨天没发上
+    rec.conn.commit()
+    rec.manual_published(F.Video(path=str(d / "补发的D.mp4"), title=titles["D"], account="家长研习空间", employee="小王", date=md))  # 今天补发过了
+    r3 = verify.check_edu(C("ce", "se"), rec, "家长研习空间", yday)
+    m3 = {m["title"]: m for m in r3["missing"]}
+    check(titles["D"] in m3 and m3[titles["D"]]["sure"] is False and "已经补发过了" in m3[titles["D"]]["why"],
+          f"那天没发上、但后来已经用同样标题补发过的:不打勾,说清楚(不然拎回来会重复发) -> {m3.get(titles['D'], {}).get('why')}")
+    rec.conn.execute("DELETE FROM posts WHERE path=?", (str(d / "补发的D.mp4"),))
+    rec.conn.execute("UPDATE posts SET published_at=? WHERE title=?", (bj_str(), titles["D"]))
+    rec.conn.commit()
     real = omapi.Client
     omapi.Client = C
     try:

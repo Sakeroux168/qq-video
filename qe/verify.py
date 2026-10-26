@@ -57,6 +57,15 @@ def _tkey(t: str) -> str:
     return norm_name(t)
 
 
+def _redone(k: str, later: list[tuple[str, str]]) -> str:
+    """later 里有标题一样 / 很像(相似度 ≥ 0.75)的 → 返回那条的日期(10-23),没有 → ""。"""
+    from difflib import SequenceMatcher
+    for lk, when in later:
+        if lk == k or (min(len(k), len(lk)) >= 6 and SequenceMatcher(None, k, lk).ratio() >= 0.75):
+            return when
+    return ""
+
+
 def check_edu(cl, rec, nick: str, day: str) -> dict:
     """教育号(用户 2026-10-26:钥匙只用来查,发布照旧走罐头):罐头发的记录没有文章编号,按标题对。
     先对完全一样的(去掉空格标点),再对一个是另一个开头的(企鹅号可能把长标题截短)。
@@ -85,8 +94,25 @@ def check_edu(cl, rec, nick: str, day: str) -> dict:
         if bad is not None:
             why, sure = ("已删除" if bad["deleted"] else f"企鹅号上是「{bad['flag']}」"), True
         else:
-            why, sure = "企鹅号这天的列表里没找到这个标题(罐头发的,按标题对的,看一眼再决定)", False
+            why, sure = "", None                              # 标题哪儿都找不到:看这天后台有没有多出来的(下面定)
         missing.append(dict(r, why=why, sure=sure))
+    # 用户 2026-10-26:标题找不到,而这天后台也没有多出来、软件没记的 → 不可能是在罐头里改了标题发的,就是没发上(打勾);
+    # 这天后台有多出来的 → 可能是改了标题发的,不打勾,提示看一眼
+    # 同一个号、后来又发过同样 / 差不多标题的(补发过了):别再拎回来,不然重复发。
+    # 用户 2026-10-23 的「精选8条视频」就是 19~22 号没发上的,标题为了躲查重稍微改过(三项→三种、参考→攻略):按相似度认
+    later = [(_tkey(x["title"]), str(x["published_at"])[5:10]) for x in rec.rows(account=nick)
+             if x["status"] == "已发" and str(x.get("published_at") or "")[:10] > day]
+    for m in missing:
+        again = _redone(_tkey(m["title"]), later)
+        if again:
+            m["why"], m["sure"] = f"这天没发上,但 {again} 已经补发过了,不用再拎回来", False
+            m["redone"] = True
+        elif m["sure"] is None:
+            if left:
+                m["why"], m["sure"] = (f"企鹅号这天没找到这个标题;这天后台有 {len(left)} 条软件没记的,"
+                                       "可能是在罐头里改了标题发的,看一眼再决定"), False
+            else:
+                m["why"], m["sure"] = "企鹅号这天没有这个标题,这天后台也没有别的多出来 —— 没发上", True
     return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if p["flag"] != "审核中"),
             "review": sum(1 for p in live if p["flag"] == "审核中"), "missing": missing, "extra": left, "edu": True}
 
