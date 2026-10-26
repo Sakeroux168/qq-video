@@ -53,11 +53,13 @@ def ours_on(rec, nick: str, day: str, edu: bool = False) -> list[dict]:
     rows = [r for r in rec.rows(account=nick) if r["status"] == "已发" and ((r["employee"] != "接口") if edu else (r["employee"] == "接口"))
             and str(r.get("published_at") or "").startswith(day)]
     if edu:
+        # 同一个视频只算一次:同一个文件,或者同一天同一个标题(用户 2026-10-26:找视频重发 / 标成已发来回点,
+        # 一条视频记了两条,后台只有一条,另一条被当成「没发上」)
         seen, uniq = set(), []
         for r in rows:
-            k = r.get("pkey") or r["path"]
-            if k not in seen:
-                seen.add(k)
+            ks = {r.get("pkey") or r["path"], "t:" + _tkey(r["title"])}
+            if not (ks & seen):
+                seen |= ks
                 uniq.append(r)
         rows = uniq
     for r in rows:

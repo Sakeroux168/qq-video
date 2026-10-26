@@ -170,10 +170,12 @@ class Records:
             return cur.rowcount
 
     def mark_sent(self, rid: int) -> None:
-        """数据记录页:人去后台看了,这条「没发成」的其实发出去了 → 记成已发(发布时间 = 现在,补记)。"""
+        """数据记录页:人去后台看了,这条「没发成」的其实发出去了 → 记成已发。
+        原来记着发布时间的(发出去过、被拎回来 / 改回没发的)保留原来的;没有的才记成现在(补记)。
+        用户 2026-10-26:原来一律改成现在,10.24 发的标成已发就变成了今天发的,核对今天说它没发上。"""
         with _LOCK:
-            self.conn.execute("UPDATE posts SET status='已发', published_at=?, note=note || '(人去后台看过,标成已发)' WHERE id=?",
-                              (bj_str(), rid))
+            self.conn.execute("UPDATE posts SET status='已发', published_at=COALESCE(NULLIF(published_at, ''), ?), "
+                              "note=note || '(人去后台看过,标成已发)' WHERE id=?", (bj_str(), rid))
             self.conn.commit()
 
     def failed_in_batch(self, batch: str) -> list[dict]:

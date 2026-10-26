@@ -4954,6 +4954,42 @@ def test_verify_range(tmp: Path):
         omapi.Client = real
 
 
+def test_mark_sent_keep(tmp: Path):
+    print("[标成已发保留原来的发布时间;教育号同一天同标题记了两条算一条(用户 2026-10-26:核对说发上的视频没发上)]")
+    from qe import folders as F
+    from qe import verify
+    from qe.records import Records
+    rec = Records(tmp / "r_msk.sqlite")
+    v = F.Video(path=str(tmp / "msk" / "a.mp4"), title="耗尽自身五行之力", account="国漫趣谈", employee="", date="10.24")
+    rid = rec.api_begin(v)
+    rec.api_finish(rid, "已发", "article_id=X1 vid=Y1")
+    rec.conn.execute("UPDATE posts SET published_at='2026-10-24 15:32:49' WHERE id=?", (rid,))
+    rec.conn.commit()
+    rec.mark_unsent(rid, "(拎回来)")
+    rec.mark_sent(rid)
+    got = rec.conn.execute("SELECT status, published_at FROM posts WHERE id=?", (rid,)).fetchone()
+    check(tuple(got) == ("已发", "2026-10-24 15:32:49"), f"拎回来以后又标成已发:还是原来那天发的(不变成今天)-> {tuple(got)}")
+    w = F.Video(path=str(tmp / "msk" / "b.mp4"), title="没发过的", account="国漫趣谈", employee="", date="10.24")
+    rec.failed(w, "b1", "没摆成")
+    rid2 = rec.conn.execute("SELECT id FROM posts WHERE title='没发过的'").fetchone()[0]
+    rec.mark_sent(rid2)
+    check(rec.conn.execute("SELECT published_at FROM posts WHERE id=?", (rid2,)).fetchone()[0], "原来没有发布时间的:记成现在(补记)")
+    day = "2026-10-26"
+    for k, folder in enumerate(("10.24", "10.26")):              # 同一条视频记了两条(两个文件夹)
+        x = F.Video(path=str(tmp / "msk" / folder / "幼小衔接.mp4"), title="幼小衔接必备 AI 工具汇总", account="家长研习空间",
+                    employee="小王", date=folder)
+        rec.manual_published(x)
+    rec.conn.execute("UPDATE posts SET published_at=? WHERE account='家长研习空间'", (f"{day} 14:31:16",))
+    rec.conn.commit()
+
+    class C:
+        def list_articles(self, page=1, limit=10):
+            a = [{"article_title": "幼小衔接必备 AI 工具汇总", "article_pub_time": f"{day} 10:37:16", "article_pub_flag": "发布成功"}]
+            return {"articles": a if page == 1 else [], "total": 1}
+    r = verify.check_edu(C(), rec, "家长研习空间", day)
+    check(r["ours"] == 1 and not r["missing"], f"教育号同一天同标题记了两条:算一条,不报没发上 -> ours={r['ours']} {[m['why'] for m in r['missing']]}")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -5027,6 +5063,7 @@ if __name__ == "__main__":
     test_edu_verify(tmp)
     test_redo_room(tmp)
     test_verify_range(tmp)
+    test_mark_sent_keep(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
