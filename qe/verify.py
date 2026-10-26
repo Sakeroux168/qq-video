@@ -66,12 +66,12 @@ def _redone(k: str, later: list[tuple[str, str]]) -> str:
     return ""
 
 
-def check_edu(cl, rec, nick: str, day: str) -> dict:
+def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None) -> dict:
     """教育号(用户 2026-10-26:钥匙只用来查,发布照旧走罐头):罐头发的记录没有文章编号,按标题对。
     先对完全一样的(去掉空格标点),再对一个是另一个开头的(企鹅号可能把长标题截短)。
     企鹅号上同标题是「审核不通过 / 已删除」的 → 没发上(打勾);标题哪儿都找不到的 → 也列出来,但不打勾(可能是标题对不上,看一眼再决定)。"""
     ours = ours_on(rec, nick, day, edu=True)
-    plat = platform_on(cl, day)
+    plat = platform_on(cl, day) if plat is None else plat
     live = [p for p in plat if p["flag"] in OK_FLAGS and not p["deleted"]]
     left = list(live)
     todo = []
@@ -119,9 +119,18 @@ def check_edu(cl, rec, nick: str, day: str) -> dict:
 
 def platform_on(cl, day: str, max_pages: int = 400) -> list[dict]:
     """企鹅号上这个号这天发的(按发布时间):[{aid, vid, title, flag, deleted, time}]。新的在前,翻到比这天早就停。"""
+    return platform_between(cl, day, day, max_pages)
+
+
+def platform_between(cl, start: str, end: str, max_pages: int = 2000, stopped=None) -> list[dict]:
+    """企鹅号上这个号 start~end(含,2026-10-10 ~ 2026-10-25)发的(按发布时间)。一页 10 条,新的在前,
+    连着 3 页都比 start 早才停(用户 2026-10-24:列表不一定严格按时间排,一页就停会漏)。
+    用户 2026-10-26「批量查询,从 10 号查到 25 号」:一个号只翻一遍,不用一天一天地翻。stopped() 返回 True 就停。"""
     out = []
     old_pages = 0
     for page in range(1, max_pages + 1):
+        if stopped and stopped():
+            break
         d = cl.list_articles(page, 10)
         items = d.get("articles") or []
         if not items:
@@ -129,14 +138,13 @@ def platform_on(cl, day: str, max_pages: int = 400) -> list[dict]:
         older = 0
         for a in items:
             t = str(a.get("article_pub_time") or "")
-            if t[:10] == day:
+            if start <= t[:10] <= end:
                 vi = a.get("article_video_info") or {}
                 out.append({"aid": _aid_of_item(a), "vid": str(vi.get("vid") or ""), "title": str(a.get("article_title") or ""),
                             "flag": str(a.get("article_pub_flag") or ""), "deleted": str(a.get("article_del_flag") or "") == "已删除",
                             "time": t})
-            elif t and t[:10] < day:
+            elif t and t[:10] < start:
                 older += 1
-        # 连着 3 页都比这天早才停(用户 2026-10-24:企鹅号上今天 51 条,软件只读到 49 条 —— 列表不一定严格按时间排,一页就停会漏)
         old_pages = old_pages + 1 if older == len(items) else 0
         if old_pages >= 3:
             break
@@ -148,10 +156,22 @@ def platform_on(cl, day: str, max_pages: int = 400) -> list[dict]:
     return out
 
 
-def check_account(cl, rec, nick: str, day: str) -> dict:
-    """一个号:{nick, ours, ok, review, missing:[记录+why], extra:[企鹅号上的]}。"""
+def check_range(cl, rec, nick: str, days: list[str], edu: bool = False, stopped=None) -> dict:
+    """一段日子(批量查询):这个号的后台列表只读一遍,再一天一天对。返回 {day: check_account / check_edu 的结果}。"""
+    plat = platform_between(cl, days[0], days[-1], stopped=stopped)
+    out = {}
+    for d in days:
+        if stopped and stopped():
+            break
+        one = [p for p in plat if p["time"][:10] == d]
+        out[d] = check_edu(cl, rec, nick, d, plat=one) if edu else check_account(cl, rec, nick, d, plat=one)
+    return out
+
+
+def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None) -> dict:
+    """一个号:{nick, ours, ok, review, missing:[记录+why], extra:[企鹅号上的]}。plat = 已经读好的这天的后台列表(批量查询用)。"""
     ours = ours_on(rec, nick, day)
-    plat = platform_on(cl, day)
+    plat = platform_on(cl, day) if plat is None else plat
     live = [p for p in plat if p["flag"] in OK_FLAGS and not p["deleted"]]
     aids = {p["aid"] for p in live if p["aid"]}
     vids = {p["vid"] for p in live if p["vid"]}
@@ -160,9 +180,13 @@ def check_account(cl, rec, nick: str, day: str) -> dict:
     for r in ours:
         if (r["aid"] and r["aid"] in aids) or (r["vid"] and r["vid"] in vids):
             continue
+        p0 = next((p for p in plat if r["aid"] and p["aid"] == r["aid"]), None)
+        if p0 is not None:                                 # 这天的列表里有这篇,但不是发布成功(打回 / 删了):不用单查
+            missing.append(dict(r, why="已删除" if p0["deleted"] else f"企鹅号上是「{p0['flag']}」", sure=True))
+            continue
         # 用户 2026-10-24:软件记 50、企鹅号上 49,原来单查说「发布成功」就放过了,看不出是哪条 →
-        # 今天的列表里没有的都列出来;单查说发布成功的标「可疑」(不默认打勾),没发布 / 删了 / 查不到的默认打勾
-        why, sure = "企鹅号今天的列表里没有这条", True
+        # 这天的列表里没有的都列出来;单查说发布成功的标「可疑」(不默认打勾),没发布 / 删了 / 查不到的默认打勾
+        why, sure = "企鹅号这天的列表里没有这条", True
         if r["aid"]:
             try:
                 info = (cl.article_info(r["aid"]) or {}).get("article_info") or {}
@@ -178,11 +202,30 @@ def check_account(cl, rec, nick: str, day: str) -> dict:
             except Exception as e:
                 why = f"查不到这篇({str(e)[:40]})"
         else:
-            why = "软件没记下文章编号,企鹅号今天的列表里也没有"
+            why = "软件没记下文章编号,企鹅号这天的列表里也没有"
         missing.append(dict(r, why=why, sure=sure))
     our_aids = {r["aid"] for r in ours if r["aid"]}
     our_vids = {r["vid"] for r in ours if r["vid"]}
     extra = [p for p in live if not ((p["aid"] and p["aid"] in our_aids) or (p["vid"] and p["vid"] in our_vids))]
+    # 编号对不上的,按标题再认一遍(用户 2026-10-26 批量查询:10.17 那批记录没存下文章编号 / 编号变了,后台其实有同标题的)
+    for m in list(missing):
+        if m["why"] == "已删除" or m["why"].startswith("企鹅号上是"):
+            continue
+        k = _tkey(m["title"])
+        hit = next((p for p in extra if _tkey(p["title"]) == k), None)
+        if hit is not None:
+            extra.remove(hit)
+            missing.remove(m)                                 # 就是这条(已经算在实发里了)
+            continue
+        if any(_tkey(p["title"]) == k for p in live):
+            m["why"], m["sure"] = "企鹅号这天已经有同标题的一条了(可能重复发过一次),不用补", False
+    # 后来又用同样 / 差不多的标题补发过的:别再拎回来(和教育号一样)
+    later = [(_tkey(x["title"]), str(x["published_at"])[5:10]) for x in rec.rows(account=nick)
+             if x["status"] == "已发" and x["employee"] == "接口" and str(x.get("published_at") or "")[:10] > day]
+    for m in missing:
+        again = _redone(_tkey(m["title"]), later)
+        if again:
+            m["why"], m["sure"], m["redone"] = f"这天没发上,但 {again} 已经补发过了,不用再拎回来", False, True
     every = live + found
     return {"nick": nick, "ours": len(ours), "live": len(every), "ok": sum(1 for p in every if p["flag"] != "审核中"),
             "review": sum(1 for p in every if p["flag"] == "审核中"), "missing": missing, "extra": extra}
@@ -256,6 +299,97 @@ def export_xlsx(path: str, st, rec, day: str, results: dict) -> str:
             ("。" if edu_ok else ";教育号还没取钥匙的,按软件记录。")).font = Font(color="6B7280")
     for col, w in (("A", 16), ("B", 18), ("C", 14), ("D", 12)):
         ws.column_dimensions[col].width = w
+    wb.save(path)
+    return path
+
+
+def export_range_xlsx(path: str, st, rec, days: list[str], by_day: dict) -> str:
+    """批量查询导出(用户 2026-10-26:「从 10 号查到 25 号,然后导出成表格看」)。
+    第一页照企业微信那张:品类 / 账号名称 / 规定视频条数 / 每天一列(企鹅号上核实的实发;没查到的号用软件记录,标灰);
+    比规定少标红、多标黄,每个品类一行小计,最后总发布量。第二页:这段日子没发上的视频(哪天、哪个号、标题、原因、要不要补)。
+    by_day = {号: {day: 结果}}。"""
+    import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from . import plan
+    thin = Side(style="thin", color="D0D4DA")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    mid = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    red, yel = PatternFill("solid", fgColor="FFC7CE"), PatternFill("solid", fgColor="FFEB9C")
+    gray = PatternFill("solid", fgColor="E7E6E6")
+    sent = {d: rec.sent_on(d) for d in days}
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "企鹅号每日发文情况"
+    head = ["品类", "账号名称", "规定视频条数"] + [f"{int(d[5:7])}月{int(d[8:10])}日" for d in days]
+    for c, h in enumerate(head, 1):
+        x = ws.cell(1, c, h)
+        x.font, x.alignment, x.border = Font(bold=True), mid, box
+    r = 2
+    grand = [0] * len(days)
+    gq = 0
+    for g in plan.plan(st):
+        tot = [0] * len(days)
+        cq = 0
+        first = r
+        for nick, q in (g.get("accounts") or {}).items():
+            cat = ACC_CAT.get(nick) or CAT_NAME.get(g.get("cat"), g.get("cat") or "")
+            vals = [cat, nick, q]
+            for c, v in enumerate(vals, 1):
+                x = ws.cell(r, c, v)
+                x.alignment, x.border = mid, box
+                x.font = Font(color="1F3A8A", bold=True) if c <= 2 else Font()
+            for k, d in enumerate(days):
+                res = (by_day.get(nick) or {}).get(d) or {}
+                ok = "live" in res and not res.get("error")
+                a = res["live"] if ok else sent[d].get(nick, 0)
+                x = ws.cell(r, 4 + k, a)
+                x.alignment, x.border = mid, box
+                qd = plan.quota_on(st, nick, d) if q else 0
+                if not ok:
+                    x.fill = gray
+                elif qd and a < qd:
+                    x.fill = red
+                elif qd and a > qd:
+                    x.fill = yel
+                tot[k] += a
+            cq += q or 0
+            r += 1
+        if r - first > 1:
+            ws.merge_cells(start_row=first, start_column=1, end_row=r - 1, end_column=1)
+        for c, v in enumerate([g.get("label") or f"{g.get('cat')}总发布量", "", cq] + tot, 1):
+            x = ws.cell(r, c, v)
+            x.font, x.alignment, x.border = Font(bold=True), mid, box
+        grand = [a + b for a, b in zip(grand, tot)]
+        gq += cq
+        r += 1
+    for c, v in enumerate(["总发布量", "", gq] + grand, 1):
+        x = ws.cell(r, c, v)
+        x.font, x.alignment, x.border = Font(bold=True), mid, box
+    ws.cell(r, 1).fill = PatternFill("solid", fgColor="8DD8F8")
+    ws.cell(r + 2, 1, "说明:企鹅号上核实的实发条数(按真正发出去的时间,审核不通过、删掉的不算);红 = 比规定少,黄 = 比规定多,"
+                      "灰 = 这个号没查(没钥匙 / 查不了),用的软件记录。规定条数按现在设置里的算。").font = Font(color="6B7280")
+    for col, w in (("A", 16), ("B", 18), ("C", 14)):
+        ws.column_dimensions[col].width = w
+    # 第二页:没发上的
+    w2 = wb.create_sheet("没发上的视频")
+    for c, h in enumerate(["日期", "账号", "标题", "原因", "要不要补"], 1):
+        x = w2.cell(1, c, h)
+        x.font, x.alignment, x.border = Font(bold=True), mid, box
+    k = 2
+    for d in days:
+        for nick, per in by_day.items():
+            for m in (per.get(d) or {}).get("missing") or []:
+                need = "已经补发过了" if m.get("redone") else ("要补" if m.get("sure", True) else "看一眼再决定")
+                for c, v in enumerate([f"{int(d[5:7])}.{int(d[8:10])}", nick, m.get("title") or "", m.get("why") or "", need], 1):
+                    x = w2.cell(k, c, v)
+                    x.border = box
+                if need == "要补":
+                    w2.cell(k, 5).fill = red
+                k += 1
+    if k == 2:
+        w2.cell(2, 1, "这段日子软件记的已发,企鹅号上都有 ✓")
+    for col, w in (("A", 8), ("B", 16), ("C", 46), ("D", 46), ("E", 14)):
+        w2.column_dimensions[col].width = w
     wb.save(path)
     return path
 

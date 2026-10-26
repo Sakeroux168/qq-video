@@ -4851,6 +4851,83 @@ def test_redo_room(tmp: Path):
           "挪回明天重发:加在明天")
 
 
+def test_verify_range(tmp: Path):
+    print("[批量查询(用户 2026-10-26):从哪天查到哪天,一个号只翻一遍;导出成企业微信那张表(每天一列)+ 没发上的视频]")
+    from datetime import timedelta
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, verify
+    from qe import folders as F
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    from gui.verify_dialog import VerifyDialog
+    import openpyxl
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    apiacc.set_qkey("家长研习空间", "ce", "se")
+    n = bj_now()
+    days = [(n - timedelta(days=k)).strftime("%Y-%m-%d") for k in (2, 1, 0)]
+    st = Settings(tmp / "st_vr.json")
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 2}},
+                        {"cat": "教育", "label": "教育总发布量", "accounts": {"家长研习空间": 1}}]
+    rec = Records(tmp / "r_vr.sqlite")
+    arts = {"c": [], "ce": []}
+    for k, d in enumerate(days):
+        for j in range(2):                                        # CSGO 每天记了 2 条;第一天的第 2 条企鹅号上没有
+            v = F.Video(path=str(tmp / "vr" / f"{d}-{j}.mp4"), title=f"c{k}{j}", account="CSGO战神君", employee="", date=d[5:])
+            rid = rec.api_begin(v)
+            rec.api_finish(rid, "已发", f"article_id=A{k}{j} vid=V{k}{j}")
+            rec.conn.execute("UPDATE posts SET published_at=? WHERE id=?", (f"{d} 10:0{j}:00", rid))
+            if not (k == 0 and j == 1):
+                arts["c"].append({"article_id": f"A{k}{j}", "article_title": f"c{k}{j}", "article_pub_time": f"{d} 10:0{j}:00",
+                                  "article_pub_flag": "发布成功", "article_video_info": {"vid": f"V{k}{j}"}})
+        rec.manual_published(F.Video(path=str(tmp / "vr" / f"e{d}.mp4"), title=f"教育{k}", account="家长研习空间", employee="小王", date=d[5:]))
+        rec.conn.execute("UPDATE posts SET published_at=? WHERE title=?", (f"{d} 18:00:00", f"教育{k}"))
+        arts["ce"].append({"article_title": f"教育{k}", "article_pub_time": f"{d} 18:00:00", "article_pub_flag": "发布成功"})
+    rec.conn.commit()
+    arts["c"].append({"article_id": "OLD", "article_title": "老的", "article_pub_time": "2020-01-01 00:00:00", "article_pub_flag": "发布成功"})
+    pages = []
+
+    class C:
+        def __init__(self, cid, sec, **k):
+            self.cid = cid
+
+        def list_articles(self, page=1, limit=10):
+            pages.append((self.cid, page))
+            a = sorted(arts[self.cid], key=lambda x: x["article_pub_time"], reverse=True)
+            return {"articles": a[(page - 1) * limit: page * limit], "total": len(a)}
+
+        def article_info(self, aid):
+            return {}
+    per = verify.check_range(C("c", "s"), rec, "CSGO战神君", days)
+    check([per[d]["live"] for d in days] == [1, 2, 2] and len(per[days[0]]["missing"]) == 1 and pages == [("c", 1)],
+          f"一个号一段日子:后台只翻一遍,一天一天对出来 -> {[per[d]['live'] for d in days]} 翻了 {pages}")
+    real = omapi.Client
+    omapi.Client = C
+    try:
+        dlg = VerifyDialog(rec, days[-1], st=st)
+        _wait(app, lambda: dlg.w is None or dlg.w.isFinished())
+        dlg.start(days[0], days[-1])
+        _wait(app, lambda: dlg.w is None or dlg.w.isFinished())
+        app.processEvents()
+        r = dlg.results.get("CSGO战神君") or {}
+        check(r.get("live") == 5 and set(dlg.by_day) == {"CSGO战神君", "家长研习空间"} and dlg.miss.count() == 1
+              and "·" in dlg.miss.item(0).text() and f"{int(days[0][5:7])}.{int(days[0][8:10])}" in dlg.miss.item(0).text(),
+              f"窗口里查一段:合起来一行一个号,没发上的写清楚哪天 -> {r.get('live')} {dlg.miss.count()}")
+        p = tmp / "vr.xlsx"
+        verify.export_range_xlsx(str(p), st, rec, dlg.days, dlg.by_day)
+        wb = openpyxl.load_workbook(p)
+        ws, w2 = wb.worksheets[0], wb.worksheets[1]
+        row = next(rr for rr in range(2, ws.max_row + 1) if ws.cell(rr, 2).value == "CSGO战神君")
+        check([ws.cell(row, 4 + k).value for k in range(3)] == [1, 2, 2] and ws.cell(row, 4).fill.fgColor.rgb.endswith("FFC7CE")
+              and ws.cell(1, 4).value == f"{int(days[0][5:7])}月{int(days[0][8:10])}日",
+              "导出第一页:每个号一行、每天一列(企鹅号上核实的),比规定少的标红")
+        check(w2.cell(2, 2).value == "CSGO战神君" and w2.cell(2, 3).value == "c01" and w2.cell(2, 5).value == "要补",
+              "导出第二页:没发上的视频(哪天、哪个号、标题、原因、要不要补)")
+        dlg.close()
+    finally:
+        omapi.Client = real
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -4923,6 +5000,7 @@ if __name__ == "__main__":
     test_find_redo(tmp)
     test_edu_verify(tmp)
     test_redo_room(tmp)
+    test_verify_range(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

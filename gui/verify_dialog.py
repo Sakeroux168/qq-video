@@ -14,13 +14,46 @@ class VerifyWorker(QThread):
     one = Signal(dict)          # 一个号查完:verify.check_account 的结果,或者 {nick, error}
     step = Signal(str)
 
-    def __init__(self, rec, day: str, accounts: list[dict], parent=None):
+    def __init__(self, rec, day: str, accounts: list[dict], parent=None, days: list[str] | None = None):
+        """days = 一段日子(批量查询,用户 2026-10-26);不给 = 只查 day 这一天。"""
         super().__init__(parent)
         self.rec, self.day, self.accounts = rec, day, accounts
+        self.days = days if days and len(days) > 1 else None
         self.stop = False
+
+    def _range_one(self, a: dict) -> dict:
+        """一段日子:这个号后台只翻一遍,一天一天对,再合成一行(by_day 留着导出用)。"""
+        from qe import omapi
+        nick = a.get("nick") or ""
+        try:
+            cl = omapi.Client(a["client_id"], apiacc.unseal(a["secret"]))
+            per = verify.check_range(cl, self.rec, nick, self.days, edu=bool(a.get("query_only")), stopped=lambda: self.stop)
+        except Exception as e:
+            return {"nick": nick, "error": omapi.redact(str(e))[:80] if hasattr(omapi, "redact") else str(e)[:80]}
+        out = {"nick": nick, "by_day": per, "days": self.days, "edu": bool(a.get("query_only")),
+               "live": 0, "ours": 0, "ok": 0, "review": 0, "missing": [], "extra": []}
+        for d, r in per.items():
+            for k in ("live", "ours", "ok", "review"):
+                out[k] += r.get(k, r["ok"] + r["review"] if k == "live" else 0)
+            out["missing"] += [dict(m, day=d) for m in r.get("missing") or []]
+            out["extra"] += r.get("extra") or []
+        return out
 
     def run(self):
         from qe import omapi
+        if self.days:                                    # 一段日子:几个号一起翻(一个号要翻上百页)
+            import concurrent.futures as cf
+            self.step.emit(f"正在查 {len(self.accounts)} 个号 {self.days[0][5:]} ~ {self.days[-1][5:]}(一个号要翻几十上百页,稍等)…")
+            n = 0
+            with cf.ThreadPoolExecutor(4) as ex:
+                futs = [ex.submit(self._range_one, a) for a in self.accounts]
+                for f in cf.as_completed(futs):
+                    if self.stop:
+                        return
+                    n += 1
+                    self.one.emit(f.result())
+                    self.step.emit(f"查完 {n} / {len(self.accounts)} 个号…")
+            return
         for k, a in enumerate(self.accounts):
             if self.stop:
                 return
@@ -52,8 +85,16 @@ class VerifyDialog(QDialog):
         y0, m0, d0 = (int(x) for x in day.split("-"))
         self.d.setDate(QDate(y0, m0, d0))
         top.addWidget(self.d)
+        # 批量查询(用户 2026-10-26:「比如从 10 号查到 25 号,然后导出成表格看」):「到」选成别的日子就是查一段
+        top.addWidget(QLabel("到"))
+        self.d2 = QDateEdit()
+        self.d2.setCalendarPopup(True)
+        self.d2.setDisplayFormat("M.d")
+        self.d2.setDate(QDate(y0, m0, d0))
+        self.d2.setToolTip("只查一天:跟前面选同一天。查一段:选到哪天(最多 31 天),查完能导出成企业微信那张表的样子")
+        top.addWidget(self.d2)
         b = QPushButton("查")
-        b.clicked.connect(lambda: self.start(self.d.date().toString("yyyy-MM-dd")))
+        b.clicked.connect(lambda: self.start(self.d.date().toString("yyyy-MM-dd"), self.d2.date().toString("yyyy-MM-dd")))
         top.addWidget(b)
         top.addStretch(1)
         v.addLayout(top)
@@ -96,13 +137,25 @@ class VerifyDialog(QDialog):
         self.w = None
         self.start(day)
 
-    def start(self, day: str):
-        """查这一天(换了日期重新查)。"""
+    def start(self, day: str, end: str = ""):
+        """查这一天;end = 查到哪天(批量查询,含;最多 31 天)。换了日期重新查。"""
+        from datetime import date, timedelta
         if self.w is not None and self.w.isRunning():
             self.w.stop = True
             self.w.wait(5000)
+        end = end or day
+        if end < day:
+            day, end = end, day
+        d0, d1 = date.fromisoformat(day), date.fromisoformat(end)
+        if (d1 - d0).days > 30:
+            d1 = d0 + timedelta(days=30)
+            end = d1.isoformat()
+            self.d2.setDate(QDate(d1.year, d1.month, d1.day))
+        self.days = [(d0 + timedelta(days=k)).isoformat() for k in range((d1 - d0).days + 1)]
         self.day = day
-        self.setWindowTitle(f"去企鹅号核对 · {day}" + (f" · {'、'.join(self.nicks)}" if self.nicks else ""))
+        self.by_day = {}
+        span = f"{day} ~ {end}" if len(self.days) > 1 else day
+        self.setWindowTitle(f"去企鹅号核对 · {span}" + (f" · {'、'.join(self.nicks)}" if self.nicks else ""))
         self.t.setRowCount(0)
         self.miss.clear()
         self.lab_extra.setText("")
@@ -116,7 +169,7 @@ class VerifyDialog(QDialog):
             self.lab_done.setText("这个号还没有钥匙(教育号:设置里「登录取钥匙…」选它,扫一次码)" if self.nicks else "还没有 16 个号的账号(去设置里搬账号)")
             self.w = None
             return
-        self.w = VerifyWorker(self.rec, day, accs, self)
+        self.w = VerifyWorker(self.rec, day, accs, self, days=self.days)
         self.w.step.connect(self.lab_done.setText)
         self.w.one.connect(self._one)
         self.w.finished.connect(self._end)
@@ -129,12 +182,17 @@ class VerifyDialog(QDialog):
         if self.st is None:
             return
         y, m, d = (int(x) for x in self.day.split("-"))
-        start = os.path.join(os.path.expanduser("~"), "Desktop", f"企鹅号发布数据_{m}月{d}日.xlsx")
+        many = len(getattr(self, "days", [])) > 1
+        name = f"企鹅号发布数据_{m}月{d}日" + (f"-{int(self.days[-1][5:7])}月{int(self.days[-1][8:10])}日" if many else "")
+        start = os.path.join(os.path.expanduser("~"), "Desktop", name + ".xlsx")
         p, _ = QFileDialog.getSaveFileName(self, "导出表格", start, "Excel 表格 (*.xlsx)")
         if not p:
             return
         try:
-            verify.export_xlsx(p, self.st, self.rec, self.day, self.results)
+            if many:
+                verify.export_range_xlsx(p, self.st, self.rec, self.days, self.by_day)
+            else:
+                verify.export_xlsx(p, self.st, self.rec, self.day, self.results)
         except OSError as e:
             QMessageBox.warning(self, "导出表格", f"存不了(文件是不是正开着?):{e.strerror or e}")
             return
@@ -142,12 +200,14 @@ class VerifyDialog(QDialog):
 
     def _one(self, r: dict):
         self.results[r["nick"]] = r
+        if r.get("by_day"):
+            self.by_day[r["nick"]] = r["by_day"]
         k = self.t.rowCount()
         self.t.insertRow(k)
         q = 0
         if self.st is not None:
             from qe import plan
-            q = plan.quota_on(self.st, r["nick"], self.day)
+            q = sum(plan.quota_on(self.st, r["nick"], d) for d in (r.get("days") or [self.day]))
         if r.get("error"):
             vals = [r["nick"], str(q or ""), "", "", "", f"查不了:{r['error']}", "", ""]
         else:
@@ -168,7 +228,8 @@ class VerifyDialog(QDialog):
             for c in range(8):
                 self.t.item(k, c).setBackground(QBrush(QColor(cur()["rows"]["red" if r.get("missing") or r.get("error") else "yellow"])))
         for m in r.get("missing") or []:
-            it = QListWidgetItem(f"{m['account']} · {m['title']} —— {m['why']}")
+            when = f"{int(m['day'][5:7])}.{int(m['day'][8:10])} · " if m.get("day") else ""
+            it = QListWidgetItem(f"{m['account']} · {when}{m['title']} —— {m['why']}")
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(Qt.CheckState.Checked if m.get("sure", True) else Qt.CheckState.Unchecked)
             it.setData(Qt.ItemDataRole.UserRole, len(self.rows))
