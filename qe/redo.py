@@ -96,6 +96,11 @@ def target_dir(st, row: dict, md: str) -> str:
     那天的日期文件夹已经有了(哪怕叫「10.25(星期六)」)就用它,没有就建「10.25」。"""
     if is_api(row):
         from . import apiacc, apisrc
+        # 那天这个号手选过文件夹(「给号选文件夹」)的,16 个号页那天只看那个文件夹 → 就放那儿(用户 2026-10-26:
+        # 「核查后把视频挪回来了,但是为啥没视频给我发」—— 原来挪回了老的日期文件夹,今天的页面看不到)
+        pk = ((st.get("api_picked") or {}).get(md) or {}).get(row.get("account") or "")
+        if pk:
+            return pk
         orig = os.path.dirname(row["path"])
         acc_dir = os.path.dirname(orig) if apisrc.date_key(os.path.basename(orig)) else ""
         if not acc_dir or not os.path.isdir(acc_dir):

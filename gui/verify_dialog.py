@@ -105,7 +105,7 @@ class VerifyDialog(QDialog):
         self.lab.setWordWrap(True)
         v.addWidget(self.lab)
         self.t = QTableWidget(0, 8)                       # 用户 2026-10-24:改成 应发 / 实发 / 还差,再说哪些是假发成功
-        self.t.setHorizontalHeaderLabels(["号", "应发", "实发(企鹅号上)", "还差", "软件记的已发", "假发成功", "审核中", "软件没记的"])
+        self.t.setHorizontalHeaderLabels(["号", "应发", "实发(企鹅号上)", "还差", "软件记的已发", "假发成功", "审核中 / 定时没到点", "软件没记的"])
         self.t.verticalHeader().setVisible(False)
         self.t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.t.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -257,8 +257,9 @@ class VerifyDialog(QDialog):
             if it.checkState() != Qt.CheckState.Checked or it.data(Qt.ItemDataRole.UserRole + 1):
                 continue
             row = self.rows[it.data(Qt.ItemDataRole.UserRole)]
-            if row.get("employee") != "接口" and self.st is not None:
-                # 教育号:那天的文件夹整个挪去归档了 → 用「找视频重发」那套,连封面挪回今天的文件夹(结构照原样)
+            if self.st is not None:
+                # 用「找视频重发」那套,连封面挪回今天的文件夹(用户 2026-10-26:16 个号原来挪回老的日期文件夹,今天的页面看不到):
+                # 教育号 = 素材盘今天的日期文件夹(结构照原样);16 个号 = 今天这个号发视频的文件夹(手选过就是手选的那个)
                 from qe import redo
                 from qe.config import bj_now
                 n = bj_now()
@@ -276,7 +277,7 @@ class VerifyDialog(QDialog):
                 it.setText("✓ 拎回来了 · " + it.text())
                 it.setData(Qt.ItemDataRole.UserRole + 1, True)
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
-        self.lab_done.setText(f"拎回来 {done} 条(改成没发成;16 个号挪回原来的文件夹,教育号挪回今天的文件夹)→ 去那页刷新、再发" +
+        self.lab_done.setText(f"拎回来 {done} 条(改成没发成;挪回今天的文件夹)→ 去那页刷新、再发" +
                               (f";{len(bad)} 条没拎回来" if bad else "") +
                               (f";补发的 {room} 条今天另外加了额度,不占今天的规定条数" if room else ""))
         self.b_back.setEnabled(False)

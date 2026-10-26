@@ -98,6 +98,8 @@ def room_for_redo(st, row: dict, day: str = "") -> int:
     pub = str(row.get("published_at") or "")[:10]
     if not nick or not quota_of(st, nick) or not pub or pub == day:
         return 0
+    if row.get("status") and row["status"] != "已发":       # 已经拎回来过(没发成)再挪一次:额度上次已经加过了,不再加
+        return 0
     add_extra(st, nick, 1, day)
     return 1
 

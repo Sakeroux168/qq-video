@@ -4849,6 +4849,17 @@ def test_redo_room(tmp: Path):
           "「10.27」认成那天的日期")
     check(plan.room_for_redo(st, row, tmr.strftime("%Y-%m-%d")) == 1 and plan.quota_on(st, "家长研习空间", tmr.strftime("%Y-%m-%d")) == 103,
           "挪回明天重发:加在明天")
+    check(plan.room_for_redo(st, dict(row, status="没发成")) == 0 and plan.quota_on(st, "家长研习空间", today) == 103,
+          "已经拎回来过(没发成)再挪一次:不再加(上次加过了)")
+    # 16 个号拎回来:那天给这个号手选过文件夹的,就放进手选的那个(用户 2026-10-26:挪回老日期文件夹,今天的页面看不到)
+    from qe import redo
+    md = f"{n.month}.{n.day}"
+    st["api_picked"] = {md: {"日漫漫谈社": str(tmp / "rm" / "日漫漫谈社" / "10.25（周日）")}}
+    arow = {"account": "日漫漫谈社", "employee": "接口", "path": str(tmp / "rm" / "日漫漫谈社" / "10.21" / "痛.mp4")}
+    check(redo.target_dir(st, arow, md) == str(tmp / "rm" / "日漫漫谈社" / "10.25（周日）"), "手选过文件夹的号:挪进今天手选的那个文件夹")
+    (tmp / "rm" / "日漫漫谈社" / "10.21").mkdir(parents=True)
+    check(redo.target_dir(st, dict(arow, account="日漫解说馆"), md) == str(tmp / "rm" / "日漫漫谈社" / md),
+          "没手选的:号的文件夹下今天的日期文件夹")
 
 
 def test_verify_range(tmp: Path):
@@ -4898,6 +4909,21 @@ def test_verify_range(tmp: Path):
 
         def article_info(self, aid):
             return {}
+    # 用户 2026-10-26 当天核对:定时还没到点的,企鹅号状态是代号「10」—— 不能当成没发上(原来默认打勾,差点拎回来重发)
+    v = F.Video(path=str(tmp / "vr" / "定时的.mp4"), title="定时的", account="CSGO战神君", employee="", date=days[-1][5:])
+    rid = rec.api_begin(v)
+    rec.api_finish(rid, "已发", "article_id=T1 vid=VT1")
+    rec.conn.execute("UPDATE posts SET published_at=? WHERE id=?", (f"{days[-1]} 23:00:00", rid))
+    rec.conn.commit()
+    arts["c"].append({"article_id": "T1", "article_title": "定时的", "article_pub_time": f"{days[-1]} 23:00:00",
+                      "article_pub_flag": "10", "article_video_info": {"vid": "VT1"}})
+    one = verify.check_account(C("c", "s"), rec, "CSGO战神君", days[-1])
+    check(not one["missing"] and one["live"] == 3 and one["review"] == 1,
+          f"定时没到点(状态「10」):算在企鹅号上、等着发,不算没发上 -> missing={[m['why'] for m in one['missing']]} live={one['live']}")
+    arts["c"].pop()
+    rec.conn.execute("DELETE FROM posts WHERE id=?", (rid,))
+    rec.conn.commit()
+    pages.clear()
     per = verify.check_range(C("c", "s"), rec, "CSGO战神君", days)
     check([per[d]["live"] for d in days] == [1, 2, 2] and len(per[days[0]]["missing"]) == 1 and pages == [("c", 1)],
           f"一个号一段日子:后台只翻一遍,一天一天对出来 -> {[per[d]['live'] for d in days]} 翻了 {pages}")

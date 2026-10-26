@@ -11,6 +11,19 @@ import os
 import re
 
 OK_FLAGS = ("发布成功", "已发布", "审核中")
+# 用户 2026-10-26 当天核对:定时还没到点的,企鹅号给的状态是个代号「10」,原来当成了「没发上」默认打勾(差点拎回来重发)。
+# 现在只有明确失败的(打回 / 删了 / 发布失败)才算没发上;别的(定时没到点、审核中、认不出的代号)都算在企鹅号上、等着发
+BAD_FLAGS = ("审核不通过", "审核未通过", "未通过", "未发布", "发布失败", "已下线", "已删除")
+
+
+def _on(p: dict) -> bool:
+    """这篇在企鹅号上(发了 / 审核中 / 定时没到点…),不算没发上。"""
+    return not p.get("deleted") and p.get("flag") not in BAD_FLAGS
+
+
+def _wait(p: dict) -> bool:
+    """在企鹅号上,但还没真正发出去(审核中 / 定时没到点 / 认不出的状态)。"""
+    return _on(p) and p.get("flag") not in ("发布成功", "已发布")
 
 
 def _aid_of(note: str) -> str:
@@ -72,7 +85,7 @@ def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None) -> d
     企鹅号上同标题是「审核不通过 / 已删除」的 → 没发上(打勾);标题哪儿都找不到的 → 也列出来,但不打勾(可能是标题对不上,看一眼再决定)。"""
     ours = ours_on(rec, nick, day, edu=True)
     plat = platform_on(cl, day) if plat is None else plat
-    live = [p for p in plat if p["flag"] in OK_FLAGS and not p["deleted"]]
+    live = [p for p in plat if _on(p)]
     left = list(live)
     todo = []
     for r in ours:                                            # 第一遍:标题完全一样
@@ -113,8 +126,8 @@ def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None) -> d
                                        "可能是在罐头里改了标题发的,看一眼再决定"), False
             else:
                 m["why"], m["sure"] = "企鹅号这天没有这个标题,这天后台也没有别的多出来 —— 没发上", True
-    return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if p["flag"] != "审核中"),
-            "review": sum(1 for p in live if p["flag"] == "审核中"), "missing": missing, "extra": left, "edu": True}
+    return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if not _wait(p)),
+            "review": sum(1 for p in live if _wait(p)), "missing": missing, "extra": left, "edu": True}
 
 
 def platform_on(cl, day: str, max_pages: int = 400) -> list[dict]:
@@ -172,7 +185,7 @@ def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None) 
     """一个号:{nick, ours, ok, review, missing:[记录+why], extra:[企鹅号上的]}。plat = 已经读好的这天的后台列表(批量查询用)。"""
     ours = ours_on(rec, nick, day)
     plat = platform_on(cl, day) if plat is None else plat
-    live = [p for p in plat if p["flag"] in OK_FLAGS and not p["deleted"]]
+    live = [p for p in plat if _on(p)]
     aids = {p["aid"] for p in live if p["aid"]}
     vids = {p["vid"] for p in live if p["vid"]}
     missing = []
@@ -192,10 +205,10 @@ def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None) 
                 info = (cl.article_info(r["aid"]) or {}).get("article_info") or {}
                 flag, dele = str(info.get("article_pub_flag") or ""), str(info.get("article_del_flag") or "") == "已删除"
                 t = str(info.get("article_pub_time") or "")
-                if flag in OK_FLAGS and not dele and t[:10] == day:
+                if flag and flag not in BAD_FLAGS and not dele and t[:10] == day:
                     found.append({"aid": r["aid"], "flag": flag})   # 用户 2026-10-24:后台一搜就在,这天发的 → 就是发上了
                     continue
-                if flag in OK_FLAGS and not dele:
+                if flag and flag not in BAD_FLAGS and not dele:
                     why, sure = f"单查是「{flag}」,但发布时间是 {t[5:16] or '?'}(不是这天),看一眼再决定", False
                 else:
                     why = "已删除" if dele else (f"企鹅号上是「{flag}」" if flag else why)
@@ -227,8 +240,8 @@ def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None) 
         if again:
             m["why"], m["sure"], m["redone"] = f"这天没发上,但 {again} 已经补发过了,不用再拎回来", False, True
     every = live + found
-    return {"nick": nick, "ours": len(ours), "live": len(every), "ok": sum(1 for p in every if p["flag"] != "审核中"),
-            "review": sum(1 for p in every if p["flag"] == "审核中"), "missing": missing, "extra": extra}
+    return {"nick": nick, "ours": len(ours), "live": len(every), "ok": sum(1 for p in every if not _wait(p)),
+            "review": sum(1 for p in every if _wait(p)), "missing": missing, "extra": extra}
 
 
 # 导出表格的「品类」(照用户企业微信表「企鹅号每日发文情况」那页,2026-10-25 截图)
