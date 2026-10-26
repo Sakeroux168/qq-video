@@ -4626,6 +4626,119 @@ def _no_dialogs():
     QMessageBox.warning = staticmethod(lambda *a, **k: None)
 
 
+def test_find_redo(tmp: Path):
+    print("[找视频重发(用户 2026-10-25):输入标题找发过的 → 视频连封面挪回今天 / 明天的文件夹(结构照原样)、记录改没发成;16 个号能在企鹅号上删]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, redo
+    from qe import folders as F
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    from gui.find_dialog import FindDialog
+    base = tmp / "fr"
+    root = base / "小学生教育类"
+    day = root / "10.24" / "家长研习社"
+    day.mkdir(parents=True)
+    t = "幼小衔接必备 第3集"
+    (day / f"{t}.mp4").write_bytes(b"x")
+    (day / f"{t}.jpg").write_bytes(b"j")
+    (day / t).mkdir()
+    (day / t / "图片修改需求 (1).png").write_bytes(b"p")
+    (day / "别的.mp4").write_bytes(b"x")
+    st = Settings(tmp / "st_fr.json")
+    st["material_root"] = str(root)
+    st["archive_root"] = str(base / "内容查看" / r"{month}月发布视频\企鹅号\教育")
+    rec = Records(tmp / "r_fr.sqlite")
+    v = F.Video(path=str(day / f"{t}.mp4"), title=t, account="家长研习社", employee="小王", date="10.24")
+    rec.manual_published(v)
+    rec.manual_published(F.Video(path=str(day / "别的.mp4"), title="别的", account="家长研习社", employee="小王", date="10.24"))
+    F.move_date(st, "10.24")                                  # 这天发完整天挪去归档
+    arc = Path(F.archive_target(st, "10.24")) / "家长研习社"
+    check((arc / f"{t}.mp4").is_file() and not (root / "10.24").exists(), "准备:教育号这天整个挪去了归档")
+    rows = redo.search(rec, "衔接必备")
+    check(len(rows) == 1 and rows[0]["title"] == t and redo.search(rec, "  ") == [], "标题里的几个字就找得到;空的不找")
+    check(redo.locate(st, rows[0]) == str(arc / f"{t}.mp4"), f"教育号:从归档里认出视频现在在哪 -> {redo.locate(st, rows[0])}")
+    check(sorted(os.path.basename(p) for p in redo.extras(str(arc / f"{t}.mp4"))) == sorted([f"{t}.jpg", t]),
+          "跟着一起挪的:同名的图 + 封面文件夹,别的视频不带")
+    (root / "10.25(星期六)").mkdir()
+    check(redo.target_dir(st, rows[0], "10.25") == str(root / "10.25(星期六)" / "家长研习社"),
+          "挪回去:那天的文件夹已经有了(带星期的也认)就放进去,下面照原样建「家长研习社」")
+    check(redo.target_dir(st, rows[0], "10.26") == str(root / "10.26" / "家长研习社"), "没有那天的文件夹:建「10.26」")
+
+    real_ask = T.ask
+    asked = []
+    T.ask = lambda *a, **k: asked.append(a) or True
+    try:
+        dlg = FindDialog(rec, st, after=lambda: asked.append("after"))
+        dlg.e.setText("衔接")
+        dlg.find()
+        check(dlg.lst.count() == 1 and dlg.b_back.isEnabled() and dlg.b_copy.isEnabled() and dlg.b_del.isHidden(),
+              "窗口里找得到;教育号能挪回去、能复制标题,「在企鹅号上删掉」不显示(罐头发的删不了)")
+        dlg.copy()
+        check(QApplication.clipboard().text() == t, "复制标题(去后台搜)")
+        dlg.c_day.setCurrentIndex(1)
+        md = dlg.c_day.currentData()
+        dlg.pull_back()
+        dst = Path(redo.target_dir(st, rows[0], md))
+        check((dst / f"{t}.mp4").is_file() and (dst / f"{t}.jpg").is_file() and (dst / t / "图片修改需求 (1).png").is_file(),
+              f"点「挪回去重发」:视频、封面图、封面文件夹都挪到明天的文件夹 -> {dst}")
+        check(not (arc / f"{t}.mp4").exists() and (arc / "别的.mp4").is_file(), "归档里只拿走这一条,别的不动")
+        check(rec.status_of(str(day / f"{t}.mp4")) == "" and rec.status_of(str(dst / f"{t}.mp4")) == "" and "after" in asked,
+              "记录改成没发,新位置能再发;刷新了页面")
+        check(dlg.lst.count() == 1 and "没发" in dlg.lst.item(0).text(), "窗口里那条显示「没发成」")
+    finally:
+        T.ask = real_ask
+
+    # 16 个号:挪走的位置记录里有;在企鹅号上删
+    aroot = base / "游戏视频"
+    acc = aroot / "CSGO--CSGO战神君"
+    (acc / "10.24").mkdir(parents=True)
+    (acc / "10.26").mkdir()
+    aarc = base / "接口归档"
+    aarc.mkdir()
+    st["api_roots"] = [str(aroot)]
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    w = F.Video(path=str(acc / "10.24" / "横屏的Ace.mp4"), title="横屏的Ace", account="CSGO战神君", employee="", date="10.24")
+    rid = rec.api_begin(w)
+    rec.api_finish(rid, "已发", "article_id=A77 vid=V77")
+    (aarc / "横屏的Ace.mp4").write_bytes(b"x")
+    (aarc / "横屏的Ace.jpg").write_bytes(b"j")
+    rec.mark_moved(rid, str(aarc / "横屏的Ace.mp4"))
+    r = redo.search(rec, "Ace")[0]
+    check(redo.is_api(r) and os.path.normcase(redo.locate(st, r)) == os.path.normcase(str(aarc / "横屏的Ace.mp4")),
+          "16 个号:按记下的挪去位置找到")
+    check(redo.target_dir(st, r, "10.26") == str(acc / "10.26"), "挪回:号的文件夹下面那天的日期文件夹")
+    deleted = []
+
+    class C:
+        def __init__(self, cid, sec, **k):
+            self.sec = sec
+
+        def delete_article(self, aid):
+            deleted.append((aid, self.sec))
+            return {}
+    real = omapi.Client
+    omapi.Client = C
+    T.ask = lambda *a, **k: True
+    try:
+        dlg = FindDialog(rec, st)
+        dlg.e.setText("Ace")
+        dlg.find()
+        check(not dlg.b_del.isHidden() and dlg.b_del.isEnabled(), "16 个号已发的:「在企鹅号上删掉」能点")
+        dlg.delete()
+        check(deleted == [("A77", "s")], f"在企鹅号上删掉:用记下的文章编号、这个号的密钥 -> {deleted}")
+        check("在企鹅号上删掉了" in rec.conn.execute("SELECT note FROM posts WHERE id=?", (rid,)).fetchone()[0], "记录里写上删掉了")
+        new, why = redo.pull_back(st, rec, r, "10.26")
+        check(why == "" and (acc / "10.26" / "横屏的Ace.mp4").is_file() and (acc / "10.26" / "横屏的Ace.jpg").is_file()
+              and rec.status_of(new) == "", f"16 个号挪回 10.26:视频连封面回去,能再发 -> {why}")
+        check(redo.delete_on_platform(dict(r, note="")).startswith("软件没记下"), "没记文章编号的:删不了,说清楚去后台删")
+    finally:
+        omapi.Client = real
+        T.ask = real_ask
+    _ = app
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -4695,6 +4808,7 @@ if __name__ == "__main__":
     test_api_cover_pic(tmp)
     test_api_cover(tmp)
     test_wm_detect_unit(tmp)
+    test_find_redo(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

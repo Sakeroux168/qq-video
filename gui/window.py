@@ -431,6 +431,10 @@ class MainWindow(QMainWindow):
         self.b_preview = QPushButton("预览封面…")
         self.b_preview.setToolTip("看每个比例的裁剪框在哪;不满意就拖框(双击列表里一条也行)")
         self.b_preview.clicked.connect(lambda: self.preview_cover())
+        self.b_find = QPushButton("找视频重发…")
+        self.b_find.setObjectName("link")
+        self.b_find.setToolTip("发过的视频要删了重发(比如发出去才发现是横屏):输入标题,软件去发布归档里找,连封面挪回今天的文件夹")
+        self.b_find.clicked.connect(self.open_find)
         self.b_move = QPushButton("这天发完,挪走…")
         self.b_move.setObjectName("link")
         self.b_move.clicked.connect(self.move_day)
@@ -496,7 +500,7 @@ class MainWindow(QMainWindow):
         tools.addWidget(help_dot("自动点发布"))
         v.addLayout(tools)
         v.addWidget(sp, 1)
-        for b in (self.b_open, self.b_move):          # 次要的放上面一行右边;「标成已发」「预览封面」在列表右键里
+        for b in (self.b_open, self.b_move, self.b_find):  # 次要的放上面一行右边;「标成已发」「预览封面」在列表右键里
             self._top.addWidget(b)
         self.b_manual.hide()
         self.b_preview.hide()
@@ -568,6 +572,10 @@ class MainWindow(QMainWindow):
         rh.addWidget(b)
         b = QPushButton("导出 Excel…")
         b.clicked.connect(self.export_records)
+        rh.addWidget(b)
+        b = QPushButton("找视频重发…")
+        b.setToolTip("输入标题里的几个字,找出发过的视频:挪回素材盘重发(视频和封面一起),或者在企鹅号上删掉(16 个号)")
+        b.clicked.connect(self.open_find)
         rh.addWidget(b)
         self.t_sum = QTableWidget(0, 9)
         self.t_sum.setHorizontalHeaderLabels(["日期", "号", "员工", "已发", READY, "没发成", "结果不明", "第一条发布", "最后一条发布"])
@@ -2249,6 +2257,17 @@ class MainWindow(QMainWindow):
         if not self.api_tab.busy():
             self.api_tab.load()                       # 16 个号页的状态跟着变
         self.refresh_records()
+
+    def open_find(self):
+        """找视频重发(用户 2026-10-25):输入标题,从发布归档里找出来挪回去重发。"""
+        from gui.find_dialog import FindDialog
+
+        def after():
+            self._load_dates()
+            if not self.api_tab.busy():
+                self.api_tab.reload_dates()
+            self.refresh_records()
+        FindDialog(self.rec, self.st, self, after=after).exec()
 
     def rec_unsend(self):
         """选中的「已发」改回没发:视频挪回原来的文件夹,记录改成没发成(用户 2026-10-24)。"""

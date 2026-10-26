@@ -694,6 +694,8 @@ class ApiTab(QWidget):
         mm = self.b_more.menu_
         mm.clear()
         for text, fn, ok, tip in ((self.b_pick.text(), self.b_pick.click, self.b_pick.isEnabled(), self.b_pick.toolTip()),
+                                  ("找视频重发…", lambda: self.window().open_find() if hasattr(self.window(), "open_find") else None,
+                                   True, "发过的视频要删了重发:输入标题,从发布归档里找出来挪回今天的文件夹;还能在企鹅号上删掉"),
                                   ("全部展开", lambda: self.expand_all(True), True, ""),
                                   ("全部收起", lambda: self.expand_all(False), True, ""),
                                   (self.b_settopic.text(), self.b_settopic.click, self.b_settopic.isEnabled(), self.b_settopic.toolTip()),

@@ -145,6 +145,10 @@ class Client:
         """一篇文章的状态:{article_info:{article_pub_flag 发布成功/审核中/未发布, article_del_flag 未删除/已删除, …}}。"""
         return self._call("GET", "/article/infoclient", "查文章", params={"article_id": article_id})
 
+    def delete_article(self, article_id: str) -> dict:
+        """在企鹅号上删掉一篇(找视频重发里人点了「在企鹅号上删掉」、确认过才调;删了找不回)。"""
+        return self._call("POST", "/article/deleteclient", "删文章", json={"article_id": article_id})
+
     # ---------------- 发一条 ----------------
     def upload(self, path: str, on_progress=None, stop=None) -> str:
         """分片传视频,返回 transaction_id。"""
