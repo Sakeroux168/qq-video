@@ -44,7 +44,7 @@ def ours_on(rec, nick: str, day: str) -> list[dict]:
     return rows
 
 
-def platform_on(cl, day: str, max_pages: int = 60) -> list[dict]:
+def platform_on(cl, day: str, max_pages: int = 400) -> list[dict]:
     """企鹅号上这个号这天发的(按发布时间):[{aid, vid, title, flag, deleted, time}]。新的在前,翻到比这天早就停。"""
     out = []
     old_pages = 0
@@ -113,6 +113,76 @@ def check_account(cl, rec, nick: str, day: str) -> dict:
     every = live + found
     return {"nick": nick, "ours": len(ours), "live": len(every), "ok": sum(1 for p in every if p["flag"] != "审核中"),
             "review": sum(1 for p in every if p["flag"] == "审核中"), "missing": missing, "extra": extra}
+
+
+# 导出表格的「品类」(照用户企业微信表「企鹅号每日发文情况」那页,2026-10-25 截图)
+ACC_CAT = {"PUBG突围君": "PUBG", "和平精英上分君": "和平精英", "CSGO战神君": "CSGO", "DNF连招档案馆": "地下城与勇士",
+           "QQ飞车漂移课堂": "QQ飞车", "LOLM峡谷日常": "LOL手游", "LOL玩家聚集地": "LOL端游", "三角洲密探君": "三角洲行动",
+           "云顶上分情报局": "云顶之弈", "暗区突围情报局": "暗区突围", "光与夜心动剧场": "光与夜之恋", "电竞情报馆": "亚运会电竞赛事"}
+CAT_NAME = {"教育": "小学生家长教育", "动漫": "动漫"}
+
+
+def table_rows(st, rec, day: str, results: dict) -> list[tuple]:
+    """导出用的行:[(品类, 号, 规定, 实发, 是不是小计)]。实发:16 个号用核对出来的(企鹅号上实发),
+    没查到的 / 教育号(走罐头查不了)用软件记录。"""
+    from . import plan
+    sent = rec.sent_on(day)
+    out, tq, ta = [], 0, 0
+    for g in plan.plan(st):
+        cq = ca = 0
+        for nick, q in (g.get("accounts") or {}).items():
+            q = plan.quota_on(st, nick, day) if q else 0
+            r = results.get(nick) or {}
+            a = r["live"] if ("live" in r and not r.get("error")) else sent.get(nick, 0)
+            cat = ACC_CAT.get(nick) or CAT_NAME.get(g.get("cat"), g.get("cat") or "")
+            out.append((cat, nick, q, a, False))
+            cq, ca = cq + q, ca + a
+        out.append((g.get("label") or f"{g.get('cat')}总发布量", "", cq, ca, True))
+        tq, ta = tq + cq, ta + ca
+    out.append(("总发布量", "", tq, ta, True))
+    return out
+
+
+def export_xlsx(path: str, st, rec, day: str, results: dict) -> str:
+    """导出成企业微信表那个样子:品类 / 账号名称 / 规定视频条数 / 10月25日(实发)。教育、动漫的品类格子合并。返回文件路径。"""
+    import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    rows = table_rows(st, rec, day, results)
+    y, m, d = (int(x) for x in day.split("-"))
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "企鹅号每日发文情况"
+    thin = Side(style="thin", color="D0D4DA")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    mid = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    blue = Font(color="1F3A8A", bold=True)
+    for c, h in enumerate(["品类", "账号名称", "规定视频条数", f"{m}月{d}日"], 1):
+        x = ws.cell(1, c, h)
+        x.font, x.alignment, x.border = Font(bold=True), mid, box
+    r = 2
+    for cat, nick, q, a, total in rows:
+        vals = [cat, nick, q, a]
+        for c, val in enumerate(vals, 1):
+            x = ws.cell(r, c, val)
+            x.alignment, x.border = mid, box
+            x.font = Font(bold=True) if total else blue if c <= 2 else Font()
+        if cat == "总发布量":
+            ws.cell(r, 1).fill = PatternFill("solid", fgColor="8DD8F8")
+        r += 1
+    # 教育、动漫:同一个品类连着好几行的,品类格子合并
+    k = 2
+    while k < r:
+        j = k
+        while j + 1 < r and ws.cell(j + 1, 1).value == ws.cell(k, 1).value and ws.cell(k, 2).value and ws.cell(j + 1, 2).value:
+            j += 1
+        if j > k:
+            ws.merge_cells(start_row=k, start_column=1, end_row=j, end_column=1)
+        k = j + 1
+    ws.cell(r + 1, 1, "说明:16 个号是去企鹅号核对出来的实发条数;教育号走创作罐头查不了,按软件记录。").font = Font(color="6B7280")
+    for col, w in (("A", 16), ("B", 18), ("C", 14), ("D", 12)):
+        ws.column_dimensions[col].width = w
+    wb.save(path)
+    return path
 
 
 def _real_path(p: str) -> str:

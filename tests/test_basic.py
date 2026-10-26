@@ -3825,6 +3825,78 @@ def test_cover_move_keep(tmp: Path):
     check(adj.manual(r"X:\素材\10.25\研习社\b.mp4", r"X:\素材\10.25\研习社\b\横屏16x9.png", "b") == {}, "别的标题不会串")
 
 
+def test_export_and_edu_dims(tmp: Path):
+    print("[核对能选日期、导出企业微信那样的表;教育号一勾员工就认出横屏 / 偏方(用户 2026-10-25)]")
+    import subprocess
+    import openpyxl
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import dimcache, vertical, verify
+    from qe import folders as F
+    from qe.config import Settings
+    from qe.records import Records
+    st = Settings(tmp / "st_ex.json")
+    rec = Records(tmp / "r_ex.sqlite")
+    day = "2026-10-25"
+    rec.conn.execute("INSERT INTO posts(date,account,employee,title,path,status,published_at) VALUES('10.25','家长小天地','51','a','p1','已发','2026-10-25 09:00:00')")
+    rec.conn.commit()
+    results = {"PUBG突围君": {"live": 19}, "CSGO战神君": {"error": "x"}}
+    p = tmp / "导出.xlsx"
+    verify.export_xlsx(str(p), st, rec, day, results)
+    ws = openpyxl.load_workbook(p).active
+    head = [ws.cell(1, c).value for c in range(1, 5)]
+    rows = {ws.cell(r, 2).value: [ws.cell(r, c).value for c in range(1, 5)] for r in range(2, ws.max_row + 1) if ws.cell(r, 2).value}
+    tot = {ws.cell(r, 1).value: [ws.cell(r, 3).value, ws.cell(r, 4).value] for r in range(2, ws.max_row + 1) if ws.cell(r, 1).value and not ws.cell(r, 2).value}
+    check(head == ["品类", "账号名称", "规定视频条数", "10月25日"], f"表头和企业微信表一样 -> {head}")
+    check(rows["PUBG突围君"] == ["PUBG", "PUBG突围君", 20, 19] and rows["DNF连招档案馆"][0] == "地下城与勇士"
+          and rows["电竞情报馆"][0] == "亚运会电竞赛事", f"16 个号:品类写游戏名,实发用企鹅号上查到的 -> {rows['PUBG突围君']}")
+    check(rows["家长小天地"][3] == 1 and rows["CSGO战神君"][3] == 0, "教育号 / 没查成的:按软件记录")
+    check(tot.get("游戏总发布量") == [380, 19] and tot.get("教育总发布量", [0])[0] == 156 and tot.get("总发布量", [0])[0] == 736,
+          f"小计:游戏 / 教育 / 动漫总发布量、总发布量 -> {tot}")
+    check(any(str(m).startswith("A") and ":A" in str(m) for m in ws.merged_cells.ranges), f"教育、动漫的品类格子合并 -> {ws.merged_cells.ranges}")
+    # 核对窗口:换日期重查
+    from qe import apiacc, omapi
+    from gui.verify_dialog import VerifyDialog
+    apiacc.save([{"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    asked = []
+
+    class Fake:
+        def list_articles(self, page, limit):
+            asked.append(page)
+            return {"articles": [], "total": "0"}
+
+        def article_info(self, aid):
+            return {}
+    real = omapi.Client
+    omapi.Client = lambda *a, **k: Fake()
+    try:
+        dlg = VerifyDialog(rec, "2026-10-24", st=st)
+        _wait(app, lambda: not dlg.w.isRunning(), 20)
+        dlg.start("2026-10-20")
+        _wait(app, lambda: not dlg.w.isRunning(), 20)
+        _wait(app, lambda: dlg.b_xls.isEnabled(), 5)
+        check(dlg.day == "2026-10-20" and "10-20" in dlg.windowTitle() and dlg.t.rowCount() == 1 and dlg.b_xls.isEnabled(),
+              f"核对窗口:能换日期重查,查完能导出 -> {dlg.windowTitle()}")
+    finally:
+        omapi.Client = real
+    # 教育号:横屏 / 偏方认出来
+    ff = vertical.ffmpeg_path()
+    if not ff:
+        check(True, "(没有 ffmpeg,横屏那段跳过)")
+        return
+    import gui.window as GW
+    vd = tmp / "edu_dims"
+    vd.mkdir()
+    for nm, size in (("横的", "640x360"), ("方的", "480x480"), ("竖的", "360x640")):
+        subprocess.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=size={size}:rate=25", "-t", "1", "-c:v", "libx264",
+                        str(vd / f"{nm}.mp4")], check=True)
+    vids = [F.Video(path=str(vd / f"{nm}.mp4"), title=nm, account="家长小天地", employee="51", date="10.25") for nm in ("横的", "方的", "竖的")]
+    wk = GW.DimWorker(vids, [0, 1, 2])
+    wk.run()
+    check([getattr(v, "shape", "") for v in vids] == ["横屏", "偏方", ""], f"教育号读尺寸:横屏 / 偏方 / 竖的 -> {[getattr(v, 'shape', '') for v in vids]}")
+    check(dimcache.get(str(vd / "横的.mp4")) == (640, 360), "读过的记着,下次不再读")
+
+
 def test_black_border(tmp: Path):
     print("[封面去黑边(用户 2026-10-22):上下 / 左右的黑条去掉再裁、再传,原图不动;黑得太多的不去、标黄;暗的夜景不误伤]")
     from PIL import Image, ImageDraw
@@ -4608,6 +4680,7 @@ if __name__ == "__main__":
     test_api_dups(tmp)
     test_view_tomorrow(tmp)
     test_cover_move_keep(tmp)
+    test_export_and_edu_dims(tmp)
     test_misfire_api(tmp)
     test_misfire_edu(tmp)
     test_sched_notice(tmp)

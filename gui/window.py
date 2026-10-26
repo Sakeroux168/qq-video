@@ -116,6 +116,42 @@ class BlurWorker(QThread):
             list(ex.map(one, self.rows))
 
 
+class DimWorker(QThread):
+    """后台看勾上的视频是不是横屏 / 偏方(用户 2026-10-25:教育号也要像 16 个号一样识别出来);3 条一起读,读过的记着。"""
+    one = Signal(int)
+
+    def __init__(self, videos, rows, parent=None):
+        super().__init__(parent)
+        self.videos, self.rows = videos, rows
+        self.stop = False
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from qe import dimcache, vertical
+        ff = vertical.ffmpeg_path()
+
+        def one(i):
+            if self.stop:
+                return
+            v = self.videos[i]
+            wh = dimcache.get(v.path)
+            if wh is None and ff:
+                try:
+                    info = vertical.probe(v.path, ff)
+                except Exception:
+                    return
+                if not info.get("w"):
+                    return
+                wh = (info["w"], info["h"])
+                dimcache.put(v.path, *wh)
+            if wh and not self.stop:
+                v.dims, v.shape = wh, dimcache.shape(*wh)
+                self.one.emit(i)
+        with ThreadPoolExecutor(3) as ex:
+            list(ex.map(one, self.rows))
+        dimcache.save()
+
+
 class VertWorker(QThread):
     """后台转标准竖屏(教育号页,用户 2026-10-23「教育类也搞一个处理的,要把横屏变成竖屏」):
     一条条看是不是横屏 / 偏方(3:4、正方形),是就转成 1080×1920(上下黑边、中间原画面),原片删掉(和 16 个号一样)。
@@ -865,8 +901,8 @@ class MainWindow(QMainWindow):
 
     def _load_videos(self):
         date = self.c_date.currentData() or ""
-        for wk in (getattr(self, "wm_worker", None), getattr(self, "blur_worker", None)):
-            if wk and wk.isRunning():                   # 列表要换了:查水印 / 糊水印停下(行号会对不上)
+        for wk in (getattr(self, "wm_worker", None), getattr(self, "blur_worker", None), getattr(self, "dim_worker", None)):
+            if wk and wk.isRunning():                   # 列表要换了:查水印 / 糊水印 / 读尺寸停下(行号会对不上)
                 wk.stop = True
                 wk.wait(60000)
         self.videos = []
@@ -892,7 +928,20 @@ class MainWindow(QMainWindow):
             self.cover_worker.one.connect(self._fill_row)
             self.cover_worker.finished.connect(self._update_scope)     # 认完了:「这次摆几条」重算
             self.cover_worker.start()
+        rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path)]
+        if rows:                                       # 看哪些是横屏 / 偏方(读过的直接用)
+            self.dim_worker = DimWorker(self.videos, rows, self)
+            self.dim_worker.one.connect(self._fill_row)
+            self.dim_worker.finished.connect(self._vert_count)
+            self.dim_worker.start()
+        self._vert_count()
         self._refresh_buttons()
+
+    def _vert_count(self):
+        """「转标准竖屏」按钮上写有几条横屏 / 偏方。"""
+        n = sum(1 for v in self.videos if getattr(v, "shape", "") and not self.rec.status_of(v.path))
+        if not (self.vert_worker and self.vert_worker.isRunning()):
+            self.b_vert.setText(f"转标准竖屏({n} 条)" if n else "转标准竖屏")
 
     def _fill_row(self, i: int):
         if i >= len(self.videos) or i >= self.table.rowCount():
@@ -910,15 +959,20 @@ class MainWindow(QMainWindow):
         wtxt = f"有水印:{checks.wm_text(v.wm)}" if wmb else ""
         newt = "" if stt else titleclean.clean(v.title)
         stt_txt = READY if stt == "摆好" else stt
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or "还没发")]):
+        shp = "" if (stt or note or skip or wmb) else getattr(v, "shape", "")
+        dims = getattr(v, "dims", None)
+        stxt = f"{shp} {dims[0]}×{dims[1]},要转竖屏" if shp and dims else ""
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or stxt or "还没发")]):
             it = QTableWidgetItem(t)
             if c == 0:
                 from gui.widgets import THUMB
                 it.setData(THUMB, v.cover or v.png or v.vcover or v.jpg)      # 封面小图(草图 ②)
             if c == 4 and (note or skip):
                 it.setToolTip(note or skip)
-            if c == 4 and (skip or wmb):
+            if c == 4 and (skip or wmb or stxt):
                 it.setBackground(YELLOW)
+            if c == 4 and stxt:
+                it.setToolTip("横屏 / 偏方(3:4、正方形):点上面「转标准竖屏」转成 1080×1920(上下黑边、中间原画面)")
             if c == 4 and wmb:
                 shot = (v.wm or {}).get("shot") or ""
                 from PySide6.QtCore import QUrl
@@ -1140,11 +1194,16 @@ class MainWindow(QMainWindow):
         else:
             self._vert["done"] += 1
             self.say(f"「{v.title}」{res.replace('转好了', '转成竖屏了')}")
+            v.shape, v.dims = "", (1080, 1920)
+            from qe import dimcache
+            dimcache.put(v.path, 1080, 1920)
         self._fill_row(i)
 
     def _vert_end(self):
-        self.b_vert.setText("转标准竖屏")
         self.b_vert.setEnabled(True)
+        from qe import dimcache
+        dimcache.save()
+        self._vert_count()
         s = getattr(self, "_vert", {})
         self.say(f"转标准竖屏做完了:转了 {s.get('done', 0)} 条" + (f",{s.get('fail')} 条没转成" if s.get("fail") else "") +
                  (";都是竖的,不用转" if not s.get("done") and not s.get("fail") else ""))
@@ -2492,7 +2551,7 @@ class MainWindow(QMainWindow):
                 "\n\n关了软件就不会自己发了。真要关吗?", "关掉", "不关", default_no=True):
             e.ignore()
             return
-        for wk in (self.wm_worker, self.blur_worker):
+        for wk in (self.wm_worker, self.blur_worker, getattr(self, "dim_worker", None), self.vert_worker):
             if wk and wk.isRunning():
                 wk.stop = True
                 wk.wait(60000)
