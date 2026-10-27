@@ -124,6 +124,11 @@ class DailyTab(QWidget):
         m = QMenu(self)
         nick = self.t.item(r, 1).text()
         m.addAction(f"改「{nick}」每天规定几条…", lambda: self.edit_quota(r))
+        fr = plan.is_free(self.st, nick)
+        a_free = m.addAction(f"「{nick}」有多少发多少(不卡规定条数、少了不算没发够)")
+        a_free.setCheckable(True)
+        a_free.setChecked(fr)
+        a_free.triggered.connect(lambda on, nick=nick: (plan.set_free(self.st, nick, on), self.refresh()))
         from qe import apiacc
         if nick in apiacc.nicks() or apiacc.qfind(nick):      # 教育号取了钥匙(只查不发)的也能单查
             m.addAction(f"去企鹅号核对「{nick}」这天发了几条", lambda: self.verify([nick]))
@@ -172,16 +177,17 @@ class DailyTab(QWidget):
         self._s = s
         # 「/ 后面」写原本的规定(和企业微信表一样,用户 2026-10-26「规定的 80」);还差几条按 规定 + 补发 / 临时多发 算
         rex = s.get("rows_extra") or [0] * len(s["rows"])
-        for (lab, q, a), e in zip(s["rows"], rex):
+        rrule = s.get("rows_rule") or [q - e for (_l, q, _a), e in zip(s["rows"], rex)]
+        for (lab, q, a), e, rq in zip(s["rows"], rex, rrule):
             key = lab.replace("总发布量", "")
             note = f"(含补发 / 临时多发 {e})" if e else ""
-            self.cards.set(**{key: (f"{a} / {q - e}", "warn" if q and a > q else "good" if a >= q else ""),
+            self.cards.set(**{key: (f"{a} / {rq}", "warn" if q and a > q else "good" if a >= q else ""),
                               f"{key}_sub": f"多发 {a - q} 条" if q and a > q else ("够了 √" + note if e else "够了 √") if a >= q
                               else f"还差 {q - a} 条{note}"})
             self.cards.set_ring(key, a / q if q else 0)
         tq, ta = s["total"]
         te = s.get("total_extra", 0)
-        self.cards.set(总=(f"{ta} / {tq - te}", "good" if ta >= tq else ""),
+        self.cards.set(总=(f"{ta} / {s.get('total_rule', tq - te)}", "good" if ta >= tq else ""),
                        总_sub="都够了 √" if ta >= tq else f"还差 {tq - ta} 条" + (f"(含补发 / 临时多发 {te})" if te else ""))
         self.cards.set_ring("总", ta / tq if tq else 0)
         short = plan.short_list(s)
@@ -206,14 +212,22 @@ class DailyTab(QWidget):
         red, green = QBrush(QColor(cur()["rows"]["red"])), QBrush(QColor(cur()["rows"]["green"]))
         yellow = QBrush(QColor(cur()["rows"]["yellow"]))
         ex = s.get("extra") or {}
+        rule = s.get("rule") or {}
+        free = set(s.get("free") or [])
         for i, (cat, n, q, a) in enumerate(accs):
             e = ex.get(n, 0)
-            diff = "" if not q else (f"多发 {a - q}" if a > q else "够了 √" if a >= q else f"还差 {q - a}" + (f"(含补发 {e})" if e else ""))
-            for c, txt in enumerate([cat, n, str(q - e) if q else "—", str(a), diff]):
+            rq = rule.get(n, q - e)
+            if n in free:                                  # 有多少发多少(电竞情报馆):规定照写,不算还差 / 多发
+                diff = "有多少发多少"
+            else:
+                diff = "" if not q else (f"多发 {a - q}" if a > q else "够了 √" if a >= q else f"还差 {q - a}" + (f"(含补发 {e})" if e else ""))
+            for c, txt in enumerate([cat, n, str(rq) if rq else "—", str(a), diff]):
                 it = QTableWidgetItem(txt)
                 if c >= 2:
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if q:
+                if n in free:
+                    it.setBackground(green)
+                elif q:
                     it.setBackground(yellow if a > q else green if a >= q else red)
                 self.t.setItem(i, c, it)
 

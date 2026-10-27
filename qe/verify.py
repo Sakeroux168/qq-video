@@ -453,7 +453,7 @@ def export_range_xlsx(path: str, st, rec, days: list[str], by_day: dict) -> str:
                 a = res["live"] if ok else sent[d].get(nick, 0)
                 x = ws.cell(r, 4 + k, a)
                 x.alignment, x.border = mid, box
-                qd = plan.quota_on(st, nick, d) if q else 0
+                qd = plan.quota_on(st, nick, d) if q and not plan.is_free(st, nick) else 0   # 有多少发多少的不标颜色
                 if not ok:
                     x.fill = gray
                 elif qd and a < qd:

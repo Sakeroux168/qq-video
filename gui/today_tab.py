@@ -196,12 +196,14 @@ class TodayTab(QWidget):
         else:
             self.big.setText(fmt)
         self.bar.set_value(ta / tq if tq else 0, animate_)
-        self.lab_sent.setText(f"今天已发 {ta} / {tq} 条(按发出去的时间算)")
-        cats = {g["cat"]: (q, a) for g, (_lab, q, a) in zip(plan.plan(self.st), s["rows"])}
+        # 「/」后面写规定(和企业微信表一样);还差几条按这天要发的算(补发加的算、有多少发多少的号不算;用户 2026-10-27)
+        self.lab_sent.setText(f"今天已发 {ta} / {s.get('total_rule', tq)} 条(按发出去的时间算)")
+        rrule = s.get("rows_rule") or [q for _l, q, _a in s["rows"]]
+        cats = {g["cat"]: (q, a, rq) for g, (_lab, q, a), rq in zip(plan.plan(self.st), s["rows"], rrule)}
         for cat, (ring, num, lab, _card) in self.rings.items():
-            q, a = cats.get(cat, (0, 0))
+            q, a, rq = cats.get(cat, (0, 0, 0))
             ring.set_value(a / q if q else 0, animate_)
-            num.setText(f"{a}<span style='font-size:13px;font-weight:normal;color:{t['mu']}'> / {q}</span>")
+            num.setText(f"{a}<span style='font-size:13px;font-weight:normal;color:{t['mu']}'> / {rq}</span>")
             lab.setText(f"多发 {a - q} 条" if q and a > q else "够了 √" if q and a >= q else f"还差 {q - a} 条" if q else "没有规定条数")
             repolish(lab, tone="warn" if q and a > q else "")     # 多发了不是好事(老板试用:原来多发也是绿的「够了」)
         p = self.rec.problems_on(day)

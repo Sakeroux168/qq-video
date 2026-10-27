@@ -1436,6 +1436,8 @@ class ApiTab(QWidget):
         q = plan.quota_on(self.st, nick, self._qday())
         t = self._day_sent().get(nick, 0)
         tag = "今天" if self._is_today() else (self.day() or "今天")
+        if q and plan.is_free(self.st, nick):            # 有多少发多少(电竞情报馆,用户 2026-10-27):不卡条数
+            return f"{tag} {t} · 有多少发多少"
         if not q:
             return f"{tag} {t}" if t else ""
         return f"{tag} {t}/{q}" + (" √" if t >= q else "")
@@ -1443,7 +1445,8 @@ class ApiTab(QWidget):
     def _quota_nicks(self) -> list[tuple[str, int]]:
         """有规定条数的号:[(号, 每天几条)]。账号还没搬(nicks 空)就用列表里出现的号(审查 14:原来没号可算时写「都发够了」)。"""
         names = apiacc.nicks() or sorted({v.account for v in self.videos})
-        return [(n, q) for n in names for q in (plan.quota_on(self.st, n, self._qday()),) if q]
+        return [(n, q) for n in names for q in (plan.quota_on(self.st, n, self._qday()),) if q
+                and not plan.is_free(self.st, n)]             # 有多少发多少的号不算「达标没达标」(电竞情报馆)
 
     def _quota_card(self):
         """「今天达标」卡片:有规定的号里这天发够了几个(按发出去的时间算)。"""

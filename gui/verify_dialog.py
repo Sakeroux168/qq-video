@@ -238,6 +238,10 @@ class VerifyDialog(QDialog):
             diff = ((str(short) if short else "") + (("、" if short else "") + f"多发 {over}" if over else "")) or ("✓" if q else "")
             if diff == "✓" and q > qb:
                 diff = f"✓(含补发 {q - qb})"
+            if self.st is not None:
+                from qe import plan
+                if plan.is_free(self.st, r["nick"]):       # 有多少发多少(电竞情报馆):不算还差 / 多发
+                    diff, short, over = "有多少发多少", 0, 0
             vals = [r["nick"], str(qb) if q else "—", str(live), diff, str(r["ours"]),
                     (str(need) if need else "✓") + (f"(+{look} 看一眼)" if look else ""),
                     str(r["review"]) if r["review"] else "", str(len(r["extra"])) if r["extra"] else ""]

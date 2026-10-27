@@ -17,6 +17,26 @@ DEFAULT_PLAN = [
         "国漫趣谈": 50, "国漫解说馆z": 50, "日漫漫谈社": 50, "日漫解说馆": 50}},
 ]
 WORK = "发布企鹅号视频"
+# 有多少发多少的号(用户 2026-10-27:「电竞类的是有多少发多少,一般规定是 80 条,但这个账号是特例,强时效性还不一定有比赛」):
+# 规定照样写(企业微信表里还是 80),但发布不卡条数、少了也不算没发够。设置里 quota_free 改;没设过就是电竞情报馆
+DEFAULT_FREE = ["电竞情报馆"]
+
+
+def free_list(st) -> list[str]:
+    v = st.get("quota_free") if hasattr(st, "get") else None
+    return list(v) if isinstance(v, list) else list(DEFAULT_FREE)
+
+
+def is_free(st, nick: str) -> bool:
+    """这个号有多少发多少(不卡规定条数、少了不算没发够)。"""
+    return nick in free_list(st)
+
+
+def set_free(st, nick: str, on: bool) -> None:
+    lst = [n for n in free_list(st) if n != nick] + ([nick] if on else [])
+    st["quota_free"] = lst
+    if hasattr(st, "save"):
+        st.save()
 
 
 def plan(st) -> list[dict]:
@@ -155,7 +175,7 @@ def tomorrow_folder() -> str:
 def left_today(rec, st, nick: str, day: str = "", sent: dict | None = None) -> int | None:
     """这个号这天(默认今天,北京时间)还能发几条 = 规定条数 - 已经发出去的。没规定条数 / 开了闸 = None(不限)。
     用户 2026-10-20:不能发多、也不能发少;开闸(设置里「允许超过每天规定条数」)才能多发。"""
-    if st.get("quota_open", False):
+    if st.get("quota_open", False) or is_free(st, nick):     # 有多少发多少的号:不卡(用户 2026-10-27,电竞情报馆)
         return None
     q = quota_on(st, nick, day)
     if not q:
@@ -190,22 +210,30 @@ def summary(rec, st, day: str) -> dict:
     「这天要发」= 规定 + 临时多发(还差几条、发够就停按它算);给企业微信表的「规定」用 规定 = 这天要发 - 加的
     (用户 2026-10-26:「规定的 80」—— 补发多加的那 1 条不写进规定)。"""
     got = day_counts(rec, day)
-    rows, accs, rex, ex = [], [], [], {}
-    tq = ta = te = 0
+    rows, accs, rex, ex, rrule, rule, free = [], [], [], {}, [], {}, []
+    tq = ta = te = tr = 0
     for g in plan(st):
         e = 0
+        q = cat_total(g)
+        rrule.append(q)
         for n, nq in (g.get("accounts") or {}).items():
+            rule[n] = int(nq or 0)
             if nq and extra_of(st, n, day):
                 ex[n] = extra_of(st, n, day)
                 e += ex[n]
-        q = cat_total(g) + e
+            if nq and is_free(st, n):                    # 有多少发多少:这天要发的 = 实际发的(不算还差、不算多发)
+                free.append(n)
+                q += got.get(n, 0) - int(nq or 0) - ex.get(n, 0)
+        q += e
         a = sum(got.get(n, 0) for n in (g.get("accounts") or {}))
         rows.append((g.get("label") or g["cat"], q, a))
         rex.append(e)
-        tq, ta, te = tq + q, ta + a, te + e
+        tq, ta, te, tr = tq + q, ta + a, te + e, tr + rrule[-1]
         for n, nq in (g.get("accounts") or {}).items():
-            accs.append((g["cat"], n, int(nq or 0) + (ex.get(n, 0) if nq else 0), got.get(n, 0)))
-    return {"day": day, "rows": rows, "total": (tq, ta), "accounts": accs, "extra": ex, "rows_extra": rex, "total_extra": te}
+            tgt = got.get(n, 0) if n in free else int(nq or 0) + (ex.get(n, 0) if nq else 0)
+            accs.append((g["cat"], n, tgt, got.get(n, 0)))
+    return {"day": day, "rows": rows, "total": (tq, ta), "accounts": accs, "extra": ex, "rows_extra": rex, "total_extra": te,
+            "rows_rule": rrule, "total_rule": tr, "rule": rule, "free": free}
 
 
 def short_day(day: str) -> str:
@@ -220,15 +248,15 @@ def short_day(day: str) -> str:
 def as_tsv(s: dict) -> str:
     """复制到企业微信表的文字:一行一格用 Tab 隔开,贴进去正好占 日期 / 工作内容 / 品类 / 规定 / 实际 五列。"""
     lines = []
-    rex = s.get("rows_extra") or [0] * len(s["rows"])
+    rrule = s.get("rows_rule") or [q - e for (_l, q, _a), e in zip(s["rows"], s.get("rows_extra") or [0] * len(s["rows"]))]
     for k, (lab, q, a) in enumerate(s["rows"]):                 # 规定写原本的(补发 / 临时多发加的不算;用户 2026-10-26)
-        lines.append("\t".join([short_day(s["day"]) if k == 0 else "", WORK if k == 0 else "", lab, str(q - rex[k]), str(a)]))
+        lines.append("\t".join([short_day(s["day"]) if k == 0 else "", WORK if k == 0 else "", lab, str(rrule[k]), str(a)]))
     tq, ta = s["total"]
-    lines.append("\t".join(["", "", "总发布量", str(tq - s.get("total_extra", 0)), str(ta)]))
+    lines.append("\t".join(["", "", "总发布量", str(s.get("total_rule", sum(rrule))), str(ta)]))
     return "\n".join(lines)
 
 
 def short_list(s: dict) -> list[tuple[str, int, int]]:
     """今天还没到规定条数的号:[(号, 规定, 实际)],差得多的排前面。没规定条数的号不算。"""
-    out = [(n, q, a) for _c, n, q, a in s["accounts"] if q and a < q]
+    out = [(n, q, a) for _c, n, q, a in s["accounts"] if q and a < q and n not in (s.get("free") or [])]
     return sorted(out, key=lambda x: x[2] - x[1])

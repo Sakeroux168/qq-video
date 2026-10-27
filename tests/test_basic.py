@@ -1240,7 +1240,9 @@ def test_daily_plan(tmp: Path):
     rec.manual_published(type("E", (), {"date": "10.14", "account": "家长小天地", "employee": "张三", "title": "e1",
                                         "path": str(tmp / "e1.mp4"), "cover_kind": ""}))
     s1 = plan.summary(rec, st, day)
-    check(s1["rows"] == [("游戏总发布量", 380, 3), ("教育总发布量", 156, 1), ("动漫总发布量", 200, 1)] and s1["total"] == (736, 5),
+    check(s1["rows_rule"] == [380, 156, 200] and s1["total_rule"] == 736 and [r[2] for r in s1["rows"]] == [3, 1, 1]
+          and s1["rows"][0][1] == 300 and s1["total"] == (656, 5),        # 电竞情报馆有多少发多少:这天要发的不算它的 80
+
           f"按发出去的日期数(素材文件夹 10.14 / 10.15 都算今天发的)-> {s1['rows']}")
     tsv = plan.as_tsv(s1).splitlines()
     check(tsv[0].split("\t") == [plan.short_day(day), "发布企鹅号视频", "游戏总发布量", "380", "3"] and tsv[3].split("\t")[2:] == ["总发布量", "736", "5"],
@@ -5404,6 +5406,31 @@ def test_spill_picked_root(tmp: Path):
           f"今天发够了:总文件夹里剩下的连封面挪进「{tmr}」(明天页面自己认得出) -> {got}")
 
 
+def test_quota_free(tmp: Path):
+    print("[有多少发多少的号(用户 2026-10-27:电竞情报馆规定 80,但强时效、不一定有比赛):不卡条数、少了不算没发够,规定照写]")
+    from qe import plan
+    from qe import folders as F
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    st = Settings(tmp / "st_qf.json")
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"电竞情报馆": 80, "PUBG突围君": 20}}]
+    rec = Records(tmp / "r_qf.sqlite")
+    day = bj_now().strftime("%Y-%m-%d")
+    for k in range(30):
+        rec.api_result(F.Video(path=str(tmp / "qf" / f"e{k}.mp4"), title=f"e{k}", account="电竞情报馆", employee="", date="x"), "已发")
+    check(plan.is_free(st, "电竞情报馆") and not plan.is_free(st, "PUBG突围君"), "默认:电竞情报馆有多少发多少,别的号照常")
+    check(plan.left_today(rec, st, "电竞情报馆", day) is None and plan.left_today(rec, st, "PUBG突围君", day) == 20,
+          "电竞不卡条数(不限);别的号照样按规定算还能发几条")
+    s = plan.summary(rec, st, day)
+    short = [n for n, _q, _a in plan.short_list(s)]
+    check("电竞情报馆" not in short and "PUBG突围君" in short and s["rows"][0][1] == 30 + 20,
+          "电竞发了 30 条不算没发够;还差几条只算别的号")
+    tsv = plan.as_tsv(s)
+    check("游戏总发布量\t100\t30" in tsv, f"复制到企业微信:规定照写 100(含电竞的 80),实际 30 -> {tsv!r}")
+    plan.set_free(st, "电竞情报馆", False)
+    check(plan.left_today(rec, st, "电竞情报馆", day) == 50, "关掉以后:电竞也按 80 条卡")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -5484,6 +5511,7 @@ if __name__ == "__main__":
     test_autocover(tmp)
     test_unsure_check(tmp)
     test_spill_picked_root(tmp)
+    test_quota_free(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
