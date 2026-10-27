@@ -1629,6 +1629,11 @@ class ApiTab(QWidget):
                 m.addAction("改回没发(拎回来重发)…", lambda: self.unsend_rows(sel or [i])).setEnabled(not busy)
                 m.addSeparator()
             if i != -1:
+                from qe import apicover
+                if apicover.find(self.videos[i].path):
+                    m.addAction("看封面(员工放的)", lambda: self._open_file(apicover.find(self.videos[i].path)))
+                else:
+                    m.addAction("看封面 / 换一帧…(没放封面,软件自动挑的)", lambda: self.auto_cover_dialog(i))
                 m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not busy and not self._sent(i))
                 m.addAction("复制标题", lambda: self._copy(self.videos[i].title))
                 m.addAction("打开所在文件夹", lambda: self.reveal(i))
@@ -2716,7 +2721,8 @@ class ApiTab(QWidget):
         cmode = str(self.st.get("api_cover") or "原样")
         ncov = 0 if cmode == "不传" else sum(1 for i in rows if apicover.find(self.videos[i].path))
         cov_line = ("封面:不传,平台自己截" if cmode == "不传" else
-                    f"封面:{ncov} 条有同名封面会传上去({cmode})" + (f",{len(rows) - ncov} 条没有,平台自己截" if ncov < len(rows) else ""))
+                    f"封面:{ncov} 条有同名封面会传上去({cmode})" +
+                    (f",{len(rows) - ncov} 条没放封面,软件自动挑一帧不黑的传上去" if ncov < len(rows) else ""))
         msg = msg.replace("\n\n发吗?", f"\n{cov_line}\n\n发吗?")
         detail = (f"每个号:\n{per}\n\n标题、简介 = 文件名;自主声明「无需标注」;AI 声明「非 AI 生成」;{cov_line}。\n"
                   f"{'一条一条发' if par == 1 else f'{par} 个号一起发'}" + (f",同一个号一次传 {per_acc} 条,这组发完歇 {gap:g} 秒再下一组。\n" if per_acc > 1 else
@@ -2793,8 +2799,16 @@ class ApiTab(QWidget):
                     if got is None:
                         raise _Taken()
                     rid["id"] = got
-                from qe import apicover, omcover
+                from qe import apicover, autocover, omcover
                 src = apicover.find(v.path) if cmode != "不传" else ""
+                auto_cov = False
+                if not src and cmode != "不传":
+                    # 员工没放封面:软件自己挑一帧不黑、不糊的(用户 2026-10-26:平台拿第一帧,很多是黑屏;选了全自动)
+                    try:
+                        src = autocover.pick(v.path)
+                        auto_cov = bool(src)
+                    except Exception:
+                        src = ""
                 try:
                     cimg = apicover.prepare(src, cmode) if src else ""
                 except Exception as e:
@@ -2845,7 +2859,7 @@ class ApiTab(QWidget):
                     return "next"
                 apicover.cleanup(cimg, src)
                 note = f"article_id={r['article_id']} vid={r['vid']}" + ("" if r["status"] == "成功" else "(平台还在处理)") + \
-                    (f";封面{r.get('cover')}" if r.get("cover") else "")
+                    (f";封面{r.get('cover')}" if r.get("cover") else "") + (";封面是软件自动挑的一帧" if auto_cov else "")
                 if str(r.get("cover") or "").startswith(("没传上", "平台不收")):
                     emit(-1, f"「{v.title}」发了,但封面{r['cover']}")
                 bump("ok")
@@ -3090,6 +3104,62 @@ class ApiTab(QWidget):
         elif msg:
             self.say(msg)
         self._sched_changed()
+
+    def _open_file(self, p: str):
+        try:
+            os.startfile(p)
+        except OSError as e:
+            QMessageBox.warning(self, "看封面", f"打不开:{e.strerror or e}")
+
+    def auto_cover_dialog(self, i: int):
+        """没放封面的这条:看软件挑的那帧,不满意点「换一帧」(用户 2026-10-26:全自动挑,能看能换)。"""
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QVBoxLayout
+        from qe import autocover
+        v = self.videos[i]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"封面 · {v.title[:30]}")
+        lay = QVBoxLayout(dlg)
+        tip = QLabel("这条没放封面:发的时候软件会把下面这张传上去(从视频里挑的不黑、不糊的一帧)。")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        pic = QLabel("正在挑…")
+        pic.setMinimumSize(270, 360)
+        pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(pic, 1)
+        row = QHBoxLayout()
+        b_next = QPushButton("换一帧")
+        b_ok = QPushButton("就用这张")
+        b_ok.setObjectName("primary")
+        row.addStretch(1)
+        row.addWidget(b_next)
+        row.addWidget(b_ok)
+        lay.addLayout(row)
+
+        def show(p: str):
+            if not p:
+                pic.setText("挑不出来(视频里都是黑屏 / 读不出来),发的时候让平台自己截")
+                b_next.setEnabled(False)
+                return
+            pm = QPixmap(p)
+            pic.setPixmap(pm.scaled(360, 480, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
+        def nxt():
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                show(autocover.next_frame(v.path))
+            finally:
+                QApplication.restoreOverrideCursor()
+        b_next.clicked.connect(nxt)
+        b_ok.clicked.connect(dlg.accept)
+        dlg.show()
+        QApplication.processEvents()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            show(autocover.pick(v.path))
+        finally:
+            QApplication.restoreOverrideCursor()
+        dlg.exec()
 
     def relogin_key(self, parent=None):
         """登录取钥匙:开一个这个号专用的浏览器,人扫码登录企鹅号,软件读出这个号的接口钥匙换上(不用再开旧软件)。"""

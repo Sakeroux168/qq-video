@@ -5272,6 +5272,35 @@ def test_audit_verify(tmp: Path):
     check(m is not None and m["sure"] is False and "认不出" in m["why"], f"状态是空的:列出来看一眼 -> {m and m['why']}")
 
 
+def test_autocover(tmp: Path):
+    print("[没放封面的自动挑一帧(用户 2026-10-26:平台拿第一帧当封面,很多是黑屏;选了全自动)]")
+    import subprocess
+    import cv2
+    import numpy as np
+    from qe import autocover
+    from qe.vertical import ffmpeg_path
+    ff = ffmpeg_path()
+    if not ff:
+        print("  (没有 ffmpeg,跳过)")
+        return
+    d = tmp / "ac"
+    d.mkdir()
+    v1, v2 = d / "开头黑屏.mp4", d / "全黑.mp4"
+    subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x568:d=2",
+                    "-f", "lavfi", "-i", "testsrc=s=320x568:d=6", "-filter_complex", "[0][1]concat=n=2:v=1[v]", "-map", "[v]",
+                    "-pix_fmt", "yuv420p", str(v1)], check=True)
+    subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x568:d=5",
+                    "-pix_fmt", "yuv420p", str(v2)], check=True)
+    p = autocover.pick(str(v1))
+    img = cv2.imdecode(np.fromfile(p, np.uint8), cv2.IMREAD_GRAYSCALE) if p else None
+    check(p and img is not None and img.mean() > 40 and img.std() > 20 and os.path.dirname(p) == autocover.cache_dir(),
+          f"开头黑屏的:挑的是后面清楚的一帧,放在软件自己的文件夹里(不碰素材) -> {p}")
+    check(not [x for x in os.listdir(d) if x.lower().endswith(".jpg")], "素材文件夹里没多出东西")
+    n = autocover.next_frame(str(v1))
+    check(n and n != p and autocover.pick(str(v1)) == n, "「换一帧」换成另一张,之后发的时候就用它")
+    check(autocover.pick(str(v2)) == "", "整条都是黑屏的:挑不出来,让平台自己截")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -5349,6 +5378,7 @@ if __name__ == "__main__":
     test_key_guards(tmp)
     test_audit_redo(tmp)
     test_audit_verify(tmp)
+    test_autocover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
