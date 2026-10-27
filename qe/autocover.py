@@ -76,6 +76,11 @@ def score(png: bytes) -> float:
     img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return -1.0
+    # 只看有画面的那一块:转过竖屏的上下是黑边(用户 2026-10-24 改的黑边),整张平均会偏暗,不能当成黑屏扔掉
+    rows = np.where(img.mean(axis=1) > 15)[0]
+    if len(rows) < img.shape[0] * 0.15:
+        return -1.0                                        # 有画面的不到一成五:就是黑屏
+    img = img[rows[0]:rows[-1] + 1]
     m, s = float(img.mean()), float(img.std())
     if m < DARK or m > BRIGHT or s < FLAT:
         return -1.0

@@ -5299,6 +5299,10 @@ def test_autocover(tmp: Path):
     n = autocover.next_frame(str(v1))
     check(n and n != p and autocover.pick(str(v1)) == n, "「换一帧」换成另一张,之后发的时候就用它")
     check(autocover.pick(str(v2)) == "", "整条都是黑屏的:挑不出来,让平台自己截")
+    v3 = d / "黑边竖屏.mp4"                                  # 转过竖屏的:上下黑边,中间是画面 —— 不能当成黑屏
+    subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=540x304:d=5",
+                    "-vf", "pad=540:960:0:328:black", "-pix_fmt", "yuv420p", str(v3)], check=True)
+    check(autocover.pick(str(v3)) != "", "上下黑边、中间有画面的(转过竖屏的):照样挑得出封面")
 
 
 if __name__ == "__main__":
