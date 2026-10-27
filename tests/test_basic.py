@@ -27,6 +27,7 @@ def _fake_ask_ai(own, titles, key, **k):
 
 _gc.ask_ai = _fake_ask_ai
 import gui.api_tab as _api_mod                               # noqa: E402
+_api_mod.ApiTab.AUTO_UNSURE = False                          # 测试里不自动去企鹅号查结果不明(会拿假钥匙调真接口)
 _REAL_ASK = _api_mod.ask                                     # 有的测试会换掉 ask():留一份真的
 
 
@@ -5305,6 +5306,72 @@ def test_autocover(tmp: Path):
     check(autocover.pick(str(v3)) != "", "上下黑边、中间有画面的(转过竖屏的):照样挑得出封面")
 
 
+def test_unsure_check(tmp: Path):
+    print("[结果不明的软件自己去企鹅号查(用户 2026-10-26,选了 B):查到了记成已发;查不到只提示,不自动改]")
+    from datetime import timedelta
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, unsure
+    from qe import folders as F
+    from qe.config import Settings, bj_now, bj_str
+    from qe.records import Records, pkey
+    import gui.api_tab as T
+    n = bj_now()
+    md = f"{n.month}.{n.day}"
+    root = tmp / "uc" / "游戏视频"
+    d = root / "CSGO--CSGO战神君" / md
+    d.mkdir(parents=True)
+    for t in ("发上了的", "没发上的"):
+        (d / f"{t}.mp4").write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    rec = Records(tmp / "r_uc.sqlite")
+    ago = bj_str(n - timedelta(minutes=20))
+    ids = {}
+    for t, vid in (("发上了的", "VID1"), ("没发上的", "VID2")):
+        v = F.Video(path=str(d / f"{t}.mp4"), title=t, account="CSGO战神君", employee="", date=md)
+        rid = rec.api_begin(v)
+        rec.api_finish(rid, "结果不明", f"vid={vid};发布:网络连不上企鹅号")
+        rec.conn.execute("UPDATE posts SET prepared_at=? WHERE id=?", (ago, rid))
+        ids[t] = rid
+    rec.conn.commit()
+    pub = bj_str(n - timedelta(minutes=19))
+    arts = [{"article_id": "A1", "article_title": "别的", "article_pub_time": pub, "article_video_info": {"vid": "VID1"}},
+            {"article_id": "A9", "article_title": "老的", "article_pub_time": bj_str(n - timedelta(days=3)), "article_video_info": {"vid": "OLD"}}]
+
+    class C:
+        def __init__(self, *a, **k):
+            pass
+
+        def list_articles(self, page=1, limit=10):
+            return {"articles": arts if page == 1 else [], "total": len(arts)}
+    r1 = dict(rec.conn.execute("SELECT * FROM posts WHERE id=?", (ids["发上了的"],)).fetchone())
+    check(unsure.find(C(), r1)["article_id"] == "A1", "按视频编号认出来(标题被平台改了也认得)")
+    r2 = dict(rec.conn.execute("SELECT * FROM posts WHERE id=?", (ids["没发上的"],)).fetchone())
+    check(unsure.find(C(), r2) is None, "后台没有的:找不到")
+    st = Settings(tmp / "st_uc.json")
+    st["api_roots"] = [str(root)]
+    real = omapi.Client
+    omapi.Client = C
+    try:
+        tab = T.ApiTab(st, rec, lambda m: None)
+        tab.set_day(md)
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+        tab.check_unsure(force=True)
+        _wait(app, lambda: tab._unsure_thread is not None and not tab._unsure_thread.is_alive(), 20)
+        for _ in range(20):
+            app.processEvents()
+        got = rec.conn.execute("SELECT status, published_at, note FROM posts WHERE id=?", (ids["发上了的"],)).fetchone()
+        check(got[0] == "已发" and got[1] == pub and got[2].startswith("article_id=A1"),
+              f"查到了:记成已发,发布时间 / 文章编号用企鹅号上的 -> {tuple(got)}")
+        i2 = next(k for k, v in enumerate(tab.videos) if v.title == "没发上的")
+        i1 = next(k for k, v in enumerate(tab.videos) if v.title == "发上了的")
+        check(rec.conn.execute("SELECT status FROM posts WHERE id=?", (ids["没发上的"],)).fetchone()[0] == "结果不明"
+              and "多半没发上" in tab._status_text(i2)[0] and tab.state.get(i1) == "已发",
+              f"查不到、发出去 20 分钟了:不自动改,只提示「多半没发上」(用户选的 B)-> {tab._status_text(i2)[0]}")
+    finally:
+        omapi.Client = real
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -5383,6 +5450,7 @@ if __name__ == "__main__":
     test_audit_redo(tmp)
     test_audit_verify(tmp)
     test_autocover(tmp)
+    test_unsure_check(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

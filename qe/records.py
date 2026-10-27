@@ -170,6 +170,20 @@ class Records:
             self.conn.commit()
             return cur.rowcount
 
+    def resolve_found(self, rid: int, pub_time: str, aid: str, vid: str) -> None:
+        """「结果不明 / 发布中」的,软件去企鹅号查到了:记成已发,发布时间、文章编号用企鹅号上的(核对按编号认)。"""
+        with _LOCK:
+            self.conn.execute("UPDATE posts SET status='已发', published_at=?, note=? || note || '(软件去企鹅号查到发出去了)' "
+                              "WHERE id=? AND status IN ('结果不明','发布中')",
+                              (pub_time or bj_str(), f"article_id={aid} vid={vid};" if aid else "", rid))
+            self.conn.commit()
+
+    def note_once(self, rid: int, text: str) -> None:
+        """备注里加一句(已经有了就不再加)。"""
+        with _LOCK:
+            self.conn.execute("UPDATE posts SET note=note || ? WHERE id=? AND instr(note, ?) = 0", (text, rid, text))
+            self.conn.commit()
+
     def repath(self, rid: int, new_path: str) -> None:
         """视频被挪回素材盘重发了(找视频重发 / 拎回来):记录的位置改成现在那里,原来的位置写进备注。"""
         with _LOCK:

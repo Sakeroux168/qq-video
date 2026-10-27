@@ -154,6 +154,9 @@ class _SayBox:
 
 
 class ApiTab(QWidget):
+    _unsure_got = Signal(list)                    # 后台查「结果不明」的回来了:[(记录, 企鹅号上那篇 或 None, 出错原因)]
+    AUTO_UNSURE = True                            # 自动去企鹅号查「结果不明」(测试里关掉,免得拿假钥匙去调真接口)
+
     def __init__(self, st, rec, say, parent=None):
         super().__init__(parent)
         self.st, self.rec, self._say_main = st, rec, say
@@ -270,6 +273,16 @@ class ApiTab(QWidget):
         self._fun_timer = QTimer(self)
         self._fun_timer.setInterval(7000)                # 小字 7 秒换一句
         self._fun_timer.timeout.connect(self._fun_next)
+        # 「结果不明」的自己去企鹅号查(用户 2026-10-26,选了 B):每分钟看一眼,到时候的去查
+        self._unsure_last: dict[int, float] = {}         # 记录 id → 上次查的时间
+        self._unsure_hint: dict[str, str] = {}           # pkey → 提示(「后台没找到,多半没发上」)
+        self._unsure_thread = None
+        self._unsure_got.connect(self._unsure_apply)
+        self._unsure_timer = QTimer(self)
+        self._unsure_timer.setInterval(60_000)
+        self._unsure_timer.timeout.connect(lambda: self.check_unsure())
+        if self.AUTO_UNSURE:
+            self._unsure_timer.start()
         hv = QVBoxLayout(self._head)
         hv.setContentsMargins(0, 0, 0, 0)
         hv.setSpacing(14)
@@ -1150,7 +1163,9 @@ class ApiTab(QWidget):
             unsure = sum(1 for x in self.state.values() if x == "结果不明")
             if unsure:
                 self.say(f"⚠ 有 {unsure} 条「结果不明」(发布请求发出去了没收到回话,或者上次发到一半软件被关了)。"
-                         "去企鹅号后台看一眼,再右键标「发了 / 没发」;标之前软件不会再发它们。")
+                         "软件这就去企鹅号查:查到了自动记成已发;查不到的会提示你,双击确认。确认之前软件不会再发它们。")
+                if self.AUTO_UNSURE:
+                    QTimer.singleShot(2000, lambda: self.check_unsure(force=True))
             missing = [n for n in apiacc.nicks() if n not in accs]
             self.say(f"接口发 {d}:{len(self.videos)} 条,{len(accs)} 个号" +
                      (f";这天没找到视频的号:{'、'.join(missing)}" if missing else "") + "。")
@@ -1278,12 +1293,17 @@ class ApiTab(QWidget):
             return
         if self.state.get(i) == "结果不明" and not self.busy():   # 双击「不确定发没发」的:直接问(体验报告)
             v = self.videos[i]
+            hint = self._unsure_hint.get(pkey(v.path))
             box = QMessageBox(QMessageBox.Icon.Question, "这条发出去了吗?",
-                              f"「{v.title[:40]}」\n\n发布请求发出去了,但没收到企鹅号的回话。\n去企鹅号后台看一眼,这条有没有发出去?",
+                              f"「{v.title[:40]}」\n\n发布请求发出去了,但没收到企鹅号的回话。\n" +
+                              (f"{hint}。\n\n改成没发出去,之后就能再发。" if hint else
+                               "软件过几分钟会自己去企鹅号查;着急的话去后台看一眼,这条有没有发出去?"),
                               QMessageBox.StandardButton.NoButton, self)
             b1 = box.addButton("发出去了", QMessageBox.ButtonRole.YesRole)
             b2 = box.addButton("没发出去(可以再发)", QMessageBox.ButtonRole.NoRole)
             box.addButton("还没去看", QMessageBox.ButtonRole.RejectRole)
+            if hint:
+                box.setDefaultButton(b2)
             box.exec()
             if box.clickedButton() in (b1, b2):
                 self.resolve_unsure(i, box.clickedButton() is b1)
@@ -1302,7 +1322,9 @@ class ApiTab(QWidget):
         probs = checks.problems(v) if c else []
         st = self.state.get(i, "")
         if st == "结果不明":
-            return "不确定发没发 · 双击确认", probs
+            if self._unsure_hint.get(pkey(v.path)):
+                return "后台没找到,多半没发上 · 双击确认", probs
+            return "不确定发没发 · 软件在查(也能双击确认)", probs
         if st:
             return st, probs
         if c and probs:
@@ -1760,6 +1782,80 @@ class ApiTab(QWidget):
     def _copy(t: str):
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(t)
+
+    def check_unsure(self, force: bool = False):
+        """「结果不明 / 发布中」的去企鹅号查一下(后台线程,只读)。开始发 2 分钟以后才查;15 分钟以内每 3 分钟一次,
+        之后每 15 分钟一次,超过一天的只在 force(打开 / 刷新)时查。正在发布的时候不查(不跟发布抢)。"""
+        import threading
+        import time as _time
+        from qe import unsure
+        if self.busy() or (self._unsure_thread and self._unsure_thread.is_alive()):
+            return
+        now = bj_now().replace(tzinfo=None)
+        accs = {a["nick"]: a for a in apiacc.load()}
+        due = []
+        for r in self.rec.unsure_paths():
+            if r["account"] not in accs:
+                continue
+            m = unsure.elapsed_min(r, now)
+            last = self._unsure_last.get(r["id"])
+            gap = 3 if m < unsure.WAIT_MIN else 15
+            if m < 2 or (m > 24 * 60 and not force):
+                continue
+            if not force and last and _time.time() - last < gap * 60:
+                continue
+            due.append(r)
+        if not due:
+            return
+
+        def run():
+            from qe import omapi
+            out = []
+            for r in due:
+                if self.busy():                          # 开始发布了:先停,下回再查
+                    break
+                try:
+                    a = accs[r["account"]]
+                    cl = omapi.Client(a["client_id"], apiacc.unseal(a["secret"]))
+                    out.append((r, unsure.find(cl, r), ""))
+                except Exception as e:
+                    out.append((r, None, str(e)[:80]))
+            self._unsure_got.emit(out)
+        for r in due:
+            self._unsure_last[r["id"]] = _time.time()
+        self._unsure_thread = threading.Thread(target=run, daemon=True)
+        self._unsure_thread.start()
+
+    def _unsure_apply(self, out: list):
+        """查回来了:找到的记成已发;一直找不到的提示「多半没发上」(不自动改,用户选的 B)。"""
+        from qe import unsure
+        now = bj_now().replace(tzinfo=None)
+        by_key = {pkey(v.path): i for i, v in enumerate(self.videos)}
+        found = missing = 0
+        for r, a, err in out:
+            k = pkey(r["path"])
+            if a is not None:
+                vid = str((a.get("article_video_info") or {}).get("vid") or "")
+                self.rec.resolve_found(r["id"], str(a.get("article_pub_time") or ""), str(a.get("article_id") or ""), vid)
+                self._unsure_hint.pop(k, None)
+                found += 1
+                i = by_key.get(k)
+                if i is not None:
+                    self.state[i] = "已发"
+                    self._fill(i)
+                self.say(f"「{r['title'][:30]}」软件去企鹅号查到了:发出去了({str(a.get('article_pub_time') or '')[5:16]}),记成已发")
+            elif not err and unsure.elapsed_min(r, now) >= unsure.WAIT_MIN:
+                if k not in self._unsure_hint:
+                    missing += 1
+                    self.say(f"「{r['title'][:30]}」发出去 {int(unsure.elapsed_min(r, now))} 分钟了,企鹅号后台还没有这条,"
+                             "多半没发上 —— 双击它确认「没发出去」就能再发")
+                self._unsure_hint[k] = "软件去企鹅号查过,后台一直没有这条,多半没发上"
+                self.rec.note_once(r["id"], unsure.MISSING_NOTE)
+                i = by_key.get(k)
+                if i is not None:
+                    self._fill(i)
+        if found or missing:
+            self._update_scope()
 
     def resolve_unsure(self, i: int, sent: bool):
         v = self.videos[i]
@@ -2799,6 +2895,7 @@ class ApiTab(QWidget):
                     if got is None:
                         raise _Taken()
                     rid["id"] = got
+                    rid["vid"] = vid
                 from qe import apicover, autocover, omcover
                 src = apicover.find(v.path) if cmode != "不传" else ""
                 auto_cov = False
@@ -2828,15 +2925,16 @@ class ApiTab(QWidget):
                     done_one(emit)
                     return "next"
                 except Unknown as e:                      # 发布请求发出去了没收到回话:可能发了,不能自动再发
+                    keep = f"vid={rid['vid']};" if rid.get("vid") else ""    # 视频编号留着:软件之后按它去企鹅号查发没发
                     if "id" in rid:
-                        self.rec.api_finish(rid["id"], "结果不明", str(e))
+                        self.rec.api_finish(rid["id"], "结果不明", keep + str(e))
                     else:
-                        self.rec.api_result(v, "结果不明", str(e))
+                        self.rec.api_result(v, "结果不明", keep + str(e))
                     self.why[i] = str(e)
                     with slock:
                         stats["fails"].append((v.title, "结果不明(去后台看一眼)"))
                     emit(i, "结果不明")
-                    emit(-1, f"「{nick}」{v.title}:结果不明 —— 去企鹅号后台看一眼,再右键标「发了 / 没发」")
+                    emit(-1, f"「{nick}」{v.title}:结果不明 —— 软件过几分钟自己去企鹅号查,查到了自动记成已发")
                     bump("unsure")
                     done_one(emit)
                     return "unsure"                       # 可能已经发了:算进今天的条数(宁可少发也不多发)
