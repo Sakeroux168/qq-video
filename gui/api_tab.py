@@ -574,17 +574,24 @@ class ApiTab(QWidget):
 
     def _spill(self, nick: str, emit=None, only_day: str = "") -> int:
         """这个号今天发够了:列表里它还没发的(没发过 / 没发成的)连同同名封面挪到明天的日期文件夹(没有就建,和这天的放一起)。
-        手选的文件夹(名字不是日期)不挪,明天接着从那里发。only_day = 只挪这个日期文件夹里的(打开页面时自动挪用)。返回挪了几条。"""
+        手选的是号的总文件夹(没有日期)的,挪进它里面明天的日期文件夹;别的手选文件夹不挪。only_day = 只挪这个日期文件夹里的(打开页面时自动挪用)。返回挪了几条。"""
         tmr = plan.tomorrow_folder()
         n = 0
+        # 用户 2026-10-27:「既然今天的发完了,赶紧搞到明天的文件夹去呗,在这里占着多难看」——
+        # 手选的是号的总文件夹(视频直接放在里面、没有日期文件夹,DNF 那种)也挪:挪进 号文件夹\<明天>(明天页面自动认得出)
+        acc_dirs = {os.path.normcase(os.path.normpath(x)) for x in
+                    apisrc.account_folder_list(self.roots(), self.known()).get(nick, [])}
         for i, v in enumerate(self.videos):
             if v.account != nick or self.state.get(i, "").startswith("已发") or self.rec.status_of(v.path) or not os.path.isfile(v.path):
                 continue
             d = os.path.dirname(v.path)
             dk = apisrc.date_key(os.path.basename(d))
-            if not dk or (only_day and dk != only_day) or os.path.basename(d) == tmr:
+            if not dk and os.path.normcase(os.path.normpath(d)) in acc_dirs:
+                dst = os.path.join(d, tmr)                # 号的总文件夹:明天的放进它里面的日期文件夹
+            elif not dk or (only_day and dk != only_day) or os.path.basename(d) == tmr:
                 continue
-            dst = os.path.join(os.path.dirname(d), tmr)
+            else:
+                dst = os.path.join(os.path.dirname(d), tmr)
             try:
                 stem = os.path.splitext(os.path.basename(v.path))[0].strip()
                 covers = [os.path.join(d, x) for x in os.listdir(d)          # 同名封面:名字前后多个空格也认(2026-10-20 实测有)

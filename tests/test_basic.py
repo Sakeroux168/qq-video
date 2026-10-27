@@ -5372,6 +5372,38 @@ def test_unsure_check(tmp: Path):
         omapi.Client = real
 
 
+def test_spill_picked_root(tmp: Path):
+    print("[发够了:手选的是号的总文件夹(没日期文件夹)的,剩下的也挪进它里面明天的日期文件夹(用户 2026-10-27)]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, plan
+    from qe import folders as F
+    from qe.config import Settings, bj_now
+    from qe.records import Records
+    import gui.api_tab as T
+    n = bj_now()
+    md, tmr = f"{n.month}.{n.day}", plan.tomorrow_folder()
+    root = tmp / "spr" / "游戏视频"
+    acc = root / "地下城与勇士--DNF连招档案馆"
+    acc.mkdir(parents=True)
+    for k in range(3):
+        (acc / f"剩下的{k}.mp4").write_bytes(b"x")
+        (acc / f"剩下的{k}.jpg").write_bytes(b"j")
+    apiacc.save([{"nick": "DNF连招档案馆", "source_name": "DNF", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    rec = Records(tmp / "r_spr.sqlite")
+    rec.api_result(F.Video(path=str(tmp / "spr" / "发过的.mp4"), title="发过的", account="DNF连招档案馆", employee="", date=md), "已发")
+    st = Settings(tmp / "st_spr.json")
+    st["api_roots"] = [str(root)]
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"DNF连招档案馆": 1}}]
+    st["api_picked"] = {md: {"DNF连招档案馆": str(acc)}}
+    tab = T.ApiTab(st, rec, lambda m: None)
+    tab.set_day(md)
+    _wait(app, lambda: not tab.busy() and not list(acc.glob("*.mp4")), 20)
+    got = sorted(x.name for x in (acc / tmr).iterdir()) if (acc / tmr).is_dir() else []
+    check(not list(acc.glob("*.mp4")) and got == sorted([f"剩下的{k}{e}" for k in range(3) for e in (".jpg", ".mp4")]),
+          f"今天发够了:总文件夹里剩下的连封面挪进「{tmr}」(明天页面自己认得出) -> {got}")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -5451,6 +5483,7 @@ if __name__ == "__main__":
     test_audit_verify(tmp)
     test_autocover(tmp)
     test_unsure_check(tmp)
+    test_spill_picked_root(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
