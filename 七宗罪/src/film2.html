@@ -1,0 +1,677 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/400.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/600.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/700.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/900.css">
+<style>html,body{margin:0;background:#000}canvas{display:block}</style>
+<script src="common.js"></script></head><body><canvas id="c"></canvas><script>
+// 七宗罪·嫉妒 v3 —— 纯音乐 + 字幕，锚词「隔壁」，画风照《知识诅咒》
+// 画面完全由 t 决定（window.draw(t)）。时间轴卡 BGM：小节 = 17.455 + k × 2.1688
+const D1 = 17.455, D2 = 95.532, BAR = 2.1688, END = 110.7;
+const B = (k) => D1 + k * BAR;
+const C = {
+  bg: '#1c1b1d', bgTop: '#121114', floorA: '#221812', floorB: '#2c2119',
+  cream: '#fffeb8', creamHead: '#fdf4a8', gray: '#8e8578',
+  sub: '#fcefda', hi: '#f2ec9a', red: '#ef5a48', gold: '#fbe7a3', goldDeep: '#b8924a',
+  paper: '#f7e6ca', ink: '#2a2420', stamp: '#c8402f',
+};
+const HORIZON = 757;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const ease = (x) => { x = clamp(x); return x * x * (3 - 2 * x); };
+const easeOut = (x) => 1 - Math.pow(1 - clamp(x), 3);
+const backOut = (x) => { x = clamp(x); const c = 1.6; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+const lerp = (a, b, k) => a + (b - a) * k;
+const win = (t, a, b, f = 0.35) => ease((t - a) / f) * (1 - ease((t - (b - f)) / f)); // a..b 之间显示，两头淡入淡出
+const steps = (t, list) => { let v = list[0][1]; for (let i = 1; i < list.length; i++) { const [t0, v1, d] = list[i]; v = lerp(v, v1, ease((t - t0) / (d || 0.5))); } return v; };
+let ctx, bokeh = [], motes = [], grains = [];
+
+// ───────── 背景 ─────────
+function background(t, floorK) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, C.bgTop); g.addColorStop(0.55, C.bg); g.addColorStop(1, C.bg);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (const b of bokeh) {
+    const x = b.x + Math.sin(t * b.sp + b.ph) * 40 + t * b.dx, y = b.y + Math.cos(t * b.sp * 0.8 + b.ph) * 25;
+    const rg = ctx.createRadialGradient(x, y, b.r * 0.55, x, y, b.r);
+    rg.addColorStop(0, `rgba(${b.c},${b.a})`); rg.addColorStop(0.8, `rgba(${b.c},${b.a * 0.85})`); rg.addColorStop(1, `rgba(${b.c},0)`);
+    ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(x, y, b.r, 0, 7); ctx.fill();
+  }
+  for (const m of motes) {
+    const y = (m.y - t * m.v + 4000) % H;
+    ctx.fillStyle = `rgba(255,240,210,${m.a * (0.6 + 0.4 * Math.sin(t * 2 + m.ph))})`;
+    ctx.fillRect(m.x + Math.sin(t * 0.5 + m.ph) * 8, y, m.s, m.s);
+  }
+  if (floorK > 0) {
+    ctx.save(); ctx.globalAlpha = floorK;
+    const f = ctx.createLinearGradient(0, HORIZON, 0, H);
+    f.addColorStop(0, C.floorA); f.addColorStop(1, C.floorB);
+    ctx.fillStyle = f; ctx.fillRect(0, HORIZON, W, H - HORIZON);
+    const glow = ctx.createLinearGradient(0, HORIZON - 30, 0, HORIZON + 30);
+    glow.addColorStop(0, 'rgba(255,200,130,0)'); glow.addColorStop(0.5, 'rgba(255,200,130,0.10)'); glow.addColorStop(1, 'rgba(255,200,130,0)');
+    ctx.fillStyle = glow; ctx.fillRect(0, HORIZON - 30, W, 60);
+    ctx.fillStyle = 'rgba(230,190,140,0.28)'; ctx.fillRect(0, HORIZON, W, 1.5);
+    ctx.restore();
+  }
+}
+
+// ───────── 字幕：逐字打出；[黄] {红} ─────────
+function parseRich(s) {
+  const out = []; let mode = 'n';
+  for (const ch of s) {
+    if (ch === '[') { mode = 'h'; continue; } if (ch === ']') { mode = 'n'; continue; }
+    if (ch === '{') { mode = 'r'; continue; } if (ch === '}') { mode = 'n'; continue; }
+    out.push([ch, mode]);
+  }
+  return out;
+}
+function subtitle(text, since, instant, alpha) {
+  const chars = parseRich(text), cps = 14;
+  ctx.font = '700 48px "Noto Serif SC"';
+  const widths = chars.map(([ch]) => ctx.measureText(ch).width);
+  let x = W / 2 - widths.reduce((a, b) => a + b, 0) / 2;
+  ctx.save(); ctx.textAlign = 'left'; ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 14;
+  chars.forEach(([ch, m], i) => {
+    const k = instant ? 1 : clamp((since - i / cps) / 0.08);
+    if (k > 0) {
+      ctx.globalAlpha = alpha * k;
+      ctx.fillStyle = m === 'h' ? C.hi : m === 'r' ? C.red : C.sub;
+      ctx.fillText(ch, x, 992 + (1 - k) * 6);
+    }
+    x += widths[i];
+  });
+  ctx.restore();
+}
+
+// ───────── 版式元件 ─────────
+function infoBox(big, small, a, bigColor) {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.fillStyle = 'rgba(22,24,30,0.55)'; ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(42, 38, 380, 112, 6); ctx.fill(); ctx.stroke();
+  const g = ctx.createLinearGradient(0, 55, 0, 112); g.addColorStop(0, C.gold); g.addColorStop(1, C.goldDeep);
+  ctx.fillStyle = bigColor || g; ctx.font = '600 56px "Noto Serif SC"'; ctx.textAlign = 'left'; ctx.fillText(big, 64, 106);
+  ctx.fillStyle = 'rgba(200,190,175,0.6)'; ctx.font = '400 20px "Noto Serif SC"'; ctx.fillText(small, 66, 136);
+  ctx.restore();
+}
+function citation(a, line1, line2) {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(200,190,175,0.5)'; ctx.font = '400 21px "Noto Serif SC"'; ctx.fillText(line1, 1800, 64);
+  ctx.fillStyle = C.gold; ctx.font = '700 26px "Noto Serif SC"'; ctx.fillText(line2, 1800, 98);
+  ctx.fillStyle = C.stamp; ctx.fillRect(1818, 52, 44, 44);
+  ctx.fillStyle = '#fbe9d8'; ctx.font = '700 26px "Noto Serif SC"'; ctx.textAlign = 'center'; ctx.fillText('证', 1840, 84);
+  ctx.restore();
+}
+function cornerTag(a) {
+  ctx.save(); ctx.globalAlpha = a * 0.55; ctx.textAlign = 'left';
+  ctx.fillStyle = C.gold; ctx.font = '600 22px "Noto Serif SC"'; ctx.fillText('七宗罪 · 嫉妒', 46, 1048);
+  ctx.restore();
+}
+function paperCard(cx, cy, w, h, rot, a, s, drawInside) {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(cx, cy); ctx.rotate(rot); ctx.scale(s, s); ctx.translate(-w / 2, -h / 2);
+  ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 14;
+  ctx.fillStyle = C.paper; ctx.fillRect(0, 0, w, h); ctx.shadowColor = 'transparent';
+  const v = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.2, w / 2, h / 2, Math.max(w, h) * 0.75);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(120,80,40,0.22)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#d65b4a'; ctx.fillRect(0, 0, w, 7);
+  drawInside(w, h);
+  ctx.restore();
+}
+function stampBox(cx, cy, text, k, size) {
+  if (k <= 0) return;
+  const s = lerp(1.8, 1, backOut(k)); size = size || 1;
+  ctx.save(); ctx.globalAlpha *= clamp(k * 3); ctx.translate(cx, cy); ctx.rotate(-0.08); ctx.scale(s * size, s * size);
+  ctx.strokeStyle = C.stamp; ctx.lineWidth = 4; ctx.strokeRect(-62, -32, 124, 64);
+  ctx.fillStyle = C.stamp; ctx.font = '700 36px "Noto Serif SC"'; ctx.textAlign = 'center'; ctx.fillText(text, 0, 13);
+  ctx.restore();
+}
+function goldLabel(cx, cy, text, a, glowK, size) {
+  if (a <= 0) return;
+  size = size || 36;
+  ctx.save(); ctx.globalAlpha = a; ctx.font = `700 ${size}px "Noto Serif SC"`;
+  const w = ctx.measureText(text).width + size * 1.8, h = size * 2;
+  if (glowK > 0) { ctx.shadowColor = `rgba(255,220,140,${0.7 * glowK})`; ctx.shadowBlur = 36 * glowK; }
+  ctx.fillStyle = 'rgba(26,22,18,0.88)'; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  ctx.shadowColor = 'transparent';
+  ctx.strokeStyle = `rgba(232,196,120,${0.55 + 0.45 * (glowK || 0)})`; ctx.lineWidth = 2; ctx.strokeRect(cx - w / 2, cy - h / 2, w, h);
+  ctx.fillStyle = C.gold; ctx.textAlign = 'center'; ctx.fillText(text, cx, cy + size * 0.36);
+  ctx.restore();
+}
+function grayBubble(x, y, name, text, k, dim) { // 别人发来的消息
+  if (k <= 0) return;
+  ctx.save(); ctx.globalAlpha = clamp(k * 2) * (dim ?? 1);
+  const dy = (1 - easeOut(k)) * 24;
+  ctx.font = '600 32px "Noto Serif SC"'; const w = ctx.measureText(text).width + 56;
+  ctx.fillStyle = 'rgba(58,58,64,0.92)'; ctx.beginPath(); ctx.roundRect(x, y + dy, w, 64, 12); ctx.fill();
+  ctx.fillStyle = '#efe8dc'; ctx.textAlign = 'left'; ctx.fillText(text, x + 28, y + dy + 43);
+  ctx.fillStyle = 'rgba(200,190,175,0.7)'; ctx.font = '400 22px "Noto Serif SC"'; ctx.fillText(name, x + 4, y + dy - 10);
+  ctx.restore();
+}
+function goldBubble(x, y, text, k) { // 你发出的消息
+  if (k <= 0) return;
+  ctx.save(); ctx.globalAlpha = clamp(k * 2);
+  ctx.font = '600 32px "Noto Serif SC"'; const w = ctx.measureText(text).width + 56;
+  ctx.fillStyle = '#d8b46a'; ctx.beginPath(); ctx.roundRect(x - w, y, w, 64, 12); ctx.fill();
+  ctx.fillStyle = '#2a2015'; ctx.textAlign = 'left'; ctx.fillText(text, x - w + 28, y + 43);
+  ctx.restore();
+}
+
+// ───────── 角色 ─────────
+function figure(x, footY, active, a, scale, lit, rot, crown) {
+  if (a <= 0) return;
+  scale = scale || 1; lit = lit ?? 1;
+  const shade = (hex) => { const n = parseInt(hex.slice(1), 16), c = [n >> 16, (n >> 8) & 255, n & 255];
+    return `rgb(${c.map((v, i) => Math.round(lerp([40, 38, 38][i], v, lit))).join(',')})`; };
+  const w = 64 * scale, h = 112 * scale, r = 29 * scale;
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, footY); ctx.rotate(rot || 0);
+  if (active) { ctx.shadowColor = `rgba(255,225,140,${0.75 * lit})`; ctx.shadowBlur = 40 * lit; }
+  ctx.fillStyle = shade(active ? C.cream : C.gray);
+  ctx.beginPath(); ctx.moveTo(-w, 0); ctx.bezierCurveTo(-w, -h * 0.95, w, -h * 0.95, w, 0); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = shade(active ? C.creamHead : C.gray);
+  ctx.beginPath(); ctx.arc(0, -h - r * 0.55, r, 0, 7); ctx.fill();
+  ctx.shadowColor = 'transparent';
+  if (crown) {
+    const cy = -h - r * 1.5;
+    ctx.fillStyle = shade('#e0b85a'); ctx.beginPath();
+    ctx.moveTo(-r, cy); ctx.lineTo(-r, cy - r * 0.9); ctx.lineTo(-r * 0.5, cy - r * 0.45); ctx.lineTo(0, cy - r * 1.1);
+    ctx.lineTo(r * 0.5, cy - r * 0.45); ctx.lineTo(r, cy - r * 0.9); ctx.lineTo(r, cy); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function nameTag(x, text, a, warm) {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
+  ctx.fillStyle = warm ? 'rgba(240,225,190,0.9)' : 'rgba(190,180,165,0.7)'; ctx.font = '400 26px "Noto Serif SC"';
+  ctx.fillText(text, x, HORIZON + 48); ctx.restore();
+}
+function car(x, ground, s, a, head) { // 朝左的越野车剪影，车灯是第一秒的视觉落点
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, ground); ctx.scale(s, s);
+  ctx.fillStyle = '#121014';
+  ctx.beginPath();
+  ctx.moveTo(268, -34); ctx.lineTo(262, -150); ctx.quadraticCurveTo(258, -186, 220, -190);
+  ctx.lineTo(-40, -192); ctx.quadraticCurveTo(-70, -190, -110, -140); ctx.lineTo(-150, -122);
+  ctx.lineTo(-250, -112); ctx.quadraticCurveTo(-272, -108, -272, -80); ctx.lineTo(-268, -34); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(232,196,140,0.45)'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(262, -150); ctx.quadraticCurveTo(258, -186, 220, -190); ctx.lineTo(-40, -192);
+  ctx.quadraticCurveTo(-70, -190, -110, -140); ctx.lineTo(-150, -122); ctx.lineTo(-250, -112); ctx.stroke();
+  ctx.fillStyle = 'rgba(70,72,84,0.55)';
+  ctx.beginPath(); ctx.moveTo(-96, -142); ctx.lineTo(-56, -178); ctx.lineTo(70, -178); ctx.lineTo(70, -142); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(86, -142); ctx.lineTo(86, -178); ctx.lineTo(210, -178); ctx.quadraticCurveTo(236, -176, 238, -142); ctx.closePath(); ctx.fill();
+  for (const wx of [-165, 165]) {
+    ctx.fillStyle = '#0a090b'; ctx.beginPath(); ctx.arc(wx, -46, 48, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(200,170,120,0.35)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(wx, -46, 26, 0, 7); ctx.stroke();
+  }
+  ctx.restore();
+  if (head > 0) { // 车灯 + 光束 + 横向光晕
+    const hx = x - 258 * s, hy = ground - 96 * s;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = a;
+    const beam = ctx.createLinearGradient(hx, 0, hx - 700, 0);
+    beam.addColorStop(0, `rgba(255,236,200,${0.22 * head})`); beam.addColorStop(1, 'rgba(255,236,200,0)');
+    ctx.fillStyle = beam; ctx.beginPath(); ctx.moveTo(hx, hy - 10); ctx.lineTo(hx - 700, hy - 90); ctx.lineTo(hx - 700, ground + 40); ctx.lineTo(hx, hy + 14); ctx.closePath(); ctx.fill();
+    const g = ctx.createRadialGradient(hx, hy, 2, hx, hy, 90 * head);
+    g.addColorStop(0, `rgba(255,250,235,${0.95 * head})`); g.addColorStop(0.25, `rgba(255,225,160,${0.5 * head})`); g.addColorStop(1, 'rgba(255,200,120,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(hx, hy, 90 * head, 0, 7); ctx.fill();
+    const fl = ctx.createLinearGradient(hx - 260, 0, hx + 260, 0);
+    fl.addColorStop(0, 'rgba(255,220,160,0)'); fl.addColorStop(0.5, `rgba(255,230,180,${0.45 * head})`); fl.addColorStop(1, 'rgba(255,220,160,0)');
+    ctx.fillStyle = fl; ctx.fillRect(hx - 260, hy - 2, 520, 4);
+    ctx.restore();
+  }
+}
+function prop(kind, x, y, s, a, warm) { // 陶罐 / 锤子 / 破碗（带钱）
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.scale(s, s);
+  ctx.strokeStyle = warm ? '#e9c787' : '#8e8578'; ctx.fillStyle = warm ? 'rgba(233,199,135,0.18)' : 'rgba(142,133,120,0.12)'; ctx.lineWidth = 3;
+  if (kind === 'pot') {
+    ctx.beginPath(); ctx.moveTo(-14, -48); ctx.lineTo(14, -48); ctx.quadraticCurveTo(10, -38, 26, -26);
+    ctx.quadraticCurveTo(40, -8, 18, 0); ctx.lineTo(-18, 0); ctx.quadraticCurveTo(-40, -8, -26, -26); ctx.quadraticCurveTo(-10, -38, -14, -48); ctx.closePath(); ctx.fill(); ctx.stroke();
+  } else if (kind === 'hammer') {
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -56); ctx.stroke();
+    ctx.beginPath(); ctx.rect(-24, -68, 48, 16); ctx.fill(); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.moveTo(-34, -24); ctx.quadraticCurveTo(0, 14, 34, -24); ctx.closePath(); ctx.fill(); ctx.stroke();
+    if (kind === 'bowlRich') { ctx.fillStyle = '#ffd774'; for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.ellipse(-15 + i * 10, -26 - (i % 2) * 6, 7, 3, 0, 0, 7); ctx.fill(); } }
+  }
+  ctx.restore();
+}
+
+// ───────── 两次大爆点：锚词「隔壁」 ─────────
+function anchorWord(t, d, sub, a) {
+  const u = t - d; if (u < 0 || a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a;
+  const cy = 430;
+  for (let k = 0; k < 2; k++) { // 光环向外扩散
+    const p = clamp((u - k * 0.25) / 1.4); if (p <= 0 || p >= 1) continue;
+    ctx.strokeStyle = `rgba(255,220,150,${0.7 * (1 - p)})`; ctx.lineWidth = 3 + 6 * (1 - p);
+    ctx.beginPath(); ctx.arc(W / 2, cy - 40, 120 + p * 1000, 0, 7); ctx.stroke();
+  }
+  const r = rng(91);
+  for (let i = 0; i < 120; i++) { // 金粉
+    const ang = r() * 6.283, sp = 200 + r() * 700, p = clamp(u / 1.6);
+    const x = W / 2 + Math.cos(ang) * sp * easeOut(p), y = cy - 40 + Math.sin(ang) * sp * 0.55 * easeOut(p);
+    ctx.fillStyle = `rgba(255,225,150,${(1 - p) * (0.4 + 0.6 * r())})`; ctx.fillRect(x, y, 2 + r() * 2, 2 + r() * 2);
+  }
+  const s = lerp(1.25, 1, easeOut(u / 0.18)) * (1 + 0.012 * Math.sin(u * 2));
+  ctx.translate(W / 2, cy); ctx.scale(s, s); ctx.textAlign = 'center';
+  const g = ctx.createLinearGradient(0, -230, 0, 40); g.addColorStop(0, '#fff6d6'); g.addColorStop(0.5, C.gold); g.addColorStop(1, C.goldDeep);
+  ctx.shadowColor = 'rgba(255,210,120,0.55)'; ctx.shadowBlur = 50;
+  ctx.fillStyle = g; ctx.font = '900 300px "Noto Serif SC"'; ctx.fillText('隔壁', 0, 0);
+  ctx.shadowColor = 'transparent';
+  const sa = ease((u - 0.45) / 0.4);
+  ctx.globalAlpha = a * sa; ctx.fillStyle = 'rgba(240,225,195,0.85)'; ctx.font = '600 34px "Noto Serif SC"';
+  ctx.fillText(sub, 0, 92);
+  ctx.strokeStyle = 'rgba(232,200,140,0.5)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-180, 130); ctx.lineTo(-12, 130); ctx.moveTo(12, 130); ctx.lineTo(180, 130); ctx.stroke();
+  ctx.fillStyle = C.gold; ctx.save(); ctx.translate(0, 130); ctx.rotate(Math.PI / 4); ctx.fillRect(-5, -5, 10, 10); ctx.restore();
+  ctx.restore();
+}
+
+// ───────── 场景（v3.1）─────────
+// A 0–17.455：朋友圈三连弹 → 首富没感觉 → 前任（倒地）→ 恭喜 → 兄弟开路虎 → 不嫉妒最强的 → 只嫉妒——
+function sceneA(t, a) {
+  if (a <= 0) return;
+  const push = 1 + 0.03 * clamp(t / 17);
+  ctx.save(); ctx.translate(W / 2, HORIZON); ctx.scale(push, push); ctx.translate(-W / 2, -HORIZON);
+  const lit = steps(t, [[0, 0.95], [0.05, 0.78, 0.25], [0.6, 0.6, 0.25], [1.15, 0.45, 0.25], [B(-6) + 1.0, 0.3, 0.3], [B(-5), 0.4, 0.5], [B(-3), 0.3, 0.3]]);
+  const fall = easeOut((t - (B(-6) + 1.0)) / 0.35) * (1 - easeOut((t - B(-5)) / 0.5)) * 1.45;
+  const head = t < 1.1 ? 0 : 0.85 + 0.15 * Math.sin(t * 3) + 0.6 * Math.exp(-(t - 1.1) * 5) + (t > B(-3) ? 0.5 * Math.exp(-(t - B(-3)) * 5) : 0);
+  // 首富：远处巨大模糊的金色剪影 + 名牌
+  const tyc = win(t, B(-7), B(-6) + 0.2, 0.4);
+  if (tyc > 0) {
+    ctx.save(); ctx.filter = 'blur(5px)'; figure(300, HORIZON, true, 0.4 * tyc * a, 3.0, 0.9); ctx.restore();
+    goldLabel(300, 210, '首富 · 身家 +100 亿', tyc * a, 0.3, 30);
+  }
+  // 13.1 起：远处的首富、明星，你都不看
+  const far = win(t, B(-2), B(-1) + 0.6, 0.4);
+  if (far > 0) {
+    [['首富', 230], ['明星', 1730]].forEach(([n, x]) => {
+      ctx.save(); ctx.filter = 'blur(3px)'; figure(x, HORIZON - 40, true, 0.35 * far * a, 1.6, 0.8); ctx.restore();
+      ctx.save(); ctx.globalAlpha = far * a * 0.8; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(232,210,170,0.8)'; ctx.font = '600 26px "Noto Serif SC"';
+      ctx.fillText(n, x, HORIZON - 360); ctx.restore();
+    });
+  }
+  car(1330, HORIZON, 1, a * ease((t - 1.0) / 0.3 + 0.0001), head);
+  const broLit = t > B(-1) ? lerp(0.9, 1, ease((t - B(-1)) / 0.5)) : 0.9;
+  figure(960, HORIZON, false, a, 1, broLit);
+  nameTag(960, '兄弟', a);
+  figure(700, HORIZON, true, a, 1, lit, -fall);
+  nameTag(700, '你', a * (1 - clamp(fall)), true);
+  ctx.restore();
+  // 三连消息（第一帧就弹出来），之后变暗、淡出
+  const old = 1 - 0.6 * ease((t - B(-6)) / 0.4);
+  const gone = 1 - ease((t - B(-4)) / 0.5);
+  grayBubble(380, 250, '同桌', '我上岸了', (t + 0.25) / 0.3, old * gone);
+  grayBubble(600, 350, '闺蜜', '我订婚啦', (t - 0.55) / 0.3, old * gone);
+  grayBubble(820, 450, '兄弟', '提车了，路虎', (t - 1.1) / 0.3, old * gone);
+  grayBubble(1240, 250, '前任', '最近过得挺好', (t - (B(-6) + 0.15)) / 0.3, gone);
+}
+// B 19.62–26.1：乞丐只嫉妒隔壁的乞丐；没人嫉妒国王
+function sceneB(t, a) {
+  if (a <= 0) return;
+  const on = ease((t - B(1)) / 0.5), focus = t < B(3) ? 1 : 0.5;
+  [-110, 110].forEach((dx, j) => {
+    figure(860 + dx, HORIZON, j === 0, a * on, 0.95, focus * (j === 0 ? 0.9 : 0.75));
+    prop(j === 1 ? 'bowlRich' : 'bowl', 860 + dx + (j ? -58 : 58), HORIZON - 8, 1.1, a * on * focus, j === 0);
+  });
+  nameTag(750, '乞丐', a * on * focus); nameTag(970, '隔壁的乞丐', a * on * focus);
+  const glare = win(t, B(2), B(3) + 0.2, 0.3); // 「隔壁」：两人之间一道红线
+  if (glare > 0) {
+    ctx.save(); ctx.globalAlpha = a * glare; ctx.strokeStyle = 'rgba(239,90,72,0.85)'; ctx.lineWidth = 3; ctx.setLineDash([8, 8]);
+    ctx.beginPath(); ctx.moveTo(780, 560); ctx.quadraticCurveTo(860, 500, 940, 560); ctx.stroke(); ctx.restore();
+  }
+  const kOn = ease((t - B(3)) / 0.5) * a;
+  if (kOn > 0) {
+    ctx.save(); ctx.globalAlpha = kOn; ctx.fillStyle = '#2a2420'; ctx.fillRect(1480, HORIZON - 160, 170, 160);
+    ctx.strokeStyle = 'rgba(232,196,140,0.35)'; ctx.strokeRect(1480, HORIZON - 160, 170, 160); ctx.restore();
+    figure(1565, HORIZON - 160, true, kOn, 0.9, 0.9, 0, true);
+    ctx.save(); ctx.globalAlpha = kOn; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(240,225,190,0.9)'; ctx.font = '400 26px "Noto Serif SC"'; ctx.fillText('国王', 1565, HORIZON + 48); ctx.restore();
+  }
+}
+// D 26.1–37.0 大脑：疼 / 爽
+function brainPath(cx, cy, s) {
+  ctx.beginPath();
+  ctx.moveTo(cx - 270 * s, cy + 40 * s);
+  ctx.bezierCurveTo(cx - 310 * s, cy - 120 * s, cx - 170 * s, cy - 230 * s, cx - 10 * s, cy - 220 * s);
+  ctx.bezierCurveTo(cx + 170 * s, cy - 215 * s, cx + 300 * s, cy - 120 * s, cx + 285 * s, cy + 20 * s);
+  ctx.bezierCurveTo(cx + 280 * s, cy + 95 * s, cx + 210 * s, cy + 130 * s, cx + 120 * s, cy + 120 * s);
+  ctx.bezierCurveTo(cx + 40 * s, cy + 150 * s, cx - 60 * s, cy + 145 * s, cx - 120 * s, cy + 120 * s);
+  ctx.bezierCurveTo(cx - 200 * s, cy + 125 * s, cx - 262 * s, cy + 95 * s, cx - 270 * s, cy + 40 * s);
+  ctx.closePath();
+}
+function sceneD(t, a) {
+  if (a <= 0) return;
+  const cx = 1060, cy = 470, draw = easeOut((t - (B(4) - 0.3)) / 1.0);
+  ctx.save(); ctx.globalAlpha = a;
+  brainPath(cx, cy, draw); ctx.fillStyle = 'rgba(40,34,30,0.55)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(232,196,140,0.75)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.save(); brainPath(cx, cy, draw); ctx.clip();
+  ctx.strokeStyle = 'rgba(232,196,140,0.22)'; ctx.lineWidth = 2;
+  for (let i = 0; i < 7; i++) {
+    ctx.beginPath();
+    for (let x = -300; x <= 300; x += 10) { const y = -170 + i * 48 + Math.sin(x / 38 + i * 1.7) * 14; x === -300 ? ctx.moveTo(cx + x * draw, cy + y * draw) : ctx.lineTo(cx + x * draw, cy + y * draw); }
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(232,196,140,0.5)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.ellipse(cx + 190 * draw, cy + 140 * draw, 90 * draw, 50 * draw, -0.2, 0, Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + 60 * draw, cy + 140 * draw); ctx.quadraticCurveTo(cx + 70 * draw, cy + 220 * draw, cx + 40 * draw, cy + 270 * draw); ctx.stroke();
+  const pain = win(t, B(6), B(7) + 0.6, 0.3), joy = t >= B(8);
+  if (pain > 0) {
+    const r = 70 + 12 * Math.sin(t * 9);
+    const g = ctx.createRadialGradient(cx - 40, cy - 70, 4, cx - 40, cy - 70, r);
+    g.addColorStop(0, `rgba(255,110,80,${0.95 * pain})`); g.addColorStop(1, 'rgba(255,80,60,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx - 40, cy - 70, r, 0, 7); ctx.fill();
+    ctx.fillStyle = `rgba(255,140,120,${pain})`; ctx.font = '700 30px "Noto Serif SC"'; ctx.textAlign = 'center'; ctx.fillText('疼', cx - 40, cy - 150);
+  }
+  if (joy) {
+    const u = t - B(8), p = clamp(u / 1.2);
+    for (let k = 0; k < 2; k++) { const q = clamp((u - k * 0.2) / 1.0); if (q > 0 && q < 1) { ctx.strokeStyle = `rgba(255,220,150,${0.8 * (1 - q)})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(cx + 20, cy + 30, 30 + q * 420, 0, 7); ctx.stroke(); } }
+    const r = 80 + 10 * Math.sin(t * 6);
+    const g = ctx.createRadialGradient(cx + 20, cy + 30, 4, cx + 20, cy + 30, r);
+    g.addColorStop(0, 'rgba(255,245,200,1)'); g.addColorStop(0.4, 'rgba(255,215,120,0.8)'); g.addColorStop(1, 'rgba(255,200,100,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx + 20, cy + 30, r * (0.6 + 0.4 * easeOut(p * 3)), 0, 7); ctx.fill();
+    ctx.fillStyle = C.gold; ctx.font = '700 32px "Noto Serif SC"'; ctx.textAlign = 'center'; ctx.fillText('爽', cx + 20, cy + 140);
+  }
+  ctx.restore();
+  const fired = t >= B(7);
+  goldLabel(420, 470, fired ? '同龄人：被裁了' : '同龄人：升职了', a * win(t, B(5), B(9) - 0.2, 0.4), fired ? 0 : 0.4, 34);
+}
+// E 37.0–50.0 手机：兄弟的车被刮了
+function sceneE(t, a) {
+  if (a <= 0) return;
+  const open = easeOut((t - (B(9) - 0.2)) / 0.6);
+  const px = 1080, py = 440, pw = 420 * open, ph = 620 * open;
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.fillStyle = 'rgba(16,15,18,0.92)'; ctx.strokeStyle = 'rgba(200,190,175,0.35)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(px - pw / 2, py - ph / 2, pw, ph, 36 * open); ctx.fill(); ctx.stroke();
+  if (open > 0.95) {
+    ctx.fillStyle = 'rgba(200,190,175,0.75)'; ctx.font = '600 26px "Noto Serif SC"'; ctx.textAlign = 'center'; ctx.fillText('兄弟', px, py - ph / 2 + 54);
+    ctx.fillStyle = 'rgba(200,190,175,0.15)'; ctx.fillRect(px - pw / 2 + 20, py - ph / 2 + 74, pw - 40, 1.5);
+  }
+  ctx.restore();
+  if (open > 0.95) {
+    ctx.save(); ctx.globalAlpha = a;
+    grayBubble(px - 190, py - 180, '', '我车被刮了，心疼死', (t - B(9) - 0.1) / 0.3);
+    const typed = '没事吧？'.slice(0, Math.floor(clamp((t - B(10) - 0.2) / 0.6) * 4));
+    if (t > B(10) + 0.85) goldBubble(px + 190, py - 70, '没事吧？', 1);
+    else if (typed) { ctx.fillStyle = 'rgba(216,180,106,0.6)'; ctx.font = '600 30px "Noto Serif SC"'; ctx.textAlign = 'right'; ctx.fillText(typed + '|', px + 170, py + 270); }
+    ctx.restore();
+    ctx.save(); ctx.globalAlpha = a; stampBox(px + 110, py + 140, '坏人？', (t - B(13) - 0.5) / 0.25, 1.1); ctx.restore();
+  }
+  const lit = steps(t, [[0, 0.45], [B(11), 0.9, 0.5], [B(13), 0.35, 0.5]]);
+  const shrink = steps(t, [[0, 1], [B(13), 0.75, 0.5], [B(14), 0.9, 0.6]]);
+  figure(560, HORIZON, true, a, shrink, lit);
+  nameTag(560, '你', a, true);
+  if (t < B(9) + 0.4) { // 金光点变成通知点
+    const k = 1 - ease((t - (B(9) - 0.2)) / 0.5);
+    const g = ctx.createRadialGradient(px, py, 2, px, py, 60 * k + 1);
+    g.addColorStop(0, `rgba(255,240,190,${k * a})`); g.addColorStop(1, 'rgba(255,210,120,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, 60 * k + 1, 0, 7); ctx.fill();
+  }
+}
+// C 50.0–54.3 嫉妒的地图（缩短）
+function sceneC(t, a) {
+  if (a <= 0) return;
+  const cx = 960, cy = 470, grow = easeOut((t - B(15)) / 0.9);
+  const radii = [130, 245, 360, 470].map((r) => r * grow);
+  ctx.save(); ctx.globalAlpha = a;
+  radii.forEach((r, i) => { ctx.strokeStyle = `rgba(232,196,140,${i === 0 ? 0.55 : 0.28})`; ctx.lineWidth = i === 0 ? 2 : 1.2; ctx.setLineDash(i === 3 ? [6, 8] : []); ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke(); });
+  ctx.setLineDash([]);
+  const pulse = t > B(16) ? 0.5 + 0.5 * Math.cos(((t - B(16)) / (BAR / 8)) * Math.PI * 2) : 0;
+  const heat = ease((t - B(16)) / 0.4) * (0.75 + 0.25 * pulse);
+  [['兄弟', -0.35], ['同桌', 2.2], ['闺蜜', 1.2], ['前任', 4.0]].forEach(([n, ang]) => {
+    const x = cx + Math.cos(ang) * radii[0], y = cy + Math.sin(ang) * radii[0];
+    const g = ctx.createRadialGradient(x, y, 2, x, y, 34);
+    g.addColorStop(0, `rgba(255,${lerp(220, 110, heat) | 0},${lerp(170, 80, heat) | 0},0.95)`); g.addColorStop(1, 'rgba(255,90,60,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 34, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(245,230,205,0.9)'; ctx.font = '600 26px "Noto Serif SC"'; ctx.textAlign = 'center'; ctx.fillText(n, x, y - 34);
+  });
+  [['首富', 0.5], ['明星', 2.7], ['国王', 3.9]].forEach(([n, ang]) => {
+    const x = cx + Math.cos(ang) * radii[3], y = cy + Math.sin(ang) * radii[3];
+    ctx.fillStyle = 'rgba(142,133,120,0.5)'; ctx.beginPath(); ctx.arc(x, y, 14, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(190,180,165,0.6)'; ctx.font = '400 24px "Noto Serif SC"'; ctx.textAlign = 'center'; ctx.fillText(n, x, y - 24);
+  });
+  const g = ctx.createRadialGradient(cx, cy, 4, cx, cy, 60); g.addColorStop(0, 'rgba(255,254,200,1)'); g.addColorStop(0.45, 'rgba(255,240,170,0.9)'); g.addColorStop(1, 'rgba(255,225,140,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, 60, 0, 7); ctx.fill();
+  ctx.fillStyle = '#2a2015'; ctx.font = '700 30px "Noto Serif SC"'; ctx.fillText('你', cx, cy + 10);
+  ctx.restore();
+}
+// F 54.3–67.3 鸟会飞 / 同桌多考 20 分 / 我也想要
+function sceneF(t, a) {
+  if (a <= 0) return;
+  const bird = clamp((t - B(17)) / 3.2);
+  if (bird > 0 && bird < 1) {
+    const bx = lerp(1700, 200, bird), by = 300 - Math.sin(bird * Math.PI) * 60, f = Math.sin(t * 14) * 22;
+    ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = C.gold; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(bx - 60, by - f); ctx.quadraticCurveTo(bx - 24, by - 12, bx, by); ctx.quadraticCurveTo(bx + 24, by - 12, bx + 60, by - f); ctx.stroke(); ctx.restore();
+  }
+  const mate = ease((t - B(18)) / 0.4);
+  const lit = steps(t, [[0, 1], [B(18) + 0.4, 0.45, 0.5], [B(22), 1, 0.6]]);
+  figure(760, HORIZON, true, a, 1, lit);
+  nameTag(760, '你', a, true);
+  figure(1180, HORIZON, false, a * mate, 1, 0.9);
+  nameTag(1180, '同桌', a * mate);
+  goldLabel(1180, 470, '多考 20 分', a * mate, 0.3, 32);
+  const arc = easeOut((t - B(20)) / 1.0);
+  if (arc > 0) {
+    ctx.save(); ctx.globalAlpha = a * (1 - ease((t - B(22)) / 0.5)); ctx.strokeStyle = 'rgba(255,215,140,0.85)'; ctx.lineWidth = 3; ctx.setLineDash([10, 10]);
+    ctx.beginPath(); const n = 40;
+    for (let i = 0; i <= n * arc; i++) { const p = i / n, x = lerp(800, 1100, p), y = lerp(560, 470, p) - Math.sin(p * Math.PI) * 140; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke(); ctx.restore();
+  }
+  goldLabel(760, 470, '“我也想要。”', a * ease((t - B(22)) / 0.4), 0.8, 40);
+}
+// H 67.3–76.0 朋友圈：一千个隔壁
+const POSTS = ['升职了', '去冰岛了', '买房了', '订婚了', '年终奖到了', '孩子考第一', '提车了', '瘦了二十斤', '上岸了', '辞职创业', '加薪了', '求婚成功', '去海边了', '拿到 offer', '新家装好了', '马拉松完赛'];
+function sceneH(t, a) {
+  if (a <= 0) return;
+  const many = t >= B(24);
+  const lit = steps(t, [[0, 0.8], [B(24) + 0.3, 0.45, 0.8], [B(26), 0.3, 0.6]]);
+  const sc = steps(t, [[0, 1], [B(26), 0.85, 0.6]]);
+  figure(960, HORIZON, true, a, sc, lit); nameTag(960, '你', a, true);
+  const one = 1 - ease((t - B(24)) / 0.4);
+  figure(1200, HORIZON, false, a * ease((t - B(23)) / 0.4) * one, 1, 0.9);
+  nameTag(1200, '隔壁', a * ease((t - B(23)) / 0.4) * one);
+  if (many) {
+    const r = rng(33);
+    for (let i = 0; i < 40; i++) {
+      const x = 120 + r() * 1680, y = 120 + r() * 520, t0 = B(24) + r() * 1.6;
+      const k = ease((t - t0) / 0.3), text = POSTS[i % POSTS.length];
+      if (k <= 0 || Math.abs(x - 960) < 170 && y > 480) continue;
+      const best = t > B(25) ? 0.5 + 0.5 * Math.sin(t * 4 + i) : 0;
+      ctx.save(); ctx.globalAlpha = a * k * 0.92; ctx.font = '600 24px "Noto Serif SC"';
+      const w = ctx.measureText(text).width + 40;
+      ctx.fillStyle = 'rgba(46,44,50,0.92)'; ctx.beginPath(); ctx.roundRect(x - w / 2, y - 22, w, 44, 10); ctx.fill();
+      ctx.strokeStyle = `rgba(255,215,140,${0.15 + 0.6 * best})`; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = '#efe8dc'; ctx.textAlign = 'center'; ctx.fillText(text, x, y + 8); ctx.restore();
+    }
+  }
+}
+// G 76.0–110.7 只剩一束光 → 第二次重拍 → 路 → 提问
+function sceneG(t, a) {
+  if (a <= 0) return;
+  const spot = ease((t - B(27)) / 1.2) * (1 - ease((t - D2) / 0.2));
+  if (spot > 0) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createLinearGradient(0, 0, 0, HORIZON + 40);
+    g.addColorStop(0, 'rgba(255,236,200,0.01)'); g.addColorStop(1, `rgba(255,236,200,${0.13 * spot * a})`);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(710, 0); ctx.lineTo(810, 0); ctx.lineTo(980, HORIZON + 40); ctx.lineTo(540, HORIZON + 40); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  const after = t >= D2;
+  const pathK = after ? easeOut((t - D2) / 0.9) : 0;
+  if (pathK > 0) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = a;
+    const x2 = lerp(760, 1160, pathK);
+    const g = ctx.createLinearGradient(0, HORIZON - 14, 0, HORIZON + 14);
+    g.addColorStop(0, 'rgba(255,210,130,0)'); g.addColorStop(0.5, 'rgba(255,225,150,0.9)'); g.addColorStop(1, 'rgba(255,210,130,0)');
+    ctx.fillStyle = g; ctx.fillRect(760, HORIZON - 14, x2 - 760, 28);
+    const pool = ctx.createRadialGradient(960, HORIZON + 20, 10, 960, HORIZON + 20, 520);
+    pool.addColorStop(0, `rgba(255,210,130,${0.25 * pathK})`); pool.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = pool; ctx.fillRect(400, HORIZON - 300, 1120, 400);
+    ctx.restore();
+  }
+  const youLit = after ? lerp(0.35, 1, easeOut((t - D2) / 0.6)) : steps(t, [[0, 1], [B(28), 0.6, 1.0], [B(31), 0.35, 0.6]]);
+  const youScale = after ? lerp(0.82, 1, easeOut((t - D2) / 0.6)) : steps(t, [[0, 1], [B(31), 0.82, 0.8]]);
+  const friendLit = after ? 0.9 : steps(t, [[0, 0.12], [B(33), 0.45, 0.8]]);
+  figure(760, HORIZON, true, a, youScale, youLit);
+  nameTag(760, '你', a, true);
+  figure(1160, HORIZON, false, a, 1, friendLit);
+  nameTag(1160, '最好的朋友', a * (after ? 1 : friendLit + 0.2));
+  const q = ease((t - B(39)) / 0.5) * (1 - ease((t - B(41)) / 0.4));
+  if (q > 0) {
+    ctx.save(); ctx.globalAlpha = a * q;
+    ctx.fillStyle = 'rgba(26,22,18,0.9)'; ctx.fillRect(560, 180, 800, 290);
+    ctx.strokeStyle = 'rgba(232,196,120,0.8)'; ctx.lineWidth = 2; ctx.strokeRect(560, 180, 800, 290);
+    ctx.textAlign = 'center'; ctx.fillStyle = C.sub; ctx.font = '700 50px "Noto Serif SC"';
+    ctx.fillText('你最怕谁过得比你好？', 960, 285);
+    ctx.globalAlpha = a * q * ease((t - B(40)) / 0.3); ctx.fillStyle = C.gold; ctx.font = '700 38px "Noto Serif SC"';
+    ctx.fillText('同桌、闺蜜、兄弟，还是前任？', 960, 360);
+    ctx.fillStyle = 'rgba(220,205,180,0.7)'; ctx.font = '400 26px "Noto Serif SC"'; ctx.fillText('评论区说说', 960, 428);
+    ctx.restore();
+  }
+}
+function endCard(t, a) {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
+  ctx.translate(W / 2, 430);
+  for (let i = 0; i < 64; i++) {
+    const ang = (i / 64) * Math.PI * 2 + t * 0.03;
+    ctx.strokeStyle = `rgba(232,200,140,${0.04 + 0.04 * Math.sin(i * 2.3)})`; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(Math.cos(ang) * 60, Math.sin(ang) * 60); ctx.lineTo(Math.cos(ang) * 1400, Math.sin(ang) * 1400); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(210,190,150,0.6)'; ctx.font = '400 22px "Noto Serif SC"';
+  ctx.fillText('E N V Y   ·   T H E   S E V E N   D E A D L Y   S I N S', 0, -120);
+  const g = ctx.createLinearGradient(0, -90, 0, 40); g.addColorStop(0, '#fff3c8'); g.addColorStop(0.5, C.gold); g.addColorStop(1, C.goldDeep);
+  ctx.fillStyle = g; ctx.font = '900 140px "Noto Serif SC"'; ctx.shadowColor = 'rgba(255,210,120,0.35)'; ctx.shadowBlur = 30;
+  ctx.fillText('嫉  妒', 0, 30); ctx.shadowColor = 'transparent';
+  ctx.fillStyle = 'rgba(230,215,190,0.85)'; ctx.font = '400 30px "Noto Serif SC"';
+  ctx.fillText('你嫉妒的人，住在你隔壁；你想要的路，你也走得到。', 0, 110);
+  ctx.fillStyle = 'rgba(190,180,165,0.55)'; ctx.font = '400 20px "Noto Serif SC"';
+  ctx.fillText('参考：赫西俄德《工作与时日》；Takahashi, H. et al. (2009). When Your Gain Is My Pain and Your Pain Is My Gain. Science 323: 937–939', 0, 170);
+  ctx.restore();
+}
+
+// ───────── 字幕表（卡小节线） ─────────
+const SUBS = [
+  [0, '朋友过得好，你为什么{一夜没睡}？', true],
+  [B(-7), '首富多赚一百亿，你没感觉。'],
+  [B(-6), '可前任……{过得挺好}。'],
+  [B(-5), '你嘴上说恭喜，'],
+  [B(-4), '心里，像被扎了一下。'],
+  [B(-3), '既怕兄弟过得苦，又怕兄弟开{路虎}。'],
+  [B(-2), '你不嫉妒首富，也不嫉妒明星，'],
+  [B(-1), '你只嫉妒——'],
+  [D1, ''],
+  [B(1), '两千多年前，就有人写过：'],
+  [B(2), '乞丐，只嫉妒[隔壁]的乞丐。'],
+  [B(3), '没人嫉妒国王。'],
+  [B(4), '后来，科学家扫描了大脑：'],
+  [B(5), '看到比自己强的同龄人，'],
+  [B(6), '跟{“疼”}有关的区域，亮了。'],
+  [B(7), '等这个人倒了霉——'],
+  [B(8), '跟[“爽”]有关的区域，也亮了。'],
+  [B(9), '兄弟的车，被刮了。'],
+  [B(10), '你回：“没事吧？”'],
+  [B(11), '心里……'],
+  [B(12), '实验里，越嫉妒的人，这时越爽。'],
+  [B(13), '你是不是觉得，自己挺坏的？'],
+  [B(14), '先别急着骂自己。'],
+  [B(15), '嫉妒，有一张地图——'],
+  [B(16), '越像你、离你越近，越扎心。'],
+  [B(17), '你不会嫉妒鸟会飞，'],
+  [B(18), '只会嫉妒同桌多考了二十分。'],
+  [B(19), '因为在你心里，'],
+  [B(20), '那二十分，你本来也[够得着]。'],
+  [B(21), '嫉妒，是一句没说出口的话——'],
+  [B(22), '[“我也想要。”]'],
+  [B(23), '以前，你只看得见一个[隔壁]。'],
+  [B(24), '现在，朋友圈里有一千个[隔壁]。'],
+  [B(25), '每一个，都只晒最好的那一天。'],
+  [B(26), '你拿自己的每一天，去比——'],
+  [B(26) + 1.1, '你拿自己的每一天，去比{别人最好的那天}。'],
+  [B(27), ''],
+  [B(28), '可嫉妒最好的朋友，'],
+  [B(29), '好像是件丢人的事。'],
+  [B(30), '嘴上恭喜，心里发酸，'],
+  [B(31), '夜里一个人，又{讨厌自己}。'],
+  [B(32), '可你想过没有——'],
+  [B(33), '那个让你眼红的人，'],
+  [B(34), '为什么偏偏在你[隔壁]？'],
+  [B(35), '因为他走的那条路——'],
+  [D2, ''],
+  [B(37), '隔壁的人，不是你的敌人，'],
+  [B(38), '是你看得见、也[够得着]的路。'],
+  [B(39), ''],
+  [B(41), ''],
+];
+
+window.draw = function (t) {
+  const floorK = 1 - win(t, B(4) - 0.4, B(9) + 0.1, 0.5) - win(t, B(15) - 0.2, B(17) + 0.1, 0.4);
+  background(t, clamp(floorK));
+  sceneA(t, t < D1 ? 1 : 0);
+  sceneB(t, win(t, B(1) - 0.1, B(4) + 0.2, 0.4));
+  sceneD(t, win(t, B(4) - 0.3, B(9) + 0.1, 0.4));
+  sceneE(t, win(t, B(9) - 0.2, B(15) + 0.1, 0.4));
+  sceneC(t, win(t, B(15) - 0.1, B(17) + 0.1, 0.35));
+  sceneF(t, win(t, B(17) - 0.1, B(23) + 0.2, 0.4));
+  sceneH(t, win(t, B(23) - 0.1, B(27) + 0.3, 0.5));
+  sceneG(t, win(t, B(27), B(41) + 0.4, 0.6));
+  endCard(t, ease((t - B(41)) / 0.8) * (1 - ease((t - (END - 1.2)) / 1.1)));
+  infoBox('两千多年前', '古希腊 · 赫西俄德', win(t, B(1) + 0.2, B(4) + 0.1, 0.4));
+  citation(win(t, B(1) + 0.4, B(4) + 0.1, 0.4), 'Hesiod, Works and Days', '《工作与时日》');
+  infoBox('2009', '日本 · 脑扫描实验', win(t, B(4), B(9), 0.4));
+  citation(win(t, B(4) + 0.3, B(9), 0.4), 'Takahashi et al. (2009). Science', '《你的收获，是我的痛》');
+  citation(win(t, B(12), B(13) + 0.2, 0.3), 'Takahashi et al. (2009). Science', '嫉妒越强，幸灾乐祸越强');
+  // 重拍前「换气」：只压暗一半，人和字幕都看得见；重拍那一帧闪亮
+  for (const d of [D1, D2]) {
+    if (t > d - 1.05 && t < d) { ctx.fillStyle = `rgba(6,5,7,${0.5 * ease((t - (d - 1.05)) / 0.85)})`; ctx.fillRect(0, 0, W, H); }
+    if (t >= d && t < d + 1.0) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = `rgba(255,220,160,${0.2 * Math.exp(-(t - d) * 8)})`; ctx.fillRect(0, 0, W, H); ctx.restore(); }
+  }
+  anchorWord(t, D1, '社会比较 · Social Comparison', 1 - ease((t - (B(1) - 0.35)) / 0.35));
+  if (t >= D1 && t < B(1)) {
+    const k = ease((t - D1 - 0.3) / 0.5);
+    figure(900, HORIZON, true, k, 0.7, 1); figure(1020, HORIZON, false, k, 0.7, 0.9);
+    nameTag(900, '你', k, true); nameTag(1020, '隔壁', k);
+  }
+  anchorWord(t, D2, '你也走得到的地方', 1 - ease((t - (B(37) - 0.3)) / 0.4));
+  cornerTag(t < END - 1.5 ? 1 : 0);
+  let cur = null;
+  for (const s of SUBS) if (t >= s[0]) cur = s;
+  if (cur && cur[1]) {
+    const next = SUBS.find((s) => s[0] > cur[0]);
+    const cont = next && next[1].startsWith(cur[1].replace(/——$/, ''));
+    const out = next && !cont ? 1 - ease((t - (next[0] - 0.12)) / 0.12) : 1;
+    subtitle(cur[1], t - cur[0], cur[2], out);
+  }
+  vignette(ctx, 0.45);
+  ctx.save(); ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.35;
+  ctx.drawImage(grains[Math.floor(t * 30) % grains.length], 0, 0, W, H); ctx.restore();
+  if (t > END - 0.8) { ctx.fillStyle = `rgba(0,0,0,${ease((t - (END - 0.8)) / 0.8)})`; ctx.fillRect(0, 0, W, H); }
+};
+
+(async () => {
+  const all = SUBS.map((s) => s[1]).join('') + '朋友过得好你为什么一夜没睡首富·身家+100亿明星我上岸了我订婚啦提车了，路虎最近过得挺好隔壁的乞丐Hesiod, Works and Days两千多年前古希腊赫西俄德最好的朋友你最怕谁过得比你好？同桌、闺蜜、兄弟，还是前任？升职了去冰岛了买房了订婚了年终奖到了孩子考第一瘦了二十斤上岸了辞职创业加薪了求婚成功去海边了拿到offer新家装好了马拉松完赛七宗罪嫉妒你兄弟同桌闺蜜前任首富身家+100亿考上编了我订婚啦最近过得挺好《工作与时日》Works and Days作者赫西俄德时间约公元前700年地点古希腊陶工木匠乞丐国王明星2700年前古希腊2009日本脑扫描实验Takahashi et al. (2009). Science《你的收获，是我的痛》疼爽同龄人：升职了被裁了我车被刮了，心疼死没事吧？|坏人？嫉妒越强，幸灾乐祸越强多考20分“我也想要。”你更怕兄弟过得苦，还是更怕兄弟开路虎？评论区说说E N V Y·THE SEVEN DEADLY SINS嫉妒你嫉妒的人，住在你隔壁；你想要的路，你也走得到。参考：赫西俄德《工作与时日》；Takahashi, H. et al. (2009). When Your Gain Is My Pain and Your Pain Is My Gain. Science 323: 937–939隔壁社会比较 · Social Comparison你也走得到的地方';
+  await Promise.all(['400 30px "Noto Serif SC"', '600 30px "Noto Serif SC"', '700 30px "Noto Serif SC"', '900 30px "Noto Serif SC"']
+    .map((f) => document.fonts.load(f, all)));
+  await document.fonts.ready;
+  ctx = setup();
+  const r = rng(19);
+  const pal = [['214,150,70', 0.22], ['214,150,70', 0.18], ['230,170,90', 0.14], ['70,90,150', 0.16], ['150,60,60', 0.12]];
+  for (let i = 0; i < 24; i++) {
+    const [c, a] = pal[Math.floor(r() * pal.length)];
+    bokeh.push({ x: r() * W, y: r() * H * 0.95, r: 30 + r() * 80, c, a: a * (0.3 + r() * 0.4), sp: 0.1 + r() * 0.2, ph: r() * 6, dx: (r() - 0.5) * 6 });
+  }
+  for (let i = 0; i < 220; i++) motes.push({ x: r() * W, y: r() * H, v: 4 + r() * 10, a: 0.1 + r() * 0.35, s: 1 + r() * 1.6, ph: r() * 6 });
+  for (let g = 0; g < 4; g++) {
+    const c = document.createElement('canvas'); c.width = W / 2; c.height = H / 2;
+    const gx = c.getContext('2d'), img = gx.createImageData(W / 2, H / 2), rr = rng(100 + g);
+    for (let i = 0; i < img.data.length; i += 4) { const v = 128 + (rr() - 0.5) * 70; img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255; }
+    gx.putImageData(img, 0, 0); grains.push(c);
+  }
+  draw(0);
+  window.done = true;
+})();
+</script></body></html>
