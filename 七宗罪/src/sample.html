@@ -1,0 +1,265 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/900.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/600.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-sans-sc/400.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-sans-sc/500.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-sans-sc/900.css">
+<link rel="stylesheet" href="node_modules/@fontsource/ma-shan-zheng/400.css">
+<link rel="stylesheet" href="node_modules/@fontsource/bebas-neue/400.css">
+<style>html,body{margin:0;background:#000}canvas{display:block}</style>
+<script src="common.js"></script></head><body><canvas id="c"></canvas><script>
+// 七宗罪·嫉妒 15 秒样片：0–10.5s 剧场（讲故事），10.5s 起纸面批注（讲数据）
+// 画面完全由 t 决定：window.draw(t)
+const T_CUT = 10.5;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const ease = (x) => { x = clamp(x); return x * x * (3 - 2 * x); };
+const easeOut = (x) => 1 - Math.pow(1 - clamp(x), 3);
+const backOut = (x) => { x = clamp(x); const c = 1.7; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+const lerp = (a, b, k) => a + (b - a) * k;
+const mix3 = (a, b, k) => a.map((v, i) => lerp(v, b[i], k));
+const WARM = [255, 236, 200], GREEN = [125, 255, 178];
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+
+let ctx, grains = [], dust = [];
+
+function subtitle(text, hiWord, color, y, font, alpha) {
+  ctx.save(); ctx.globalAlpha = alpha;
+  const parts = hiWord && text.includes(hiWord)
+    ? [[text.slice(0, text.indexOf(hiWord)), color], [hiWord, rgba(GREEN, 1)], [text.slice(text.indexOf(hiWord) + hiWord.length), color]]
+    : [[text, color]];
+  richLine(ctx, parts, W / 2, y, font); ctx.restore();
+}
+function pick(list, t) { // [[start, end, text, hi]] → 当前那条 + 淡入
+  for (const s of list) if (t >= s[0] && t < s[1]) return { text: s[2], hi: s[3], a: s[0] === 0 ? 1 : ease((t - s[0]) / 0.15) };
+  return null;
+}
+
+// ───────────── 剧场 ─────────────
+const U = 13;
+function stage(t) {
+  const r = rng(3);
+  ctx.save();
+  const push = 1 + 0.035 * t / T_CUT;
+  ctx.translate(W / 2, 600); ctx.scale(push, push); ctx.translate(-W / 2, -600);
+
+  ctx.fillStyle = '#0a0709'; ctx.fillRect(-100, -100, W + 200, H + 200);
+  for (let x = -60; x < W + 60; x += 6) {
+    const f = 0.5 + 0.5 * Math.sin(x / 38 + Math.sin(x / 210) * 2.2);
+    ctx.fillStyle = `rgba(70,18,26,${0.10 + f * 0.22})`; ctx.fillRect(x, -60, 6, 840);
+  }
+  const top = ctx.createLinearGradient(0, 0, 0, 780);
+  top.addColorStop(0, 'rgba(0,0,0,0.85)'); top.addColorStop(0.6, 'rgba(0,0,0,0.35)'); top.addColorStop(1, 'rgba(0,0,0,0.7)');
+  ctx.fillStyle = top; ctx.fillRect(-100, -60, W + 200, 840);
+  const FY = 780;
+  const fl = ctx.createLinearGradient(0, FY, 0, H);
+  fl.addColorStop(0, '#120c09'); fl.addColorStop(1, '#241710');
+  ctx.fillStyle = fl; ctx.fillRect(-100, FY, W + 200, H - FY + 100);
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 2;
+  for (let i = -30; i <= 30; i++) { ctx.beginPath(); ctx.moveTo(W / 2 + i * 60, FY); ctx.lineTo(W / 2 + i * 190, H + 60); ctx.stroke(); }
+
+  // 灯：开场「啪」一下更亮；讲 A 时 B 暗下去，讲 B 时 A 暗下去
+  const pop = (t0) => (t < t0 ? 0.7 : 1 + 0.45 * Math.exp(-(t - t0) * 7));
+  const focusA = t < 6.5 ? 1 : lerp(1, 0.38, ease((t - 6.5) / 0.5));
+  const focusB = t < 2.6 ? 1 : t < 6.3 ? lerp(1, 0.38, ease((t - 2.6) / 0.5)) : lerp(0.38, 1, ease((t - 6.3) / 0.5));
+  const envy = ease((t - 8.9) / 1.0); // 别人超过你那一刻，B 的光变绿
+
+  const worlds = [
+    { cx: 600, label: 'A', you: 5, other: 2.5, tint: WARM, k: pop(0.12) * focusA,
+      pYou: ease((t - 2.8) / 1.1), pOther: ease((t - 3.6) / 1.0) },
+    { cx: 1320, label: 'B', you: 10, other: 20, tint: mix3(WARM, GREEN, envy), k: pop(0.42) * focusB,
+      pYou: ease((t - 6.8) / 1.2), pOther: ease((t - 7.6) / 1.7) },
+  ];
+
+  for (const w of worlds) {
+    const c = w.tint, k = w.k;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const beam = ctx.createLinearGradient(0, 0, 0, FY + 60);
+    beam.addColorStop(0, rgba(c, 0.02 * k)); beam.addColorStop(1, rgba(c, 0.16 * k));
+    ctx.fillStyle = beam;
+    ctx.beginPath(); ctx.moveTo(w.cx - 60, -60); ctx.lineTo(w.cx + 60, -60);
+    ctx.lineTo(w.cx + 330, FY + 70); ctx.lineTo(w.cx - 330, FY + 70); ctx.closePath(); ctx.fill();
+    for (const d of dust) { // 灰尘慢慢往下飘
+      const yy = (d.y + t * d.v) % (FY + 40), half = 60 + (270 * yy) / FY;
+      const xx = w.cx + d.x * half * 0.9 + Math.sin(t * 0.7 + d.ph) * 6;
+      ctx.fillStyle = rgba(c, (0.15 + d.a * 0.45) * k);
+      ctx.beginPath(); ctx.arc(xx, yy, d.s, 0, 7); ctx.fill();
+    }
+    const pool = ctx.createRadialGradient(w.cx, FY + 80, 10, w.cx, FY + 80, 360);
+    pool.addColorStop(0, rgba(c, 0.55 * k)); pool.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = pool;
+    ctx.translate(w.cx, FY + 80); ctx.scale(1, 0.22); ctx.translate(-w.cx, -(FY + 80));
+    ctx.beginPath(); ctx.arc(w.cx, FY + 80, 360, 0, 7); ctx.fill();
+    ctx.restore();
+
+    const people = [
+      { x: w.cx - 115, v: w.you, p: w.pYou, name: '你', you: true },
+      { x: w.cx + 115, v: w.other, p: w.pOther, name: '别人平均', you: false },
+    ];
+    for (const p of people) {
+      const ph = p.v * U * p.p, base = FY + 70, topY = base - ph;
+      if (ph > 0.5) {
+        const g = ctx.createLinearGradient(p.x - 70, 0, p.x + 70, 0);
+        g.addColorStop(0, '#1b1512'); g.addColorStop(0.45, rgba(c.map((v) => v * 0.42 * Math.min(1, k)), 1)); g.addColorStop(1, '#16110e');
+        ctx.fillStyle = g; ctx.fillRect(p.x - 70, topY, 140, ph);
+        ctx.fillStyle = rgba(c, 0.55 * k); ctx.fillRect(p.x - 70, topY, 140, 3);
+      }
+      const shown = p.p >= 1 ? p.v : Math.round(p.v * p.p * 10) / 10;
+      ctx.font = '600 30px "Noto Serif SC"'; ctx.textAlign = 'center';
+      ctx.fillStyle = rgba(c, (p.p > 0 ? 0.9 : 0.35) * Math.min(1, k));
+      ctx.fillText(p.p > 0 ? `${shown}万` : '?', p.x, base + 46);
+      ctx.font = '400 24px "Noto Sans SC"'; ctx.fillStyle = `rgba(230,220,205,${0.55 * Math.min(1, k)})`;
+      ctx.fillText(p.name, p.x, base + 80);
+      // 剪影；B 里的「你」轮廓光跟着变绿
+      const rim = p.you && w.label === 'B' ? mix3(c, GREEN, envy) : c;
+      ctx.save(); ctx.shadowColor = rgba(rim, 0.8 * Math.min(1, k)); ctx.shadowBlur = 18 + (p.you && w.label === 'B' ? envy * 14 : 0);
+      ctx.fillStyle = '#050405';
+      ctx.beginPath(); ctx.arc(p.x, topY - 128, 26, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(p.x - 48, topY); ctx.quadraticCurveTo(p.x - 46, topY - 88, p.x, topY - 94);
+      ctx.quadraticCurveTo(p.x + 46, topY - 88, p.x + 48, topY); ctx.closePath(); ctx.fill();
+      ctx.restore();
+      ctx.strokeStyle = rgba(rim, 0.9 * Math.min(1, k)); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, topY - 128, 27, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+    }
+    // 吊牌落下来
+    const drop = -36 * (1 - backOut((t - (w.label === 'A' ? 0.05 : 0.3)) / 0.55));
+    ctx.strokeStyle = `rgba(200,180,150,${0.35 * Math.min(1, k)})`; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(w.cx - 40, 230); ctx.lineTo(w.cx - 40, 300 + drop); ctx.moveTo(w.cx + 40, 230); ctx.lineTo(w.cx + 40, 300 + drop); ctx.stroke();
+    ctx.fillStyle = 'rgba(14,10,10,0.9)'; ctx.fillRect(w.cx - 58, 300 + drop, 116, 84);
+    ctx.strokeStyle = rgba(c, 0.7 * Math.min(1, k)); ctx.strokeRect(w.cx - 58, 300 + drop, 116, 84);
+    ctx.font = '900 58px "Noto Serif SC"'; ctx.textAlign = 'center';
+    ctx.fillStyle = rgba(c, Math.min(1, 0.4 + 0.6 * k)); ctx.fillText(w.label, w.cx, 362 + drop);
+  }
+  ctx.restore();
+
+  // 标题（不跟镜头推）
+  ctx.textAlign = 'center';
+  ctx.font = '400 26px "Noto Sans SC"'; ctx.fillStyle = 'rgba(220,205,185,0.6)';
+  ctx.fillText('七  宗  罪   ·   嫉  妒', W / 2, 96);
+  ctx.save(); ctx.shadowColor = rgba(GREEN, 0.35 + 0.3 * envy); ctx.shadowBlur = 30;
+  ctx.font = '900 92px "Noto Serif SC"'; ctx.fillStyle = '#efe6d6';
+  ctx.fillText('两个世界，你选哪个？', W / 2, 205); ctx.restore();
+
+  const s = pick([
+    [0, 2.7, '给你两个世界，只能选一个。'],
+    [2.7, 6.5, 'A：你年薪 5 万，别人平均 2.5 万。'],
+    [6.5, 8.7, 'B：你年薪 10 万，别人平均 20 万。'],
+    [8.7, 99, '东西一样贵。你选哪个？'],
+  ], t);
+  if (s) subtitle(s.text, s.hi, '#efe6d6', 1036, '600 46px "Noto Serif SC"', s.a);
+  vignette(ctx, 0.75);
+}
+
+// ───────────── 纸面批注 ─────────────
+const INK = '#141414', PAPER = '#f1ece2';
+let paper; // 纸纹只画一次
+function makePaper() {
+  paper = document.createElement('canvas'); paper.width = W; paper.height = H;
+  const p = paper.getContext('2d'), r = rng(5);
+  p.fillStyle = PAPER; p.fillRect(0, 0, W, H);
+  for (let i = 0; i < 2600; i++) {
+    p.strokeStyle = `rgba(120,100,70,${r() * 0.06})`; p.lineWidth = 1;
+    const x = r() * W, y = r() * H, a = r() * 6.3, l = 4 + r() * 14;
+    p.beginPath(); p.moveTo(x, y); p.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); p.stroke();
+  }
+  p.fillStyle = 'rgba(20,20,20,0.10)';
+  for (let x = 40; x < W; x += 40) for (let y = 40; y < H; y += 40) p.fillRect(x, y, 2, 2);
+}
+function marker(x1, y, x2, w, color, seed) {
+  const rr = rng(seed); ctx.save(); ctx.globalCompositeOperation = 'multiply';
+  for (let k = 0; k < 3; k++) {
+    ctx.strokeStyle = color; ctx.lineWidth = w * (0.92 + rr() * 0.16); ctx.globalAlpha = 0.45;
+    ctx.beginPath(); ctx.moveTo(x1, y + (rr() - 0.5) * 6); ctx.lineTo(x2, y + (rr() - 0.5) * 6); ctx.stroke();
+  }
+  ctx.restore();
+}
+function notes(u) {
+  ctx.save();
+  // 讲到 A 时镜头往 A 那一行推一点
+  const z = 1 + 0.05 * ease((u - 2.4) / 1.6);
+  ctx.translate(1000, 400); ctx.scale(z, z); ctx.translate(-1000, -400);
+  ctx.drawImage(paper, -40, -40, W + 80, H + 80);
+  ctx.fillStyle = INK; ctx.textAlign = 'left';
+  ctx.font = '900 250px "Noto Serif SC"'; ctx.fillText('嫉', 90, 330); ctx.fillText('妒', 90, 600);
+  ctx.font = '400 54px "Bebas Neue"'; ctx.fillText('JEALOUSY', 96, 690);
+  ctx.font = '500 28px "Noto Sans SC"'; ctx.fillStyle = 'rgba(20,20,20,0.65)'; ctx.fillText('七宗罪 · 嫉妒篇', 98, 738);
+  ctx.fillRect(96, 770, 330, 4);
+  ctx.fillStyle = INK; ctx.fillRect(500, 70, 3, 820);
+  ctx.font = '900 84px "Noto Sans SC"'; ctx.fillText('两个世界，你选哪个？', 580, 170);
+
+  const X0 = 850, UN = 40;
+  const rows = [{ y: 330, label: 'A', you: 5, other: 2.5 }, { y: 610, label: 'B', you: 10, other: 20 }];
+  // 荧光笔划过 A 行（字幕说到「选了 A」之前就划好）
+  const hp = easeOut((u - 1.3) / 0.7);
+  if (hp > 0) marker(570, rows[0].y + 66, 570 + 720 * hp, 150, 'rgba(120,235,140,0.75)', 9);
+  rows.forEach((row, i) => {
+    const dim = row.label === 'B' ? lerp(1, 0.35, ease((u - 2.4) / 0.4)) : 1; // 说 A 的时候 B 退后
+    ctx.globalAlpha = dim;
+    ctx.font = '400 180px "Bebas Neue"'; ctx.fillStyle = INK; ctx.fillText(row.label, 590, row.y + 150);
+    [{ n: '你', v: row.you, dy: 0 }, { n: '别人平均', v: row.other, dy: 92 }].forEach((b, j) => {
+      const g = easeOut((u - 0.15 - i * 0.25 - j * 0.12) / 0.6);
+      ctx.font = '500 26px "Noto Sans SC"'; ctx.fillStyle = 'rgba(20,20,20,0.75)'; ctx.textAlign = 'right';
+      ctx.fillText(b.n, X0 - 22, row.y + b.dy + 48); ctx.textAlign = 'left';
+      ctx.fillStyle = b.n === '你' ? INK : 'rgba(20,20,20,0.35)';
+      ctx.fillRect(X0, row.y + b.dy + 8, b.v * UN * g, 56);
+      ctx.globalAlpha = dim * clamp(g * 2 - 1);
+      ctx.font = '900 46px "Noto Sans SC"'; ctx.fillStyle = INK;
+      ctx.fillText(`${b.v}万`, X0 + b.v * UN * g + 20, row.y + b.dy + 54);
+      ctx.globalAlpha = dim;
+    });
+  });
+  ctx.globalAlpha = 1;
+  // 手写批注：跟着字幕「差不多一半的人，选了 A」一起写出来，箭头指着 A
+  const wp = clamp((u - 2.55) / 0.9);
+  if (wp > 0) {
+    ctx.save(); ctx.beginPath(); ctx.rect(1330, rows[0].y - 40, 520 * wp, 160); ctx.clip();
+    ctx.font = '400 60px "Ma Shan Zheng"'; ctx.fillStyle = '#1d7a3a';
+    ctx.fillText('≈ 一半的人选它', 1340, rows[0].y + 66); ctx.restore();
+  }
+  ctx.globalAlpha = clamp((u - 0.6) / 0.4);
+  ctx.font = '400 22px "Noto Sans SC"'; ctx.fillStyle = 'rgba(20,20,20,0.55)'; ctx.textAlign = 'right';
+  ctx.fillText('Solnick & Hemenway（1998）· 哈佛公共卫生学院问卷', 1840, 905);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  ctx.fillStyle = INK; ctx.fillRect(0, 930, W, 150);
+  const s = pick([[0, 2.5, '1995 年，哈佛真的拿这道题问过人——'], [2.5, 99, '差不多一半的人，选了 A。', 'A']], u);
+  if (s) subtitle(s.text, s.hi, PAPER, 1025, '900 54px "Noto Sans SC"', s.a);
+}
+
+window.draw = function (t) {
+  if (t < T_CUT + 0.45) stage(Math.min(t, T_CUT + 0.45));
+  if (t >= T_CUT) {
+    const p = easeOut((t - T_CUT) / 0.45);
+    ctx.save(); ctx.translate(W * (1 - p), 0);
+    ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 60; ctx.shadowOffsetX = -20;
+    ctx.fillStyle = PAPER; ctx.fillRect(0, 0, W, H); ctx.shadowColor = 'transparent';
+    ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+    notes(t - T_CUT);
+    ctx.restore();
+  }
+  // 胶片颗粒：几张预先算好的噪点轮着用
+  ctx.save(); ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = t < T_CUT ? 0.5 : 0.25;
+  ctx.drawImage(grains[Math.floor(t * 30) % grains.length], 0, 0, W, H); ctx.restore();
+};
+
+(async () => {
+  await loadFonts(['900 80px "Noto Serif SC"', '600 40px "Noto Serif SC"', '400 30px "Noto Sans SC"', '500 30px "Noto Sans SC"',
+    '900 80px "Noto Sans SC"', '400 60px "Ma Shan Zheng"', '400 60px "Bebas Neue"']);
+  await document.fonts.load('400 60px "Ma Shan Zheng"', '≈一半的人选它');
+  await document.fonts.load('900 54px "Noto Sans SC"', '1995年哈佛真的拿这道题问过人——');
+  await document.fonts.load('400 22px "Noto Sans SC"', 'Solnick & Hemenway（1998）· 哈佛公共卫生学院问卷');
+  await document.fonts.load('600 46px "Noto Serif SC"', '给你两个世界只能选一个年薪平均东西一样贵');
+  ctx = setup();
+  const r = rng(11);
+  for (let i = 0; i < 160; i++) dust.push({ x: r() * 2 - 1, y: r() * 820, v: 6 + r() * 14, a: r(), s: 0.6 + r() * 1.8, ph: r() * 6 });
+  for (let g = 0; g < 4; g++) {
+    const c = document.createElement('canvas'); c.width = W / 2; c.height = H / 2;
+    const gx = c.getContext('2d'), img = gx.createImageData(W / 2, H / 2), rr = rng(100 + g);
+    for (let i = 0; i < img.data.length; i += 4) { const v = 128 + (rr() - 0.5) * 90; img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255; }
+    gx.putImageData(img, 0, 0); grains.push(c);
+  }
+  makePaper();
+  draw(0);
+  window.done = true;
+})();
+</script></body></html>
