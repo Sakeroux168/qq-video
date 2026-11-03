@@ -3048,7 +3048,9 @@ def test_title_date(tmp: Path):
         "11月2号的比赛回顾": [],
         "11月5日开服预告": [],                    # 写了月份的将来日期:能发(用户后来改的)
         "11月1日上线超详细玩法": ["11月1日"],      # 前天:过期
-        "1月5日新春活动": [],                      # 11 月说 1 月:是明年的
+        "1月5日新春活动": ["1月5日"],              # 11 月说 1 月:是明年的,超过一个月了
+        "12月3日活动": [],                         # 正好一个月:能发
+        "12月4日活动": ["12月4日"],                # 超过一个月:不发
         "5号开服": ["5号"],                        # 只写几号:分不清过去将来,只认今天昨天
         "10.27 版本前瞻": ["10.27"],
         "11.3 新皮肤上线": [],
@@ -3070,10 +3072,10 @@ def test_title_date(tmp: Path):
     v = F.Video(path="x.mp4", title="我的世界27号又开始了", account="CSGO战神君", employee="", date="11.3")
     v.checks = {"tags": []}
     TD.store().set(v.account, v.title, False)
-    check(any("日期过期" in p for p in checks.problems(v)) or TD.bad_dates(v.title) == [],
+    check(any("标题日期不对" in p for p in checks.problems(v)),
           "过期的:列进「要处理」(不用点检查,读进来就有)")
     TD.store().set(v.account, v.title, True)
-    check(not any("日期过期" in p for p in checks.problems(v)), "右键「日期没问题」以后:能发")
+    check(not any("标题日期不对" in p for p in checks.problems(v)), "右键「日期没问题」以后:能发")
     TD.store().set(v.account, v.title, False)
 
 

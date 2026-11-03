@@ -55,8 +55,8 @@ def _ok_days(today=None) -> list:
 
 
 def bad_dates(title: str, today=None) -> list[str]:
-    """标题里过期的日期(原文)。写了月份的(11月25号 / 11.25):今天、昨天、将来的都行,前天以前的不行
-    (用户 2026-11-03 改的:「明确了日期的将来视频就可以要」);只写几号的(27号)分不清是过去还是将来,
+    """标题里过期的日期(原文)。写了月份的(11月25号 / 11.25):今天、昨天、一个月以内的将来都行,前天以前的、
+    一个月以后的不行(用户 2026-11-03 改的:「明确了日期的将来视频就可以要」「将来的日期不能超过一个月」);只写几号的(27号)分不清是过去还是将来,
     只认今天 / 昨天(用户举的例子:3 号那天「27号又开始了」算过期)。"""
     ok = _ok_days(today)
     t, y = ok
@@ -71,10 +71,24 @@ def bad_dates(title: str, today=None) -> list[str]:
         except ValueError:                               # 2月30号这种:不是日期,不管
             continue
         if when < y and (t - when).days > 183:           # 11 月说「1月5日」:是明年的
-            when = date(t.year + 1, mo, d)
-        if when < y:
+            try:
+                when = date(t.year + 1, mo, d)
+            except ValueError:
+                continue
+        if when < y or when > _month_later(t):           # 将来的不能超过一个月(用户 2026-11-03)
             bad.append(txt)
     return bad
+
+
+def _month_later(t: date) -> date:
+    """一个月以后的同一天(11.3 → 12.3;1.31 → 2.28)。"""
+    y, m = (t.year + 1, 1) if t.month == 12 else (t.year, t.month + 1)
+    for d in (t.day, 30, 29, 28):
+        try:
+            return date(y, m, min(t.day, d))
+        except ValueError:
+            continue
+    return t + timedelta(days=30)
 
 
 def _store() -> AdOk:
@@ -98,4 +112,4 @@ def problem(account: str, title: str, today=None) -> str:
     bad = bad_dates(title, today)
     if not bad or store().ok(account, title):
         return ""
-    return f"标题日期过期「{'、'.join(bad[:2])}」(前天以前的不发;不是日期 / 就要发就右键「日期没问题」)"
+    return f"标题日期不对「{'、'.join(bad[:2])}」(前天以前的、一个月以后的不发;不是日期 / 就要发就右键「日期没问题」)"

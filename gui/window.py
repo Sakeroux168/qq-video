@@ -1108,7 +1108,7 @@ class MainWindow(QMainWindow):
         out = [("没无字封面", [v for v in left if (v.cover_kind or v.cover_why) and not v.cover and not v.skip]),
                ("同名 / 发过 / 坏文件", [v for v in left if v.skip]),
                ("有水印", [v for v in left if not v.skip and wmstore.blocks(v.wm)]),
-               ("标题有广告词 / 日期过期", [v for v in left if not v.skip and self._title_block(v)])]
+               ("标题有广告词 / 日期不对", [v for v in left if not v.skip and self._title_block(v)])]
         return [(k, vs) for k, vs in out if vs]
 
     def _update_scope(self):
@@ -1807,7 +1807,7 @@ class MainWindow(QMainWindow):
         from qe import titleclean
         tad = [v for v in self.videos if not self.rec.status_of(v.path) and not v.skip and self._title_block(v)]
         if tad:
-            tail += (f"\n\n有 {len(tad)} 条标题有广告词 / 日期过期没摆,比如「{tad[0].title[:24]}」;"
+            tail += (f"\n\n有 {len(tad)} 条标题有广告词 / 日期不对没摆,比如「{tad[0].title[:24]}」;"
                      "剪好了 / 日期没问题就右键「…能摆」。")
         if nocover:
             return (f"能摆的都摆完了,但还有 {len(nocover)} 条没有无字封面(png),没摆,比如「{nocover[0].title[:24]}」。\n\n"
