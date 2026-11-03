@@ -64,7 +64,20 @@ def friendly(e) -> tuple[str, str]:
         return "没发成:网断了", "网络有问题 —— 网好了再点「现在发布」,会接着发没发的(发过的不会重发)"
     if "标题" in s and ("长" in s or "字" in s):
         return "没发成:标题不合格", f"平台说标题不行({s})—— 右键「改标题」改短一点再发"
+    # 11-03:X 盘(网络盘)断了,和平精英上分君 13 条全是「OSError: [Errno 22] Invalid argument」—— 读视频文件读不了
+    if isinstance(e, OSError) and not _is_net_error(e):
+        return "没发成:视频读不了(素材盘断了?)", ("读不了视频文件,多半是素材盘(X 盘这种网络盘)断了 —— 在「此电脑」里双击打开素材盘,"
+                                               "能打开了再点「再发一次没发成的」;盘好好的就双击视频看能不能播")
     return "没发成", s
+
+
+def _is_net_error(e) -> bool:
+    """requests 的网络错误也是 OSError,不能当成读不了文件。"""
+    try:
+        import requests
+        return isinstance(e, requests.RequestException)
+    except ImportError:
+        return False
 
 
 class Job(QThread):

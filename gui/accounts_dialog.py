@@ -64,7 +64,8 @@ class AddDialog(QDialog):
         if cat in ("游戏", "动漫"):
             self.lab_folder.setText("游戏名" if cat == "游戏" else "动漫名")
             self.e_folder.setPlaceholderText("比如 CSGO(发完按它分子文件夹)")
-            self.note.setText(f"{cat}号用接口发。素材文件夹照老规矩叫「游戏名--号名」,只有一个横杠「…-号名」的也认。\n"
+            self.note.setText(f"{cat}号用接口发。素材文件夹照老规矩叫「游戏名--号名」,只有一个横杠「…-号名」的也认;\n"
+                              "文件夹里写的名字和号名不一样的,这里直接填完整的文件夹名。\n"
                               "加上以后要扫码取钥匙(用手机登录这个号的企鹅号),取到钥匙才能发。")
         elif cat == "教育":
             self.lab_folder.setText("文件夹缩写")
@@ -113,7 +114,11 @@ class AccountsDialog(QDialog):
         for col, wd in ((1, 104), (3, 96)):               # 下拉框 / 数字框那两列给够宽,「游戏」两个字别被切
             hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
             self.t.setColumnWidth(col, wd)
+        self.t.cellDoubleClicked.connect(self._dbl)
         v.addWidget(self.t, 1)
+        tip = QLabel("双击号名改名字;双击素材文件夹改文件夹。")
+        tip.setObjectName("muted")
+        v.addWidget(tip)
         btns = QHBoxLayout()
         b_add = QPushButton("新增账号…")
         b_add.setObjectName("primary")
@@ -156,6 +161,37 @@ class AccountsDialog(QDialog):
             self.t.setCellWidget(i, 3, sp)
             self.t.setItem(i, 4, QTableWidgetItem(r["folder"]))
             self.t.setItem(i, 5, QTableWidgetItem("" if r["key"] is None else "有" if r["key"] else "没有(要扫码取)"))
+
+    def _dbl(self, row: int, col: int):
+        """双击号名:改名字(用户 2026-11-03:打错了懒得删了重加);双击素材文件夹:改文件夹。"""
+        from PySide6.QtWidgets import QInputDialog
+        it = self.t.item(row, 0)
+        nick = it.data(Qt.ItemDataRole.UserRole) if it else ""
+        if not nick:
+            return
+        r = next((x for x in A.rows(self.st) if x["nick"] == nick), None)
+        if r is None:
+            return
+        try:
+            if col == 0:
+                new, ok = QInputDialog.getText(self, "改号名", "号名(和企鹅号上的一模一样):", text=nick)
+                if ok and new.strip() and new.strip() != nick:
+                    A.rename(self.st, nick, new)
+                    self.changed = True
+            elif col == 4:
+                if r["cat"] == "影视":
+                    d = QFileDialog.getExistingDirectory(self, f"「{nick}」的素材文件夹", r["folder"] or FILM_ROOT)
+                    new, ok = (os.path.normpath(d), True) if d else ("", False)
+                else:
+                    what = {"教育": "日期文件夹下面的缩写(几个用顿号隔开):"}.get(
+                        r["cat"], "游戏名,或者这个号完整的素材文件夹名(号名和文件夹里写的不一样时填文件夹名):")
+                    new, ok = QInputDialog.getText(self, "改素材文件夹", what, text=r["folder"])
+                if ok and new.strip() != r["folder"]:
+                    A.set_folder(self.st, nick, new)
+                    self.changed = True
+        except ValueError as e:
+            QMessageBox.warning(self, "账号管理", str(e))
+        self.fill()
 
     def _nick(self) -> str:
         r = self.t.currentRow()

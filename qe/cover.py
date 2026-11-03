@@ -466,7 +466,7 @@ def crop_rect(img_w: float, img_h: float, ratio: float, plan: dict) -> tuple[flo
         bh, bw = img_h, img_h * ratio
     else:
         bw, bh = img_w, img_w / ratio
-    man = (plan or {}).get("manual", {}).get(rkey(ratio))
+    man = (plan or {}).get("manual", {}).get(rkey(ratio)) or (plan or {}).get("ai", {}).get(rkey(ratio))   # 人拖的 > AI 挪的
     if man:
         tx, ty = man[0] * img_w - bw / 2, man[1] * img_h - bh / 2
     elif plan and "cx" in plan:

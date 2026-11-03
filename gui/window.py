@@ -55,8 +55,9 @@ class CoverWorker(QThread):
 
 
 class AiCoverWorker(QThread):
-    """AI 第二轮看封面(用户 2026-11-03):软件第一轮裁好以后,后台 4 条一起给千问看「主角在不在框里、脸有没有被切」;
-    要调的标黄、写上 AI 说的原因;人看过 / 手动调过框的不看。trust = 「AI 说没问题的直接去黄」(设置里开,前期关着人还要看)。"""
+    """AI 第二轮看封面(用户 2026-11-03):软件第一轮裁好以后,后台 4 条一起给千问看「主体完不完整、有没有字」,
+    不完整的 AI 自己挪框再看一遍(qe.aicover);还不行的 / 有字的标黄、写上原因;人看过 / 手动调过框的不看。
+    trust = 「AI 说没问题的直接去黄」(设置里开;关着时 AI 挪过框的也标黄,前期人还要看)。"""
     one = Signal(int)
 
     def __init__(self, videos, adj, key: str, trust: bool, skip, parent=None, asker=None):
@@ -65,6 +66,7 @@ class AiCoverWorker(QThread):
         self.stop = False
         self.errors: list[str] = []
         self.n_bad = 0
+        self.n_moved = 0
 
     def _todo(self, v) -> bool:
         return bool(v.cover) and not v.skip and not self.skip(v) and not (v.plan or {}).get("manual") \
@@ -84,10 +86,17 @@ class AiCoverWorker(QThread):
                 self.errors.append(str(e))
                 return
             v.ai = res
+            aicover.apply(v, res)
+            moved = "、".join(res.get("moved") or [])
+            if moved:
+                self.n_moved += 1
             if not res["ok"]:
                 v.warn = True
                 self.n_bad += 1
-                v.cover_why = f"AI:{res['why']}"
+                v.cover_why = f"AI:{res['why']}" + (f"(AI 挪过 {moved} 的框)" if moved else "")
+            elif moved:
+                v.warn = not self.trust
+                v.cover_why += f"(AI 挪了 {moved} 的框" + (")" if self.trust else ",看一眼)")
             elif self.trust and v.warn:
                 v.warn = False
                 v.cover_why += "(AI 看过没问题)"
@@ -1026,8 +1035,9 @@ class MainWindow(QMainWindow):
         if w.stop:
             return
         err = f";{len(w.errors)} 条没看成({w.errors[0]})" if w.errors else ""
-        self.say(f"AI 看完封面了:{w.n_bad} 条要调(标黄了,鼠标放在封面那格看原因){err}" if w.n_bad or err
-                 else "AI 看完封面了:都没问题")
+        mv = f";{w.n_moved} 条 AI 自己挪了框" if w.n_moved else ""
+        self.say(f"AI 看完封面了:{w.n_bad} 条还要你调 / 有字(标黄了,鼠标放在封面那格看原因){mv}{err}" if w.n_bad or err
+                 else f"AI 看完封面了:都没问题{mv}")
         self._update_scope()
         self._refresh_buttons()
 

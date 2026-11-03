@@ -114,6 +114,56 @@ def set_cat(st, nick: str, cat: str) -> None:
     st.save()
 
 
+def rename(st, old: str, new: str) -> None:
+    """改号名(用户 2026-11-03:新增时号名打错了,「双击可编辑名称,我懒得删了再重新添加」)。
+    每天规定、分组、罐头号名单、接口账号、有多少发多少、手选的文件夹都跟着改;钥匙不动。
+    以前的发布记录还记在旧名字下面(不改记录库)。出错抛 ValueError。"""
+    new = (new or "").strip()
+    if not new:
+        raise ValueError("号名没填")
+    if new == old:
+        return
+    if any(r["nick"] == new for r in rows(st)) or apiacc.find(new) or new in st.account_names():
+        raise ValueError(f"「{new}」已经有了")
+    p = _plan_copy(st)
+    hit = False
+    for g in p:
+        accs = g.get("accounts") or {}
+        if old in accs:
+            g["accounts"] = {(new if k == old else k): v for k, v in accs.items()}     # 顺序不变
+            hit = True
+    if not hit:
+        raise ValueError(f"没有「{old}」这个号")
+    st["daily_plan"] = p
+    st["accounts"] = [dict(a, name=new) if a.get("name") == old else a for a in st.get("accounts") or []]
+    if old in P.free_list(st):
+        st["quota_free"] = [new if n == old else n for n in P.free_list(st)]
+    picked = st.get("api_picked") or {}
+    if any(old in (v or {}) for v in picked.values()):
+        st["api_picked"] = {d: {(new if k == old else k): f for k, f in (v or {}).items()} for d, v in picked.items()}
+    al = apiacc.load()
+    if any(a.get("nick") == old for a in al):
+        apiacc.save([dict(a, nick=new) if a.get("nick") == old else a for a in al])
+    st.save()
+
+
+def set_folder(st, nick: str, folder: str) -> None:
+    """改素材文件夹那一格:游戏 / 动漫 = 游戏名(或者完整的素材文件夹名);教育 = 缩写;影视 = 号自己的文件夹。"""
+    folder = (folder or "").strip()
+    cat = next((r["cat"] for r in rows(st) if r["nick"] == nick), "")
+    if not cat:
+        raise ValueError(f"没有「{nick}」这个号")
+    if czgt(cat):
+        if cat == "影视" and not folder:
+            raise ValueError("影视号要有素材文件夹")
+        al = [x.strip() for x in folder.replace(",", "、").replace("，", "、").split("、") if x.strip()]
+        st["accounts"] = [(dict(a, dir=folder) if cat == "影视" else dict(a, aliases=al)) if a.get("name") == nick else a
+                          for a in st.get("accounts") or []]
+        st.save()
+    else:
+        apiacc.save([dict(a, source_name=folder) if a.get("nick") == nick else a for a in apiacc.load()])
+
+
 def remove(st, nick: str) -> None:
     """软件里不再管这个号:从每天规定、分组、罐头号名单里去掉;接口号的钥匙也删掉(以后要再加就重新扫码)。
     企鹅号平台上的东西、素材文件夹都不动。"""

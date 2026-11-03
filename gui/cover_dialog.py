@@ -523,6 +523,11 @@ class CoverDialog(QDialog):
         self.adj.reset(v.path)
         v.cover_kind = ""
         C.decide(v)
+        try:
+            from qe import aicover
+            aicover.reapply(v)                      # AI 挪过的框还算(恢复的是「自动」,AI 那轮也是自动的)
+        except Exception:
+            pass
         C.note_wide(v)
         self.show_video()
         self.changed.emit(self.i)

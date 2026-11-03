@@ -893,6 +893,11 @@ def test_ui_r1(tmp: Path):
     check("平台不收" in short and "重新导出" in tip, "40023:说人话 + 下一步")
     short, tip = T.friendly(omapi.ApiError("换 token 失败", "40001", fatal=True))
     check("密钥" in short and "登录取钥匙" in tip, "换 token 失败:说密钥不对 + 去登录取钥匙")
+    short, tip = T.friendly(OSError(22, "Invalid argument", r"X:\2企鹅号视频\游戏视频\a.mp4"))
+    check("素材盘" in short and "双击打开素材盘" in tip, "读不了视频文件(11-03 X 盘断了):说素材盘断了 + 下一步")
+    import requests
+    short, _tip = T.friendly(requests.ConnectionError("连不上"))
+    check("素材盘" not in short, "网络错误(也是 OSError)不当成素材盘断了")
 
     class V:
         title = "A小到底该怎么控 "
@@ -2974,8 +2979,25 @@ def test_accounts_manage(tmp: Path):
     except ValueError:
         dup = True
     check(dup, "同名的号加不了第二个")
-    A.remove(st, "FPS射击游戏馆")
-    check(apiacc.find("FPS射击游戏馆") is None and all("FPS射击游戏馆" not in g["accounts"] for g in P.plan(st)), "去掉号:规定和钥匙都去掉")
+    # 改名(用户 2026-11-03:号名打错了,双击改):文件夹里写的还是老名字 → 素材文件夹填完整文件夹名照样找得到
+    st["api_picked"] = {"11.3": {"FPS射击游戏馆": "x"}}
+    A.rename(st, "FPS射击游戏馆", "FPS游戏射击馆")
+    r = {x["nick"]: x for x in A.rows(st)}
+    check("FPS游戏射击馆" in r and "FPS射击游戏馆" not in r and apiacc.find("FPS游戏射击馆")
+          and st["api_picked"]["11.3"] == {"FPS游戏射击馆": "x"}, "改号名:规定、接口账号、手选的文件夹都跟着改")
+    fl = apisrc.account_folder_list([str(groot)], set(apiacc.nicks()))
+    check("FPS游戏射击馆" not in fl, "号名和文件夹里写的不一样:光按名字找不到")
+    A.set_folder(st, "FPS游戏射击馆", "腾讯系FPS射击游戏-FPS射击游戏馆")
+    fl = apisrc.account_folder_list([str(groot)], set(apiacc.nicks()))
+    check(fl.get("FPS游戏射击馆") == [str(groot / "腾讯系FPS射击游戏-FPS射击游戏馆")], f"素材文件夹填完整文件夹名:找到了 -> {fl}")
+    bad = False
+    try:
+        A.rename(st, "FPS游戏射击馆", "光影叙集")
+    except ValueError:
+        bad = True
+    check(bad, "改成已经有的号名:不行")
+    A.remove(st, "FPS游戏射击馆")
+    check(apiacc.find("FPS游戏射击馆") is None and all("FPS游戏射击馆" not in g["accounts"] for g in P.plan(st)), "去掉号:规定和钥匙都去掉")
     st2 = Settings(tmp / "st_accm.json")
     check(any(a.get("dir") == str(film) for a in st2["accounts"]), "存盘了(重开设置还在)")
     from gui.accounts_dialog import AccountsDialog
@@ -2985,56 +3007,109 @@ def test_accounts_manage(tmp: Path):
 
 
 def test_ai_cover(tmp: Path):
-    print("[AI 第二轮看封面(用户 2026-11-03):一张张描述脸在不在,软件判断;要调的标黄写原因;人看过 / 调过框的不看;记下来不重复问]")
+    print("[AI 第二轮看封面(用户 2026-11-03):判断完不完整 / 有没有字;不完整的、没认出脸的 AI 自己挪框再看;"
+          "还不行的、有字的标黄;人看过 / 调过框的不看;记下来不重复问]")
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
-    from qe import aicover, folders as F
+    import json
+    from qe import aicover, cover as C, folders as F
     import gui.window as W
     img = tmp / "aic" / "a.png"
     _img(img, 1280, 720)
     mk = lambda n, **k: F.Video(path=str(tmp / "aic" / f"{n}.mp4"), title=n, account="家长小天地", employee="张", date="11.3",
                                 cover=str(img), plan={"cx": 0.5, "cy": 0.4}, **k)
-    check(aicover.parse('[{"ratio":"3:4","main":"在","face":"都在"},{"ratio":"9:16","main":"在","face":"都在"}]') == {"ok": True, "why": ""},
-          "都在:没问题")
-    r = aicover.parse('好的:[{"ratio":"3:4","main":"不在","face":"没有人"},{"ratio":"9:16","main":"在","face":"缺了"}]')
-    check(r["ok"] is False and r["why"] == "3:4 主角不在框里;9:16 脸被切了", f"主角不在 / 脸缺了:要调,写清楚哪个比例 -> {r}")
+    r = aicover.parse('好的:[{"ratio":"3:4","whole":"完整","text":"没有"},{"ratio":"9:16","whole":"切掉一部分","text":"有"},'
+                      '{"ratio":"1:1","whole":"不在","text":"没有"}]')
+    check(r == {"3:4": {"whole": "完整", "text": False}, "9:16": {"whole": "切了", "text": True},
+                "1:1": {"whole": "不在", "text": False}}, f"判断那回读得出来:完整 / 切了 / 不在、有没有字 -> {r}")
     bad = False
     try:
         aicover.parse("看不懂")
     except ValueError:
         bad = True
     check(bad, "AI 回的读不出来:报错,不当成没问题")
+    check(aicover.parse_box('{"what":"一口锅","box":[600,200,900,800]}') == (0.6, 0.2, 0.9, 0.8), "主体的框读得出来(0~1000 → 几成)")
+    cx, cy = aicover.aim(1280, 720, 9 / 16, (0.6, 0.2, 0.9, 0.8))
+    x, y, w, h = C.crop_rect(1280, 720, 9 / 16, {"ai": {C.rkey(9 / 16): [cx, cy]}})
+    check(abs((x + w / 2) / 1280 - 0.75) < 0.01, f"AI 挪的框:9:16 对准主体中间 -> {cx}")
+    x2 = C.crop_rect(1280, 720, 9 / 16, {"ai": {C.rkey(9 / 16): [cx, cy]}, "manual": {C.rkey(9 / 16): [0.2, 0.5]}})[0]
+    check(abs((x2 + w / 2) / 1280 - 0.2) < 0.01, "人拖过的框比 AI 挪的优先")
+    _cx, cy2 = aicover.aim(1280, 1280, 2.35, (0.3, 0.1, 0.7, 0.3))
+    _x, y3, _w, h3 = C.crop_rect(1280, 1280, 2.35, {"ai": {C.rkey(2.35): [_cx, cy2]}})
+    check(y3 / 1280 < 0.2 and (y3 + h3 * C.TITLE_SAFE) / 1280 > 0.3, "2.35:1:主体放在框上面那块(下面是标题区)")
     imgs = aicover.sheet(mk("x"))
     check([t for t, _b in imgs] == ["原图", "3:4", "9:16", "2.35:1", "1:1"] and all(b[:2] == b"\xff\xd8" for _t, b in imgs),
           "给 AI 的:原图 + 4 个比例,一张一张的 JPEG")
-    calls = []
-    img2 = tmp / "aic" / "b.png"                  # 「要调」那条用另一张图(同一张图 + 同一个框 = 同一个结果)
-    _img(img2, 1000, 720)
+    check([t for t, _b in aicover.sheet(mk("x"), ["9:16"])] == ["原图", "9:16"], "挪过框再看:只给挪过的那几个比例")
 
-    def fake(imgs):
+    calls = []
+    sizes = {"要挪": 1000, "有字": 1100, "脸切了": 1200, "挪了也不行": 900}      # 原图缩到 360 高,按宽认是哪条
+    for n, w in sizes.items():
+        _img(tmp / "aic" / f"{n}.png", w, 720)
+
+    def fake(imgs, prompt):
         import io
         from PIL import Image
-        calls.append(len(imgs))
-        w = Image.open(io.BytesIO(imgs[0][1])).width
-        return '[{"ratio":"3:4","main":"在","face":"缺了"}]' if w == 500 else '[{"ratio":"3:4","main":"在","face":"都在"}]'
+        im = Image.open(io.BytesIO(imgs[0][1]))
+        who = next((n for n, w in sizes.items() if abs(im.width * 720 / im.height - w) < 3), "")
+        tags = [t for t, _b in imgs[1:]]
+        calls.append((who, "找" if prompt == aicover.LOCATE else "看", tags))
+        if prompt == aicover.LOCATE:
+            return '{"what":"一口锅","box":[600,200,900,800]}'
+        again = len(tags) < 4
+        out = []
+        for t in tags:
+            whole, text = "完整", "没有"
+            if who == "要挪" and t == "3:4" and not again:
+                whole = "切掉一部分"
+            if who == "挪了也不行" and t == "9:16":
+                whole = "切掉一部分"
+            if who == "脸切了" and t in ("9:16", "2.35:1"):
+                whole = "切掉一部分"
+            if who == "有字" and t == "1:1":
+                text = "有"
+            out.append({"ratio": t, "whole": whole, "text": text})
+        return json.dumps(out, ensure_ascii=False)
 
     class Adj:
         def is_ok(self, path, cover, title):
             return title == "人看过"
-    vs = [mk("要调"), mk("没问题", warn=True), mk("人看过"), mk("调过框"), mk("不摆", skip="发过同名")]
+    vs = [mk("要挪"), mk("没问题", warn=True), mk("人看过"), mk("调过框"), mk("不摆", skip="发过同名"),
+          mk("有字"), mk("脸切了"), mk("挪了也不行")]
+    for v in vs:
+        if v.title in sizes:
+            v.cover = str(tmp / "aic" / f"{v.title}.png")
     vs[3].plan = dict(vs[3].plan, manual={"3:4": [0.5, 0.5]})
-    vs[0].cover = str(img2)                        # 原图缩到 360 高:1000×720 → 500 宽
+    vs[6].plan = dict(vs[6].plan, faces=[[0.4, 0.2, 0.1, 0.2]])
     for trust in (False, True):
         w = W.AiCoverWorker([F.Video(**{**v.__dict__}) for v in vs], Adj(), "k", trust, lambda v: False, asker=fake)
         w.run()
-        out = w.videos
+        out = {v.title: v for v in w.videos}
         if not trust:
-            check(len(calls) == 2, f"人看过的、调过框的、不摆的都不问 AI -> 问了 {len(calls)} 次")
-            check(out[0].warn and out[0].cover_why == "AI:3:4 脸被切了", f"AI 说要调:标黄、写原因 -> {out[0].cover_why}")
-            check(out[1].warn and "AI 看过" in out[1].cover_why, "软件拿不准的、AI 说没问题:没开「直接去黄」还黄着(前期人还要看)")
+            firsts = [c for c in calls if c[1] == "看" and len(c[2]) == 4]
+            check(len(firsts) == 5, f"人看过的、调过框的、不摆的都不问 AI -> {calls}")
+            m = out["要挪"]
+            check(("要挪", "找", []) in calls and ("要挪", "看", ["3:4"]) in calls, f"不完整:问主体在哪,挪了再看那一个比例 -> {calls}")
+            check(C.rkey(3 / 4) in (m.plan.get("ai") or {}) and "manual" not in m.plan, f"AI 挪的框记在 plan['ai'],不算人拖的 -> {m.plan}")
+            check(m.warn and "AI 挪了 3:4 的框,看一眼" in m.cover_why, f"挪好了:没开「直接去黄」还黄着让人看一眼 -> {m.cover_why}")
+            check(out["没问题"].warn and "AI 看过" in out["没问题"].cover_why, "软件拿不准的、AI 说没问题:没开「直接去黄」还黄着(前期人还要看)")
+            check(out["有字"].warn and out["有字"].cover_why == "AI:1:1 有字,要去豆包去字", f"有字:标黄,说去豆包去字 -> {out['有字'].cover_why}")
+            f = out["脸切了"]
+            check(("脸切了", "找", []) not in calls and f.warn and f.cover_why == "AI:9:16 主体被切了" and "ai" not in f.plan,
+                  f"认出了脸的不挪(多半是框太窄),标黄;2.35:1 躲标题区故意切的不算 -> {f.cover_why}")
+            g = out["挪了也不行"]
+            check(g.warn and g.cover_why == "AI:9:16 挪了框还是装不下整个主体(AI 挪过 9:16 的框)", f"挪了还不行:标黄 -> {g.cover_why}")
+            n1 = len(calls)
         else:
-            check(len(calls) == 2, "第二遍:框没变,用记下的结果,不再问 AI")
-            check(not out[1].warn and "AI 看过没问题" in out[1].cover_why, "开了「AI 说没问题的直接去黄」:去黄")
+            check(len(calls) == n1, "第二遍:框没变,用记下的结果,不再问 AI")
+            check(not out["没问题"].warn and "AI 看过没问题" in out["没问题"].cover_why, "开了「AI 说没问题的直接去黄」:去黄")
+            m = out["要挪"]
+            check(not m.warn and C.rkey(3 / 4) in (m.plan.get("ai") or {}) and "看一眼" not in m.cover_why,
+                  f"开了直接去黄:AI 挪好的也去黄,框照样套上 -> {m.cover_why}")
+    v = mk("要挪")
+    v.cover = str(tmp / "aic" / "要挪.png")
+    aicover.reapply(v)
+    check(C.rkey(3 / 4) in (v.plan.get("ai") or {}), "「恢复自动」重新配封面:AI 挪过的框从记录里套回来,不再问 AI")
 
 
 def test_title_date(tmp: Path):

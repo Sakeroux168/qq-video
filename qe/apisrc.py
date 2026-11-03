@@ -57,6 +57,14 @@ def account_folder_list(roots, known=None) -> dict[str, list[str]]:
     known = 搬过来的号的昵称:给了就只认这些(「1疑似脏话」这种不是号的文件夹就不会混进来)。
     同一个号有两个文件夹(「CSGO--X」「CS2--X」/ 两个根目录各一个)都算,不悄悄丢一个。"""
     out: dict[str, list[str]] = {}
+    by_folder = {}                                       # 账号管理里「素材文件夹」填的是完整文件夹名的(号名和文件夹里写的不一样时)
+    if known is not None:
+        try:
+            from . import apiacc
+            by_folder = {str(a.get("source_name") or "").strip(): a["nick"] for a in apiacc.load()
+                         if a.get("nick") in known and str(a.get("source_name") or "").strip()}
+        except Exception:
+            by_folder = {}
     for root in roots or []:
         try:
             names = sorted(os.listdir(root))
@@ -67,6 +75,9 @@ def account_folder_list(roots, known=None) -> dict[str, list[str]]:
             if not os.path.isdir(p):
                 continue
             nick = nick_of_folder(n)
+            if known is not None and n.strip() in by_folder and nick not in known:
+                out.setdefault(by_folder[n.strip()], []).append(p)
+                continue
             if known is not None:
                 if nick not in known and "--" not in n:
                     # 11-03 新号的文件夹只有一个横杠:「腾讯系FPS射击游戏-FPS射击游戏馆」→ 横杠后面是号名就认
