@@ -1,11 +1,12 @@
 """标题里写了日期的(用户 2026-11-03:「标题里面明确了日期的,如果不是今天那就不能要这个视频」;
-「将来的日期也不要,最多允许时效性落后一天」):日期只能是今天或昨天(北京时间),别的都不发。
+「最多允许时效性落后一天」;后来又说「明确了日期的将来视频就可以要」):前天以前的不发;
+写了月份的将来日期能发;只写几号的只认今天 / 昨天(分不清过去将来)。
 视频一读进来就查(不用点「检查」)。认错了(「3号选手」这种)右键「日期没问题,能发」放行。
 
 认的写法:11月27日 / 11月27号 / 27号 / 27日 / 11.27 / 11/27。只写「27号」没写月份的按几号比。
 """
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from .config import bj_now, data_dir
 from .titleclean import AdOk
@@ -54,12 +55,24 @@ def _ok_days(today=None) -> list:
 
 
 def bad_dates(title: str, today=None) -> list[str]:
-    """标题里不是今天 / 昨天的日期(原文)。"""
+    """标题里过期的日期(原文)。写了月份的(11月25号 / 11.25):今天、昨天、将来的都行,前天以前的不行
+    (用户 2026-11-03 改的:「明确了日期的将来视频就可以要」);只写几号的(27号)分不清是过去还是将来,
+    只认今天 / 昨天(用户举的例子:3 号那天「27号又开始了」算过期)。"""
     ok = _ok_days(today)
+    t, y = ok
     bad = []
     for mo, d, txt in dates_in(title):
-        hit = any(x.day == d and (mo is None or x.month == mo) for x in ok)
-        if not hit:
+        if mo is None:
+            if not any(x.day == d for x in ok):
+                bad.append(txt)
+            continue
+        try:
+            when = date(t.year, mo, d)
+        except ValueError:                               # 2月30号这种:不是日期,不管
+            continue
+        if when < y and (t - when).days > 183:           # 11 月说「1月5日」:是明年的
+            when = date(t.year + 1, mo, d)
+        if when < y:
             bad.append(txt)
     return bad
 
@@ -85,4 +98,4 @@ def problem(account: str, title: str, today=None) -> str:
     bad = bad_dates(title, today)
     if not bad or store().ok(account, title):
         return ""
-    return f"标题日期过期「{'、'.join(bad[:2])}」(只发今天 / 昨天的;不是日期就右键「日期没问题」)"
+    return f"标题日期过期「{'、'.join(bad[:2])}」(前天以前的不发;不是日期 / 就要发就右键「日期没问题」)"
