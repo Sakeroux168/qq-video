@@ -1730,6 +1730,15 @@ class ApiTab(QWidget):
                     m.addAction("标题广告:其实还没剪(先不发)", lambda: self.set_title_ad_ok(i, False)).setEnabled(not busy)
                 else:
                     m.addAction("标题有广告词:视频里的广告剪好了 / 不是广告,能发", lambda: self.set_title_ad_ok(i, True)).setEnabled(not busy)
+            if i != -1 and not self._sent(i):
+                from qe import titledate
+                v0 = self.videos[i]
+                if titledate.store().ok(v0.account, v0.title):
+                    m.addSeparator()
+                    m.addAction("标题日期:其实过期了(先不发)", lambda: self.set_title_date_ok(i, False)).setEnabled(not busy)
+                elif titledate.bad_dates(v0.title):
+                    m.addSeparator()
+                    m.addAction("标题日期没问题(不是日期 / 就要发),能发", lambda: self.set_title_date_ok(i, True)).setEnabled(not busy)
             ad = (self.videos[i].checks or {}).get("ads") if i != -1 else None
             if ad and ad.get("hits") and not self._sent(i):
                 m.addSeparator()
@@ -2436,6 +2445,18 @@ class ApiTab(QWidget):
             titleclean.store().set(v.account, v.title, ok)
             self._fill(r)
         self.say(f"{len(rows)} 条标题有广告词的标成" + ("「剪好了,能发」" if ok else "「还没剪,先不发」"))
+        self._update_scope()
+
+    def set_title_date_ok(self, i: int, ok: bool):
+        """标题日期认错了(「3号选手」)/ 就要发 → 能发;选了好几条就一起标。"""
+        from qe import titledate
+        rows = [r for r in (self.selected_rows() or [i]) if titledate.bad_dates(self.videos[r].title)] or [i]
+        for r in rows:
+            v = self.videos[r]
+            titledate.store().set(v.account, v.title, ok)
+            self._fill(r)
+        self.say(f"{len(rows)} 条标题日期标成" + ("「没问题,能发」" if ok else "「过期了,先不发」"))
+        self._update_sum()
         self._update_scope()
 
     def set_ad_ok(self, i: int, ok: bool):

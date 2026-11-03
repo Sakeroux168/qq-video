@@ -1046,7 +1046,7 @@ class MainWindow(QMainWindow):
         cov = v.cover_why if (v.cover_kind or v.warn) else "认人中…"
         skip = "" if stt or note else v.skip               # 不摆的(同号同名 / 0 字节 / 发过同名的)写清楚为什么
         from qe import checks, titleclean, wmstore
-        tad = "" if stt or note or skip else titleclean.ad_problem(v.account, v.title)   # 标题有广告词:不摆
+        tad = "" if stt or note or skip else self._title_block(v)   # 标题有广告词:不摆
         if tad:
             skip = tad
         wmb = not (stt or note or skip) and wmstore.blocks(v.wm)       # 查到水印、人还没说没问题:不摆
@@ -1108,7 +1108,7 @@ class MainWindow(QMainWindow):
         out = [("没无字封面", [v for v in left if (v.cover_kind or v.cover_why) and not v.cover and not v.skip]),
                ("同名 / 发过 / 坏文件", [v for v in left if v.skip]),
                ("有水印", [v for v in left if not v.skip and wmstore.blocks(v.wm)]),
-               ("标题有广告词", [v for v in left if not v.skip and titleclean.ad_problem(v.account, v.title)])]
+               ("标题有广告词 / 日期过期", [v for v in left if not v.skip and self._title_block(v)])]
         return [(k, vs) for k, vs in out if vs]
 
     def _update_scope(self):
@@ -1202,6 +1202,14 @@ class MainWindow(QMainWindow):
                 m.addAction("标题广告:其实还没剪(先不摆)", lambda: self.set_title_ad_ok(False))
             else:
                 m.addAction("标题有广告词:视频里的广告剪好了 / 不是广告,能摆", lambda: self.set_title_ad_ok(True))
+        from qe import titledate
+        if v0 is not None and not self.rec.status_of(v0.path):
+            if titledate.store().ok(v0.account, v0.title):
+                m.addSeparator()
+                m.addAction("标题日期:其实过期了(先不摆)", lambda: self.set_title_date_ok(False))
+            elif titledate.bad_dates(v0.title):
+                m.addSeparator()
+                m.addAction("标题日期没问题(不是日期 / 就要发),能摆", lambda: self.set_title_date_ok(True))
         wm = self.videos[row].wm if row < len(self.videos) else None
         if wm and wm.get("hits"):
             m.addSeparator()
@@ -1332,6 +1340,25 @@ class MainWindow(QMainWindow):
         v = self.videos[i]
         self.say(f"「{v.title}」模糊水印失败:{err}" if err else f"「{v.title}」水印糊掉了")
         self._fill_row(i)
+
+    @staticmethod
+    def _title_block(v) -> str:
+        """标题的问题让这条先不摆:有广告词(人没说剪好了)/ 写的日期不是今天昨天(用户 2026-11-03,人没放行)。"""
+        from qe import titleclean, titledate
+        return titleclean.ad_problem(v.account, v.title) or titledate.problem(v.account, v.title)
+
+    def set_title_date_ok(self, ok: bool):
+        """标题日期认错了 / 就要发 → 能摆(选中的一起标)。"""
+        from qe import titledate
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
+        rows = [r for r in rows if r < len(self.videos) and titledate.bad_dates(self.videos[r].title)]
+        for r in rows:
+            v = self.videos[r]
+            titledate.store().set(v.account, v.title, ok)
+            self._fill_row(r)
+        if rows:
+            self.say(f"{len(rows)} 条标题日期标成" + ("「没问题,能摆」" if ok else "「过期了,先不摆」"))
+        self._update_sum()
 
     DUP_ASKER = None                                 # 测试里换掉(绝不真问 AI)
 
@@ -1716,7 +1743,7 @@ class MainWindow(QMainWindow):
                 and not v.skip                        # 同号同名 / 0 字节 / 发过同名的不摆(表里写着为什么)
                 and not wmstore.blocks(v.wm)]         # 查到水印、人还没说没问题的不摆
         from qe import titleclean                     # 标题有广告词的(视频里八成有广告):人右键「剪好了」才摆
-        todo = [v for v in todo if not titleclean.ad_problem(v.account, v.title)]
+        todo = [v for v in todo if not self._title_block(v)]
         if self._unattended:                          # 定时发布:还标黄的(人没看过)、这一轮跳过的不摆
             todo = [v for v in todo if not v.warn and v.path not in self._sched_skip]
         full = {a for a in {v.account for v in todo} if self._edu_left(a) == 0}     # 这天发够规定条数的号不再摆(用户 2026-10-20)
@@ -1778,9 +1805,10 @@ class MainWindow(QMainWindow):
         if wmv:
             tail += f"\n\n有 {len(wmv)} 条查到水印没摆(标黄的),比如「{wmv[0].title[:24]}」;不是水印就右键「没水印,能摆」。"
         from qe import titleclean
-        tad = [v for v in self.videos if not self.rec.status_of(v.path) and not v.skip and titleclean.ad_problem(v.account, v.title)]
+        tad = [v for v in self.videos if not self.rec.status_of(v.path) and not v.skip and self._title_block(v)]
         if tad:
-            tail += f"\n\n有 {len(tad)} 条标题有广告词没摆,比如「{tad[0].title[:24]}」;剪好了就右键「…能摆」。"
+            tail += (f"\n\n有 {len(tad)} 条标题有广告词 / 日期过期没摆,比如「{tad[0].title[:24]}」;"
+                     "剪好了 / 日期没问题就右键「…能摆」。")
         if nocover:
             return (f"能摆的都摆完了,但还有 {len(nocover)} 条没有无字封面(png),没摆,比如「{nocover[0].title[:24]}」。\n\n"
                     "让员工补上 png 以后点「刷新」再摆。" + tail)

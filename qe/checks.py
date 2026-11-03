@@ -73,6 +73,10 @@ def problems(v) -> list[str]:
     ad = titleclean.ad_problem(getattr(v, "account", ""), v.title)
     if ad:
         out.append(ad)
+    from . import titledate                          # 标题写的日期不是今天 / 昨天(用户 2026-11-03)
+    td = titledate.problem(getattr(v, "account", ""), v.title)
+    if td:
+        out.append(td)
     if len(c.get("tags") or []) > 1:
         out.append(f"{len(c['tags'])} 个话题")
     elif topic.bad_format(v.title) and format_kind(v.title) != "结尾多了空格":   # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题

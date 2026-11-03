@@ -3037,6 +3037,43 @@ def test_ai_cover(tmp: Path):
             check(not out[1].warn and "AI 看过没问题" in out[1].cover_why, "开了「AI 说没问题的直接去黄」:去黄")
 
 
+def test_title_date(tmp: Path):
+    print("[标题里的日期(用户 2026-11-03):只发今天 / 昨天的,将来的、更早的都不要;「3号选手」不算日期;右键放行]")
+    from datetime import date
+    from qe import checks, folders as F, titledate as TD
+    today = date(2026, 11, 3)
+    cases = {
+        "我的世界27号又开始了": ["27号"],
+        "11月3日更新内容一览": [],
+        "11月2号的比赛回顾": [],
+        "11月5日开服预告": ["11月5日"],
+        "10.27 版本前瞻": ["10.27"],
+        "11.3 新皮肤上线": [],
+        "3号选手残血反杀": [],
+        "1号位怎么打 #王者荣耀": [],
+        "三亚5日游攻略": [],
+        "7日内必须完成的任务": [],
+        "版本3.5 改动": [],
+        "伤害提升1.5倍": [],
+        "S11.2 赛季": [],
+        "2号的比赛": [],
+        "31号开始": ["31号"],
+    }
+    for t, want in cases.items():
+        got = TD.bad_dates(t, today)
+        check(got == want, f"「{t}」-> {got}(应该 {want})")
+    check(TD.bad_dates("1号的回放", date(2026, 12, 2)) == [] and TD.bad_dates("30号的回放", date(2026, 12, 1)) == [],
+          "昨天跨月(12.1 那天,30 号算昨天)也认")
+    v = F.Video(path="x.mp4", title="我的世界27号又开始了", account="CSGO战神君", employee="", date="11.3")
+    v.checks = {"tags": []}
+    TD.store().set(v.account, v.title, False)
+    check(any("日期过期" in p for p in checks.problems(v)) or TD.bad_dates(v.title) == [],
+          "过期的:列进「要处理」(不用点检查,读进来就有)")
+    TD.store().set(v.account, v.title, True)
+    check(not any("日期过期" in p for p in checks.problems(v)), "右键「日期没问题」以后:能发")
+    TD.store().set(v.account, v.title, False)
+
+
 def test_awake(tmp: Path):
     print("[罐头最小化了任务不动(2026-10-19):摆的时候一直叫醒页面;最小化了悄悄恢复(测试里不动真窗口)]")
     from qe import prepare, winfix
@@ -5847,6 +5884,7 @@ if __name__ == "__main__":
     test_cover_login(tmp)
     test_accounts_manage(tmp)
     test_ai_cover(tmp)
+    test_title_date(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
