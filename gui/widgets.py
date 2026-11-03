@@ -448,7 +448,7 @@ class ProbCard(QFrame):
         t = tok()
         name = "done" if tone == "done" else self._icon_name
         col, bg = ((t["ok"], t["ok_bg"]) if tone == "done" else (t["orange"], t["warn_bg"]) if tone == "warn"
-                   else (t["acc"], t["acc_bg"]))
+                   else (t["bad"], t["card"]) if tone == "bad" else (t["acc"], t["acc_bg"]))
         self.icon.setText(GLYPH.get(name, name))
         self.icon.setStyleSheet(f"font-family:'{ICON_FONT}';font-size:18px;color:{col};background:{bg};border-radius:12px;")
 

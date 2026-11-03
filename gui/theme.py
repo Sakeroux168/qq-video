@@ -91,6 +91,8 @@ QFrame#probCard {{ background:{t['card']}; border:1px solid {t['line2']}; border
 QFrame#probCard:hover {{ border-color:{t['acc']}; }}
 QLabel#probTitle {{ font-size:15px; font-weight:bold; color:{t['tx']}; }}
 QLabel#probTitle[tone="done"] {{ color:{t['mu']}; }}
+QFrame#probCard[tone="bad"] {{ background:{t['bad_bg']}; border:1px solid {t['bad']}; }}
+QLabel#probTitle[tone="bad"] {{ color:{t['bad']}; }}
 QLabel#probSub {{ color:{t['mu']}; font-size:12px; }}
 QPushButton#cardBtn {{ background:transparent; border:none; color:{t['acc']}; font-weight:bold; padding:2px 0; text-align:left; }}
 QPushButton#cardBtn:hover {{ color:{t['acc_h']}; text-decoration:underline; }}

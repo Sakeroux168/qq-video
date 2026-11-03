@@ -71,8 +71,8 @@ class DailyTab(QWidget):
         top.addWidget(b)
         v.addLayout(top)
 
-        self.cards = StatCards([("游戏", "游戏"), ("教育", "教育"), ("动漫", "动漫"), ("总", "总发布量")],
-                               rings={"游戏": "acc", "教育": "green", "动漫": "orange", "总": "acc"})
+        self.cards = StatCards([("游戏", "游戏"), ("教育", "教育"), ("动漫", "动漫"), ("影视", "影视"), ("总", "总发布量")],
+                               rings={"游戏": "acc", "教育": "green", "动漫": "orange", "影视": "orange", "总": "acc"})
         v.addWidget(self.cards)
         hr = QHBoxLayout()
         self.hint = QLabel("")                          # 草图 ③:一个小标签「12 个号还没发够」,鼠标放上去看是哪些
@@ -180,6 +180,8 @@ class DailyTab(QWidget):
         rrule = s.get("rows_rule") or [q - e for (_l, q, _a), e in zip(s["rows"], rex)]
         for (lab, q, a), e, rq in zip(s["rows"], rex, rrule):
             key = lab.replace("总发布量", "")
+            if key not in self.cards.vals:
+                continue                                 # 自己加的别的品类:卡片上没位置,表里照样有
             note = f"(含补发 / 临时多发 {e})" if e else ""
             self.cards.set(**{key: (f"{a} / {rq}", "warn" if q and a > q else "good" if a >= q else ""),
                               f"{key}_sub": f"多发 {a - q} 条" if q and a > q else ("够了 √" + note if e else "够了 √") if a >= q

@@ -68,6 +68,9 @@ def account_folder_list(roots, known=None) -> dict[str, list[str]]:
                 continue
             nick = nick_of_folder(n)
             if known is not None:
+                if nick not in known and "--" not in n:
+                    # 11-03 新号的文件夹只有一个横杠:「腾讯系FPS射击游戏-FPS射击游戏馆」→ 横杠后面是号名就认
+                    nick = next((k for k in known if n.endswith("-" + k)), nick)
                 if nick in known:
                     out.setdefault(nick, []).append(p)
             elif "--" in n or any(date_key(x) for x in _subdirs(p)):

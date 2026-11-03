@@ -12,7 +12,7 @@ from qe.config import bj_now
 from gui.widgets import Bar, GLYPH, ICON_FONT, Ring, fade_in, glyph_label, repolish, roll, tok
 
 WEEK = "一二三四五六日"
-CAT_ICON = {"游戏": ("game", "acc"), "教育": ("school", "green"), "动漫": ("movie", "orange")}
+CAT_ICON = {"游戏": ("game", "acc"), "教育": ("school", "green"), "动漫": ("movie", "orange"), "影视": ("movie", "green")}
 
 
 class TodayTab(QWidget):

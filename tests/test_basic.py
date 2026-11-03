@@ -28,6 +28,9 @@ def _fake_ask_ai(own, titles, key, **k):
 _gc.ask_ai = _fake_ask_ai
 import gui.api_tab as _api_mod                               # noqa: E402
 _api_mod.ApiTab.AUTO_UNSURE = False                          # 测试里不自动去企鹅号查结果不明(会拿假钥匙调真接口)
+_api_mod.ApiTab.COVER_CHECK = False                          # 测试里不去看这台电脑上真开着的罐头登没登着
+import gui.window as _win_mod                                # noqa: E402
+_win_mod.MainWindow.AI_COVER = False                         # 测试里不让 AI 看封面(真 Key 会花钱)
 _REAL_ASK = _api_mod.ask                                     # 有的测试会换掉 ask():留一份真的
 
 
@@ -1399,7 +1402,7 @@ def test_scan_tricky(tmp: Path):
     # 同号同名只发一条(两个人各放一份);0 字节的那份不把好的挤掉;已经发了的那条优先留着
     mk2 = lambda p, t, e, s="": F.Video(path=p, title=t, account="家长小天地", employee=e, date="10.16", skip=s)
     x1, x2, x3 = mk2("z/同名.mp4", "同名", "卓金凤13"), mk2("y/同名.mp4", "同名 ", "卓金凤14"), mk2("w/同名.mp4", "同名", "51", "0 字节")
-    check(F.mark_dups([x2, x1, x3]) == 1 and not x1.skip and "卓金凤13" in x2.skip and x3.skip == "0 字节",
+    check(F.mark_dups([x2, x1, x3]) == 1 and not x1.skip and x2.skip == "同一天有2条同名" and x3.skip == "0 字节",
           "同号同名:留卓金凤13 的,卓金凤14 的写明不发")
     y1, y2 = mk2("z/同名.mp4", "同名", "卓金凤13"), mk2("y/同名.mp4", "同名", "卓金凤14")
     F.mark_dups([y1, y2], prefer=lambda v: v is y2)
@@ -1535,9 +1538,45 @@ def test_window_dups(tmp: Path):
     check(sorted((v.employee, v.title) for v in vids) == sorted([("张", "同名"), ("李", "新的")]),
           f"这批只摆 张的同名 + 李的新的 -> {[(v.employee, v.title) for v in vids]}")
     st4 = {w.table.item(i, 0).text() + "/" + w.table.item(i, 2).text(): w.table.item(i, 4).text() for i in range(w.table.rowCount())}
-    check(st4["同名/李"].startswith("不发:和「张」") and st4["挪过的/李"].startswith("不发:这个号发过同名的") and st4["新的/李"] == "还没发",
+    check(st4["同名/李"] == "不发:同一天有2条同名" and st4["挪过的/李"] == "不发:发过同名" and st4["新的/李"] == "还没发",
           f"表里写清楚为什么不发 -> {st4}")
     check("另有 2 条不发" in w._nothing_left(), "没得摆时也说还有几条不发")
+    # 处理重名(用户 2026-11-03):AI 想个意思相近的,人点「改」才改;封面跟着改名
+    asked = []
+    W_mod = sys.modules["gui.window"]
+    from PySide6.QtWidgets import QMessageBox
+    popped = []
+    real = (W_mod.MainWindow.DUP_ASKER, W_mod.MainWindow._confirm, QMessageBox.information, QMessageBox.warning)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: popped.append(a[2]))
+    W_mod.MainWindow.DUP_ASKER = staticmethod(lambda body, avoid: asked.append((body, list(avoid))) or body + "呀")
+    W_mod.MainWindow._confirm = lambda self, *a: True
+    try:
+        w.table.clearSelection()
+        w.edu_dupname()
+    finally:
+        W_mod.MainWindow.DUP_ASKER, W_mod.MainWindow._confirm = real[:2]
+    names = sorted(os.listdir(a / "李"))
+    check({"同名呀.mp4", "同名呀.png", "挪过的呀.mp4", "挪过的呀.png", "新的.mp4"} <= set(names) and "同名.mp4" not in names
+          and len(asked) == 2 and os.path.isfile(a.parent / "小天地" / "张" / "同名.mp4"),
+          f"李的两条重名的(同一天同名 / 发过同名)问了 AI、改了名,封面跟着改;张那条留着的不动 -> {names} 问了 {[x[0] for x in asked]}")
+    # 按 Delete:挪进「重复删除」,软件不再读
+    w.c_date.setCurrentIndex(w.c_date.findData("10.17"))
+    top = next(w.tree.topLevelItem(i) for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地")
+    for k in range(top.childCount()):
+        top.child(k).setCheckState(0, Qt.CheckState.Checked)
+    app.processEvents()
+    r = next(i for i, v in enumerate(w.videos) if v.title == "新的")
+    w.table.clearSelection()
+    w.table.selectRow(r)
+    W_mod.MainWindow._confirm = lambda self, *a: True
+    try:
+        w.edu_delete()
+    finally:
+        W_mod.MainWindow._confirm = real[1]
+        QMessageBox.information, QMessageBox.warning = real[2], real[3]
+    check(os.path.isfile(a / "李" / "重复删除" / "新的.mp4") and os.path.isfile(a / "李" / "重复删除" / "新的.png")
+          and not os.path.exists(a / "李" / "新的.mp4") and all(v.title != "新的" for v in w.videos),
+          "Delete:视频连封面挪进「重复删除」(不真删),列表里没了")
     w.close()
 
 
@@ -2738,6 +2777,266 @@ def test_pub_progress(tmp: Path):
     check(tab.pub_strip.spd.text() == "↑ 51 KB/s", f"慢的时候写 KB/s -> {tab.pub_strip.spd.text()}")
 
 
+def test_cover_login(tmp: Path):
+    print("[封面传不上(用户 2026-11-03):挑登着的页面传;发之前没登录就亮红,让人去登录或者这次不要封面]")
+    import json
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, omcover
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+
+    # ---- omcover:罐头里好几个页面,登录页的排后面;一个传不上换下一个 ----
+    pages = {"a": "https://om.qq.com/userAuth/index", "b": "https://om.qq.com/main", "c": "https://om.qq.com/userAuth/index"}
+    logged = {"b"}
+    tried = []
+
+    class FakePage:
+        def __init__(self, t, timeout=20):
+            self.t = t
+
+        def ev(self, js, timeout=20):
+            tried.append(self.t["id"])
+            ok = self.t["id"] in logged
+            if "marticle/article/list" in js:
+                return json.dumps({"response": {"code": 0}, "data": {"articles": []}}) if ok else "<!DOCTYPE html>"
+            return ('200 ' + json.dumps({"code": 0, "data": {"url": {"url": "https://inews.gtimg.com/om_bt/x"}}})) if ok \
+                else "200 <!DOCTYPE html>"
+
+        def close(self):
+            pass
+    real = (omcover.find_ports, omcover.targets, omcover.Page)
+    omcover.find_ports = lambda: [1]
+    omcover.targets = lambda port: [{"id": k, "url": u, "type": "webview"} for k, u in pages.items()]
+    omcover.Page = FakePage
+    img = tmp / "cov_login.jpg"
+    _img(img, 720, 1280)
+    try:
+        check([t["id"] for t in omcover._targets()] == ["b", "a", "c"], "登着的页面(/main)排前面,停在登录页的排后面")
+        check(omcover.check() == "", "有一个登着就算传得上")
+        omcover._good["id"] = None
+        pages = {"a": "https://om.qq.com/main", "b": "https://om.qq.com/main"}     # 两个都像登着,其实 a 掉线了
+        tried.clear()
+        url = omcover.upload(str(img))
+        check(url.startswith("https://inews.gtimg.com") and tried == ["a", "b"], f"第一个页面传不上(掉线了),换下一个传上了 -> {tried}")
+        tried.clear()
+        omcover.upload(str(img))
+        check(tried == ["b"], f"下一张直接用上次传成的页面 -> {tried}")
+        logged = set()
+        check(omcover.check() == omcover.NO_LOGIN, "都没登录 → 说「罐头里的企鹅号都没登录」")
+        err = ""
+        try:
+            omcover.upload(str(img))
+        except omcover.CoverError as e:
+            err = str(e)
+        check("没登录" in err, f"都没登录:传不上,说清楚 -> {err}")
+        omcover.targets = lambda port: []
+        check(omcover.check() == omcover.NO_CZGT, "罐头没开 → 说「没开创作罐头」")
+    finally:
+        omcover.find_ports, omcover.targets, omcover.Page = real
+        omcover._good["id"] = None
+
+    # ---- 界面:点「现在发布」先看罐头;没登录 → 不发、卡片亮红;点「这次不要封面,直接发」→ 发,不带封面 ----
+    root = tmp / "api_covlogin"
+    (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18").mkdir(parents=True)
+    for f in ("k1.mp4", "k2.mp4"):
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18" / f).write_bytes(b"x")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_covlogin.json")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "发布covlogin" / "{date}")
+    st["api_interval"] = 0
+    st["quota_open"] = True
+    logs = []
+    tab = T.ApiTab(st, Records(tmp / "rec_covlogin.sqlite"), logs.append)
+    tab.COVER_CHECK = True
+    tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+    tab._update_scope()
+    sent = []
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, cover="", cover_upload=None, **k):
+            if before_publish:
+                before_publish("V")
+            sent.append((title, cover))
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功",
+                    "cover": "没传上:传封面失败" if title == "k4" and cover else ""}
+    from qe import autocover
+    asked = []
+    why = {"v": omcover.NO_LOGIN}
+    real = (omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning, autocover.pick, tab._cover_check)
+    omapi.Client, T.ask = Fake, (lambda *a, **k: asked.append(a[2]) or True)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: 0)
+    autocover.pick = lambda p: str(img)
+    tab._cover_check = lambda: why["v"]
+    try:
+        tab.run_publish()
+        app.processEvents()
+        check(not sent and not asked and not tab.busy(), "罐头没登录:先不发,也不弹「现在发布」确认框")
+        check(not tab.card_cov.isHidden() and "没登录" in tab.card_cov.title.text() and tab.card_cov.property("tone") == "bad",
+              f"卡片亮红,写着为什么 -> {tab.card_cov.title.text()}")
+        check("登好了,接着发" in tab.logbox.toPlainText(), "日志里说去罐头登好点「登好了,接着发」")
+        tab.b_cov_skip.click()
+        _wait(app, lambda: not tab.busy(), 30)
+        app.processEvents()
+        check(sorted(sent) == [("k1", ""), ("k2", "")], f"点「这次不要封面,直接发」:发了,两条都不带封面 -> {sent}")
+        check(asked and "这次不要封面" in asked[-1], "确认框写着这次不要封面")
+        check(tab._nocover_once is False, "「这次不要封面」只管这一次")
+        # 登好了:卡片收起,照常带封面;发的时候有一条封面没传上 → 发完卡片亮红、弹框列出来
+        (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18").mkdir(parents=True, exist_ok=True)     # 发空了,文件夹删了
+        for f in ("k3.mp4", "k4.mp4"):
+            (root / "游戏视频" / "CSGO--CSGO战神君" / "10.18" / f).write_bytes(b"x")
+        tab.load()
+        _wait(app, lambda: not tab.busy() and len(tab.videos) >= 2)
+        for v in tab.videos:
+            v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+        tab._update_scope()
+        sent.clear()
+        why["v"] = ""
+        tab.card_cov.hide()
+        tab.run_publish()
+        check(tab.card_cov.isHidden(), "登着:卡片不出来")
+        _wait(app, lambda: not tab.busy(), 30)
+        app.processEvents()
+        check(sorted(t for t, _c in sent) == ["k3", "k4"] and all(c for _t, c in sent), f"登着:带封面发 -> {sent}")
+        check(not tab.card_cov.isHidden() and "1 条封面没传上" in tab.card_cov.title.text(),
+              f"发的时候有一条封面没传上:发完卡片亮红 -> {tab.card_cov.title.text()}")
+        check("1 条封面没传上" in tab.logbox.toPlainText(), "发完总结里写几条封面没传上")
+    finally:
+        omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning, autocover.pick, tab._cover_check = real
+
+
+def test_accounts_manage(tmp: Path):
+    print("[账号管理(用户 2026-11-03):新增号、分组、条数;影视号「号文件夹\\日期」;新游戏号单横杠文件夹也认]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import accounts as A, apiacc, apisrc, folders as F, plan as P
+    from qe.config import Settings
+    st = Settings(tmp / "st_accm.json")
+    root = tmp / "accm_教育"
+    st["material_root"] = str(root)
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    # 游戏号
+    A.add(st, "FPS射击游戏馆", "游戏", 30, "腾讯系FPS射击游戏")
+    r = {x["nick"]: x for x in A.rows(st)}
+    check(r["FPS射击游戏馆"]["cat"] == "游戏" and r["FPS射击游戏馆"]["quota"] == 30 and r["FPS射击游戏馆"]["key"] is False,
+          f"新增游戏号:进游戏组、30 条、钥匙「没有」 -> {r['FPS射击游戏馆']}")
+    a = apiacc.find("FPS射击游戏馆")
+    check(a and a["category"] == 1604 and not a["client_id"] and "FPS射击游戏馆" in apiacc.nicks(), "接口账号里有它(分类网络游戏、还没钥匙)")
+    groot = tmp / "accm_游戏视频"
+    (groot / "腾讯系FPS射击游戏-FPS射击游戏馆" / "11.3").mkdir(parents=True)
+    (groot / "腾讯系FPS射击游戏-FPS射击游戏馆" / "11.3" / "f1.mp4").write_bytes(b"x")
+    (groot / "CSGO--CSGO战神君").mkdir()
+    fl = apisrc.account_folder_list([str(groot)], set(apiacc.nicks()))
+    check(set(fl) == {"FPS射击游戏馆", "CSGO战神君"}, f"单横杠「…-FPS射击游戏馆」的文件夹也认成这个号 -> {sorted(fl)}")
+    vs = apisrc.videos([str(groot)], "11.3", set(apiacc.nicks()))
+    check([(v.account, v.title) for v in vs] == [("FPS射击游戏馆", "f1")], "新游戏号这天的视频读得到")
+    # 教育号 + 影视号
+    A.add(st, "家长成长营", "教育", 50, "成长营、成长")
+    (root / "11.3" / "成长营" / "张").mkdir(parents=True)
+    (root / "11.3" / "成长营" / "张" / "e1.mp4").write_bytes(b"x")
+    film = tmp / "accm_高热剧集二创" / "光影叙集"
+    (film / "11.3").mkdir(parents=True)
+    (film / "11.4").mkdir(parents=True)
+    (film / "11.3" / "电影解说一.mp4").write_bytes(b"x")
+    A.add(st, "光影叙集", "影视", 40, str(film))
+    check(P.quota_of(st, "光影叙集") == 40 and any(g["cat"] == "影视" and "光影叙集" in g["accounts"] for g in P.plan(st)),
+          "新增影视号:每天规定里多了「影视」一组")
+    check([F.day_of(d) for d in F.all_dates(st)] == ["11.3", "11.4"], f"日期下拉:教育的日期 + 影视号文件夹里的日期 -> {F.all_dates(st)}")
+    ad = F.account_dirs(str(root), "11.3", st)
+    check(ad.get("家长成长营") == [str(root / "11.3" / "成长营")] and ad.get("光影叙集") == [str(film / "11.3")],
+          f"11.3:教育号按缩写找、影视号按自己的文件夹找 -> {ad}")
+    ad4 = F.account_dirs(str(root), "11.4", st)
+    check(ad4.get("光影叙集") == [str(film / "11.4")], "教育那边没有 11.4 这天:影视号的照样找得到")
+    fv = F.scan_account(str(film / "11.3"), "光影叙集", "11.3")
+    check([v.title for v in fv] == ["电影解说一"], "影视号的视频读得到(直接放在日期文件夹里的)")
+    check("光影叙集" in st.account_names() and "光影叙集" not in apiacc.nicks(), "影视号在罐头那页,不进接口发布名单")
+    # 改分组 / 去掉 / 重名
+    A.set_cat(st, "FPS射击游戏馆", "动漫")
+    check(any(g["cat"] == "动漫" and "FPS射击游戏馆" in g["accounts"] for g in P.plan(st)), "游戏 ↔ 动漫 直接改")
+    bad = []
+    for nick, cat in (("FPS射击游戏馆", "教育"), ("光影叙集", "游戏"), ("光影叙集", "教育"), ("家长成长营", "影视")):
+        try:
+            A.set_cat(st, nick, cat)
+        except ValueError:
+            bad.append(nick + cat)
+    check(len(bad) == 4, f"接口发的 ↔ 罐头发的、教育 ↔ 影视(放法不一样)不能直接改 -> {bad}")
+    try:
+        A.add(st, "光影叙集", "影视", 1, str(film))
+        dup = False
+    except ValueError:
+        dup = True
+    check(dup, "同名的号加不了第二个")
+    A.remove(st, "FPS射击游戏馆")
+    check(apiacc.find("FPS射击游戏馆") is None and all("FPS射击游戏馆" not in g["accounts"] for g in P.plan(st)), "去掉号:规定和钥匙都去掉")
+    st2 = Settings(tmp / "st_accm.json")
+    check(any(a.get("dir") == str(film) for a in st2["accounts"]), "存盘了(重开设置还在)")
+    from gui.accounts_dialog import AccountsDialog
+    d = AccountsDialog(st)
+    check(d.t.rowCount() == len(A.rows(st)) and d.t.item(0, 0) is not None, "账号管理窗口打得开,一行一个号")
+    apiacc.save([])
+
+
+def test_ai_cover(tmp: Path):
+    print("[AI 第二轮看封面(用户 2026-11-03):一张张描述脸在不在,软件判断;要调的标黄写原因;人看过 / 调过框的不看;记下来不重复问]")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from qe import aicover, folders as F
+    import gui.window as W
+    img = tmp / "aic" / "a.png"
+    _img(img, 1280, 720)
+    mk = lambda n, **k: F.Video(path=str(tmp / "aic" / f"{n}.mp4"), title=n, account="家长小天地", employee="张", date="11.3",
+                                cover=str(img), plan={"cx": 0.5, "cy": 0.4}, **k)
+    check(aicover.parse('[{"ratio":"3:4","main":"在","face":"都在"},{"ratio":"9:16","main":"在","face":"都在"}]') == {"ok": True, "why": ""},
+          "都在:没问题")
+    r = aicover.parse('好的:[{"ratio":"3:4","main":"不在","face":"没有人"},{"ratio":"9:16","main":"在","face":"缺了"}]')
+    check(r["ok"] is False and r["why"] == "3:4 主角不在框里;9:16 脸被切了", f"主角不在 / 脸缺了:要调,写清楚哪个比例 -> {r}")
+    bad = False
+    try:
+        aicover.parse("看不懂")
+    except ValueError:
+        bad = True
+    check(bad, "AI 回的读不出来:报错,不当成没问题")
+    imgs = aicover.sheet(mk("x"))
+    check([t for t, _b in imgs] == ["原图", "3:4", "9:16", "2.35:1", "1:1"] and all(b[:2] == b"\xff\xd8" for _t, b in imgs),
+          "给 AI 的:原图 + 4 个比例,一张一张的 JPEG")
+    calls = []
+    img2 = tmp / "aic" / "b.png"                  # 「要调」那条用另一张图(同一张图 + 同一个框 = 同一个结果)
+    _img(img2, 1000, 720)
+
+    def fake(imgs):
+        import io
+        from PIL import Image
+        calls.append(len(imgs))
+        w = Image.open(io.BytesIO(imgs[0][1])).width
+        return '[{"ratio":"3:4","main":"在","face":"缺了"}]' if w == 500 else '[{"ratio":"3:4","main":"在","face":"都在"}]'
+
+    class Adj:
+        def is_ok(self, path, cover, title):
+            return title == "人看过"
+    vs = [mk("要调"), mk("没问题", warn=True), mk("人看过"), mk("调过框"), mk("不摆", skip="发过同名")]
+    vs[3].plan = dict(vs[3].plan, manual={"3:4": [0.5, 0.5]})
+    vs[0].cover = str(img2)                        # 原图缩到 360 高:1000×720 → 500 宽
+    for trust in (False, True):
+        w = W.AiCoverWorker([F.Video(**{**v.__dict__}) for v in vs], Adj(), "k", trust, lambda v: False, asker=fake)
+        w.run()
+        out = w.videos
+        if not trust:
+            check(len(calls) == 2, f"人看过的、调过框的、不摆的都不问 AI -> 问了 {len(calls)} 次")
+            check(out[0].warn and out[0].cover_why == "AI:3:4 脸被切了", f"AI 说要调:标黄、写原因 -> {out[0].cover_why}")
+            check(out[1].warn and "AI 看过" in out[1].cover_why, "软件拿不准的、AI 说没问题:没开「直接去黄」还黄着(前期人还要看)")
+        else:
+            check(len(calls) == 2, "第二遍:框没变,用记下的结果,不再问 AI")
+            check(not out[1].warn and "AI 看过没问题" in out[1].cover_why, "开了「AI 说没问题的直接去黄」:去黄")
+
+
 def test_awake(tmp: Path):
     print("[罐头最小化了任务不动(2026-10-19):摆的时候一直叫醒页面;最小化了悄悄恢复(测试里不动真窗口)]")
     from qe import prepare, winfix
@@ -3751,15 +4050,47 @@ def test_api_dups(tmp: Path):
         return next(k for k, v in enumerate(tab.videos) if v.account == acc and v.title == title)
     old, s1, s2, new = (i_of("CSGO战神君", t) for t in ("旧的", "同名 #CSGO", "同名", "新的"))
     other = i_of("PUBG突围君", "旧的")
-    check(not tab._can_send(old) and "发过同名的(10.20)" in tab._dups.get(old, ""),
-          f"这个号发过同名的(带话题的也认):不发,写清楚哪天发的 -> {tab._dups.get(old)}")
-    check(sum(1 for k in (s1, s2) if tab._can_send(k)) == 1 and (s1 in tab._dups) != (s2 in tab._dups),
-          f"同一天同一个号同名的两条:只发一条 -> {tab._dups}")
+    check(not tab._can_send(old) and tab._dups.get(old) == "发过同名",
+          f"这个号发过同名的(带话题的也认):不发,备注「发过同名」 -> {tab._dups.get(old)}")
+    check(sum(1 for k in (s1, s2) if tab._can_send(k)) == 1 and (s1 in tab._dups) != (s2 in tab._dups)
+          and set(tab._dups.values()) >= {"同一天有2条同名"},
+          f"同一天同一个号同名的两条:只发一条,备注「同一天有2条同名」 -> {tab._dups}")
     check(tab._can_send(new) and tab._can_send(other), "不同名的、别的号的同名:照常能发")
     check(tab._status_text(old)[0] == "要处理", "重复的显示「要处理」")
     dup_i = s1 if s1 in tab._dups else s2
     tab._rename_rows([dup_i], lambda t: "改了个名", "改标题")
     check(tab._can_send(dup_i) and dup_i not in tab._dups, "让员工改个名:就能发了")
+    # 处理重名(用户 2026-11-03):AI 想意思相近的,话题原样留着;想的和发过的重名就再想
+    from qe import dupname
+    tries = iter(["旧的", "旧事", "老的那条"])
+    got = dupname.new_title("旧的 #CSGO", lambda full: full.startswith("旧事"), "k", asker=lambda b, av: next(tries))
+    check(got == "老的那条 #CSGO", f"和原标题一样的、用过的都不要,再想;话题原样接上 -> {got}")
+    check(dupname.new_title("一句很长很长的标题文字", lambda f: False, "k", asker=lambda b, av: "短") == "",
+          "AI 回的字数差太多(风格变了):不用")
+    real = (T.ask, tab.DUP_ASKER)
+    T.ask = lambda *a, **k: True
+    tab.DUP_ASKER = lambda b, av: b + "呀"
+    try:
+        tab.tree.clearSelection()
+        tab.run_dupname()
+    finally:
+        T.ask = real[0]
+        tab.DUP_ASKER = real[1]
+    titles = sorted(v.title for v in tab.videos if v.account == "CSGO战神君")
+    check("旧的呀" in titles and not tab._dups, f"处理重名:发过同名的那条改成新标题,就能发了 -> {titles}")
+    # 按 Delete:挪进「重复删除」
+    k = next(i for i, v in enumerate(tab.videos) if v.title == "新的")
+    (d / "新的.jpg").write_bytes(b"x")
+    tab.tree.clearSelection()
+    tab.items[k].setSelected(True)
+    T.ask = lambda *a, **kw: True
+    try:
+        tab.delete_dups()
+    finally:
+        T.ask = real[0]
+    _wait(app, lambda: not tab.busy())
+    check(os.path.isfile(d / "重复删除" / "新的.mp4") and os.path.isfile(d / "重复删除" / "新的.jpg") and not os.path.exists(d / "新的.mp4")
+          and all(v.title != "新的" for v in tab.videos), "Delete:视频连封面挪进「重复删除」(不真删),列表里没了")
 
 
 def test_view_tomorrow(tmp: Path):
@@ -5047,6 +5378,7 @@ def test_key_guards(tmp: Path):
     st = Settings(tmp / "st_kg.json")
     st["daily_plan"] = [{"cat": "游戏", "label": "游戏", "accounts": {"PUBG突围君": 20}},
                         {"cat": "教育", "label": "教育", "accounts": {"家长研习空间": 102, "家长小天地": 54}}]
+    st["api_roots"] = [str(tmp / "kg_空素材")]           # 不设就读这台电脑真的素材盘:那天有视频,页面在检查(busy),取钥匙不开(11-03 这样挂的)
     tab = T.ApiTab(st, Records(tmp / "r_kg.sqlite"), lambda m: None)
     scanned = {}
 
@@ -5512,6 +5844,9 @@ if __name__ == "__main__":
     test_unsure_check(tmp)
     test_spill_picked_root(tmp)
     test_quota_free(tmp)
+    test_cover_login(tmp)
+    test_accounts_manage(tmp)
+    test_ai_cover(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

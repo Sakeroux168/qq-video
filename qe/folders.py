@@ -71,17 +71,24 @@ def _match_dirs(root: str, date: str, st) -> tuple[dict[str, list[str]] | None, 
     ② 不是正好,但名字里含某个号的缩写(「研习空间2」「小天地（补）」),而且只含一个号的,也归它;
        名字带「已发 / 不要…」的不这么猜;一个文件夹两个号都像的,不分(算不认识,免得发错号);
     ③ 日期里又套了一层同名日期(归档里见过 10.15\\10.15\\研习空间),里面那层也照样认。"""
+    out: dict[str, list[str]] = {name: [] for name in st.account_names()}
+    films = _film_dirs(date, st)                     # 影视号:自己的文件夹\日期(11-03 加的,放法和教育号反过来)
     base = os.path.join(root, date)
     try:
         subs = _subdirs(base)
     except OSError:
-        return None, []
-    alias: dict[str, set] = {}                       # 缩写 → 哪些号
+        if not any(films.values()):
+            return None, []
+        subs = []
+    for name, ds in films.items():
+        out[name] = ds
+    alias: dict[str, set] = {}                       # 缩写 → 哪些号(只认教育那种放法的号)
     for name in st.account_names():
+        if name in films:
+            continue
         for a in st.aliases_of(name):
             if a.strip():
                 alias.setdefault(a.strip(), set()).add(name)
-    out: dict[str, list[str]] = {name: [] for name in st.account_names()}
     unknown: list[str] = []
     places = [(base, s) for s in subs if s.strip() != date.strip()]
     for s in subs:                                   # ③ 套了一层同名日期
@@ -100,6 +107,41 @@ def _match_dirs(root: str, date: str, st) -> tuple[dict[str, list[str]] | None, 
         else:
             unknown.append(os.path.relpath(os.path.join(b, s), base))
     return out, unknown
+
+
+def film_accounts(st) -> dict[str, str]:
+    """影视号(用户 2026-11-03:4 个影视号和教育号一样在罐头里发,要调封面):{号: 号自己的文件夹}。
+    文件夹是「高热剧集二创\\光影叙集」,下面是日期(11.3),再下面是视频 —— 和教育号「日期\\缩写」反过来。"""
+    out = {}
+    for a in st.get("accounts") or [] if hasattr(st, "get") else []:
+        if a.get("name") and a.get("dir"):
+            out[a["name"]] = a["dir"]
+    return out
+
+
+def _film_dirs(date: str, st) -> dict[str, list[str]]:
+    """影视号这天的文件夹:号文件夹下面日期是这天的那些(「11.3」「11.3（补）」都算)。"""
+    day = day_of(date)
+    out = {}
+    for name, d in film_accounts(st).items():
+        try:
+            out[name] = [os.path.join(d, s) for s in _subdirs(d) if day and day_of(s) == day]
+        except OSError:
+            out[name] = []
+    return out
+
+
+def all_dates(st) -> list[str]:
+    """日期下拉里有哪些天:素材文件夹的日期文件夹 + 影视号文件夹下的日期(影视那边有、教育这边没有的,按「11.3」这样加进来)。"""
+    dates = list_dates(st["material_root"])
+    have = {day_of(d) for d in dates}
+    for d in film_accounts(st).values():
+        for s in list_dates(d):
+            k = day_of(s)
+            if k and k not in have:
+                have.add(k)
+                dates.append(k)
+    return sorted(dates, key=lambda n: ((0, int(day_of(n).split(".")[0]), int(day_of(n).split(".")[1])) if day_of(n) else (1, 0, 0), n))
 
 
 def account_dirs(root: str, date: str, st) -> dict[str, list[str]]:
@@ -245,7 +287,8 @@ def _titleish(name: str) -> bool:
     return len(norm_name(name)) >= 12 and any(c in name for c in "，,：:！!？?、")
 
 
-ORIG_DIRS = {"横屏原片", "水印原片", "广告原片"}                   # 转竖屏 / 模糊水印后原片放这里(已经处理过的,不能再发一遍)
+ORIG_DIRS = {"横屏原片", "水印原片", "广告原片", "重复删除"}       # 转竖屏 / 模糊水印后原片放这里(已经处理过的,不能再发一遍);
+                                                                # 重复删除 = 按 Delete 删掉的重复视频(11-03,网络盘没有回收站,挪这里)
 
 
 def _skip_dir(name: str, path: str = "") -> bool:
@@ -404,13 +447,16 @@ def mark_dups(videos: list[Video], prefer=None) -> int:
     已经有 skip 的(0 字节)不算数,免得坏的那条把好的挤掉。返回标了几条。"""
     first: dict = {}
     n = 0
+    cnt: dict = {}
+    for v in videos:
+        if not v.skip:
+            cnt[dup_key(v)] = cnt.get(dup_key(v), 0) + 1
     for v in sorted(videos, key=lambda v: (not (prefer and prefer(v)), v.employee == NO_EMP, v.employee, v.path)):
         if v.skip:
             continue
         k = dup_key(v)
         if k in first:
-            f = first[k]
-            v.skip = f"和「{f.employee}」里那条同名,同一个号只发一条(两条都要发就让员工改个名)"
+            v.skip = f"同一天有{cnt[k]}条同名"                 # 用户 2026-11-03:备注写短
             n += 1
         else:
             first[k] = v

@@ -156,6 +156,7 @@ class _SayBox:
 class ApiTab(QWidget):
     _unsure_got = Signal(list)                    # 后台查「结果不明」的回来了:[(记录, 企鹅号上那篇 或 None, 出错原因)]
     AUTO_UNSURE = True                            # 自动去企鹅号查「结果不明」(测试里关掉,免得拿假钥匙去调真接口)
+    COVER_CHECK = True                            # 发之前看罐头里企鹅号登没登着(测试里关掉,免得连到这台电脑上真开着的罐头)
 
     def __init__(self, st, rec, say, parent=None):
         super().__init__(parent)
@@ -323,11 +324,25 @@ class ApiTab(QWidget):
         self.card_v = ProbCard("rotate", "横屏 / 偏方", [self.b_vert])
         from gui.widgets import help_dot
         self.card_v.add_help("偏方")
-        self.card_t = ProbCard("tag", "标题 / 话题", [self.b_topic])
+        self.b_dupname = QPushButton("处理重名")
+        self.b_dupname.setToolTip("重名的(发过同名 / 同一天有几条同名):AI 照原标题改一个意思相近的新标题,先给你看,点「改」才改。\n"
+                                  "确实是重复的视频:点一下那条,按键盘 Delete 删掉(挪进「重复删除」文件夹)。")
+        self.b_dupname.clicked.connect(lambda: self.run_dupname())
+        self.card_t = ProbCard("tag", "标题 / 话题", [self.b_topic, self.b_dupname])
         self.card_w = ProbCard("scan", "水印 / 口播广告", [self.b_check, self.b_blur])
         for c in (self.card_v, self.card_t, self.card_w):
             cards.addWidget(c, 1)
         hv.addLayout(cards)
+        # 封面传不上(用户 2026-11-03:亮红提醒我去登录,或者让我选这次不要封面直接发;不弹窗);平时藏着
+        self.b_cov_retry = QPushButton("登好了,接着发")
+        self.b_cov_retry.clicked.connect(lambda: self.run_publish(self._cov_rows()))
+        self.b_cov_skip = QPushButton("这次不要封面,直接发")
+        self.b_cov_skip.clicked.connect(self._publish_no_cover)
+        self.card_cov = ProbCard("warn", "", [self.b_cov_retry, self.b_cov_skip])
+        self.card_cov.hide()
+        self._cov_only = None                            # 亮红那次点「现在发布」时发的是哪些(右键只发某个号的)
+        self._nocover_once = False                       # 「这次不要封面」:只管下一次发布
+        hv.addWidget(self.card_cov)
 
         self.b_detail = QPushButton("")
         self.b_detail.setObjectName("toggle")
@@ -446,6 +461,7 @@ class ApiTab(QWidget):
         for key, owner, fn in (("F5", self, self.reload_dates),
                                ("Ctrl+F", self, lambda: (self.set_detail(True), self.e_find.setFocus(), self.e_find.selectAll())),
                                ("Escape", self.tree, self.tree.clearSelection),
+                               ("Delete", self.tree, lambda: None if self.busy() else self.delete_dups()),   # 用户 2026-11-03
                                ("F2", self.tree, self._edit_current)):
             sc = QShortcut(QKeySequence(key), owner)
             sc.activated.connect(fn)
@@ -920,16 +936,20 @@ class ApiTab(QWidget):
         """哪几条不发(重复):① 这个号以前发过同名的;② 列表里同一个号同名的,只留第一条。{行: 为什么}。"""
         out, first = {}, {}
         keys = getattr(self, "_sent_keys", {})
+        cnt: dict = {}
+        for v in self.videos:
+            k = self._dkey(v.account, v.title)
+            cnt[k] = cnt.get(k, 0) + 1
         for i, v in enumerate(self.videos):
             if self._sent(i):
                 continue
             k = self._dkey(v.account, v.title)
             r = keys.get(k)
             if r and pkey(r.get("path") or "") != pkey(v.path):
-                out[i] = f"这个号发过同名的({r.get('date') or '之前'}),不再发(真要发就让员工改个名)"
+                out[i] = "发过同名"                          # 用户 2026-11-03:备注写短
                 continue
             if k in first:
-                out[i] = f"和「{self.videos[first[k]].title[:20]}」同名,同一个号只发一条(两条都要发就让员工改个名)"
+                out[i] = f"同一天有{cnt[k]}条同名"
                 continue
             first[k] = i
         self._dups = out
@@ -1945,6 +1965,9 @@ class ApiTab(QWidget):
         if getattr(self, "_show_bad_after", False):
             self._show_bad_after = False
             self.k_bad.setChecked(True)                   # 发完有失败的:直接只看有问题的
+        nocov, self._cov_after = getattr(self, "_cov_after", None), None
+        if nocov:                                         # 发的时候封面没传上(罐头中途掉线了):卡片亮红,下次发之前登好
+            self._cover_red(f"这次有 {len(nocov)} 条封面没传上(平台自己截的),罐头里的企鹅号多半掉线了", None)
         pop = getattr(self, "_popup", None)
         self._popup = None
         if pop:
@@ -2480,6 +2503,90 @@ class ApiTab(QWidget):
         self._update_scope()
         return n
 
+    DUP_ASKER = None                                     # 测试里换掉(绝不真问 AI)
+
+    def run_dupname(self):
+        """处理重名(用户 2026-11-03):重名的(发过同名 / 同一天有几条同名)让 AI 照原标题改一个意思相近的
+        (「记住意思必须相近,不能有其他风格」),先列「原 → 新」给人看,点「改」才改;同名封面跟着改,能撤销。"""
+        from qe import dupname
+        rows = [i for i in self.target_rows() if i in self._dups and not self._sent(i)]
+        if not rows:
+            QMessageBox.information(self, "处理重名", "没有重名的视频" + ("(选中的里面)" if self.selected_rows() else "") + "。")
+            return
+        key = self.st.ai_key()
+        if not key and self.DUP_ASKER is None:
+            QMessageBox.warning(self, "处理重名", "要 AI 改标题,先在「设置」里填阿里百炼 Key。")
+            return
+        used = set(getattr(self, "_sent_keys", {})) | {self._dkey(v.account, v.title) for v in self.videos}
+        lock = threading.Lock()
+        res: dict[int, str] = {}
+
+        def one(i):
+            v = self.videos[i]
+
+            def taken(full, acc=v.account):
+                with lock:
+                    k = self._dkey(acc, full)
+                    if k in used:
+                        return True
+                    used.add(k)
+                    return False
+            try:
+                res[i] = dupname.new_title(v.title, taken, key, asker=self.DUP_ASKER)
+            except Exception as e:
+                res[i] = ""
+                self.say(f"「{v.title[:24]}」AI 没改出来:{e}")
+        from concurrent.futures import ThreadPoolExecutor
+        from PySide6.QtWidgets import QApplication, QProgressDialog
+        dlg = QProgressDialog(f"AI 在给 {len(rows)} 条重名的想新标题…", "", 0, len(rows), self)
+        dlg.setCancelButton(None)
+        dlg.setWindowTitle("处理重名")
+        dlg.setMinimumDuration(300)
+        with ThreadPoolExecutor(4) as ex:
+            futs = [ex.submit(one, i) for i in rows]
+            while not all(f.done() for f in futs):
+                dlg.setValue(sum(f.done() for f in futs))
+                QApplication.processEvents()
+                time.sleep(0.05)
+        dlg.close()
+        got = [(i, res.get(i, "")) for i in rows if res.get(i)]
+        if not got:
+            QMessageBox.information(self, "处理重名", "AI 没想出合适的新标题(日志里有原因),这次没改。")
+            return
+        ex_lines = "\n".join(f"{self.videos[i].title[:30]}\n   → {new[:30]}" for i, new in got[:6])
+        detail = "\n".join(f"{self.videos[i].title}  →  {new}" for i, new in got)
+        if not ask(self, "处理重名", f"{len(got)} 条重名的,AI 改了意思相近的新标题" +
+                   (f"({len(rows) - len(got)} 条没想出来,不改)" if len(got) < len(rows) else "") +
+                   f":\n\n{ex_lines}\n\n改文件名,同名封面跟着改。改错了点「撤销上次改名」。", "改", "先不", detail=detail):
+            return
+        seq = iter(new for _i, new in got)
+        self._rename_rows([i for i, _n in got], lambda _t: next(seq, None), "处理重名")
+
+    def delete_dups(self):
+        """按 Delete(用户 2026-11-03:「我看了后这个视频确实重复了,单击它按 delete 可以删除,文件夹里的也删掉」):
+        选中的没发的视频连同名封面挪进旁边的「重复删除」文件夹(网络盘没有回收站,挪走不真删)。"""
+        from qe import dupname
+        rows = [i for i in self.selected_rows() if not self._sent(i) and not self.rec.blocked(self.videos[i].path)]
+        if not rows:
+            if self.selected_rows():
+                QMessageBox.information(self, "删除", "选中的都已经发了(或结果不明),不能这样删。")
+            return
+        names = "\n".join(f" · {self.videos[i].title[:30]}" for i in rows[:6]) + ("\n …" if len(rows) > 6 else "")
+        if not ask(self, "删除", f"删掉这 {len(rows)} 条视频(连同名封面)?\n\n{names}\n\n"
+                                 "挪进同一个文件夹下面的「重复删除」文件夹,软件不再读它们;删错了去那里拿回来。",
+                   "删掉", "先不", default_no=True):
+            return
+        n = 0
+        for i in rows:
+            v = self.videos[i]
+            try:
+                dupname.trash(v.path)
+                n += 1
+            except OSError as e:
+                self.say(f"「{v.title[:24]}」删不掉:{e.strerror or e}")
+        self.say(f"删了 {n} 条(挪进了「重复删除」文件夹)")
+        self.load()
+
     def set_topic(self, rows: list[int] | None = None):
         rows = self.selected_rows() if rows is None else rows
         rows = [i for i in rows if not self._sent(i)]
@@ -2720,10 +2827,44 @@ class ApiTab(QWidget):
                  (f";{skipped} 条已经发了(或结果不明),不改回去" if skipped else ""))
         self.load()
 
+    # ---------------- 封面传不传得上(罐头里企鹅号登没登着) ----------------
+    def _cover_check(self) -> str:
+        """传得上 → "";传不上 → 原因。查的时候出了没想到的错不拦(照旧发,传不上的发完会列出来)。"""
+        from PySide6.QtWidgets import QApplication
+        from qe import omcover
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            return omcover.check()
+        except Exception:
+            return ""
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _cover_red(self, why: str, only, held: bool = False):
+        """封面传不上:卡片亮红,两个选择 —— 去罐头登好了接着发 / 这次不要封面直接发。不弹窗(用户 2026-11-03)。
+        held = 这次因为它先没发(人点的「现在发布」)。"""
+        # 只发某几条的:记文件,不记行号(登录的工夫里列表可能刷新过,行号会变)
+        self._cov_only = None if only is None else {self.videos[i].path for i in only if 0 <= i < len(self.videos)}
+        self.card_cov.set(f"封面传不上:{why}。去创作罐头里把企鹅号登好,或者这次不要封面", "bad")
+        self.card_cov.show()
+        if held:
+            self.say(f"⚠ 封面传不上:{why}。这次先没发 —— 去创作罐头里登好企鹅号点「登好了,接着发」,"
+                     "或者点「这次不要封面,直接发」")
+
+    def _cov_rows(self):
+        if self._cov_only is None:
+            return None
+        return [i for i, v in enumerate(self.videos) if v.path in self._cov_only]
+
+    def _publish_no_cover(self):
+        self._nocover_once = True
+        self.run_publish(self._cov_rows())
+
     # ---------------- 发布 ----------------
     def run_publish(self, only: list[int] | None = None, auto: bool = False):
         """only = 只发这几行(右键「只发这个号的」);None = 选中的,没选就是看得见的全部。发之前一定弹框让人点「发」。
         auto = 定时发布到点了(人定时的时候已经确认过):不弹框,有问题的 / 没检查出来的跳过,能发的都发。"""
+        no_cov, self._nocover_once = self._nocover_once, False     # 红卡片上点了「这次不要封面」:只管这一次
         d = self.day()
         if not d or self.busy():
             return
@@ -2752,7 +2893,8 @@ class ApiTab(QWidget):
             return
         accs = {a["nick"]: a for a in apiacc.load()}
         # 硬闸(审查 2026-10-26):教育号只在创作罐头里发,不管名单里怎么来的,接口绝不发它
-        edu = {x for g in plan.plan(self.st) if g.get("cat") == "教育" for x in (g.get("accounts") or {})}
+        edu = {x for g in plan.plan(self.st) if g.get("cat") in plan.CZGT_CATS for x in (g.get("accounts") or {})}
+        edu |= set(self.st.account_names()) if hasattr(self.st, "account_names") else set()   # 罐头那页的号(教育 / 影视)
         if any(self.videos[i].account in edu for i in rows):
             QMessageBox.warning(self, "发布", "这里面有教育号的视频(" + "、".join(sorted({self.videos[i].account for i in rows
                                                                               if self.videos[i].account in edu})) +
@@ -2761,6 +2903,12 @@ class ApiTab(QWidget):
         miss = sorted({self.videos[i].account for i in rows if self.videos[i].account not in accs})
         if miss:
             QMessageBox.warning(self, "发布", "这些号还没搬账号:" + "、".join(miss))
+            return
+        nokey = sorted({self.videos[i].account for i in rows if not (accs[self.videos[i].account].get("client_id")
+                                                                     and accs[self.videos[i].account].get("secret"))})
+        if nokey:                                        # 账号管理里新加的号,还没扫码取钥匙
+            QMessageBox.warning(self, "发布", "这些号还没取钥匙:" + "、".join(nokey) +
+                                "\n\n去「设置」→「登录取钥匙…」选这个号,用手机扫码登录它的企鹅号。")
             return
         seen: dict[str, str] = {}
         dup = []
@@ -2825,8 +2973,21 @@ class ApiTab(QWidget):
                (f"有问题的 {held} 条这次不发。\n" if held else "") + "\n发吗?")
         from qe import apicover
         cmode = str(self.st.get("api_cover") or "原样")
+        if no_cov:
+            cmode = "不传"
+        elif cmode != "不传" and self.COVER_CHECK:
+            # 发之前看一眼罐头里企鹅号登没登着(用户 2026-11-03:10.28 罐头里没登录,122 条没带封面发出去了)
+            why = self._cover_check()
+            if why and not auto:
+                self._cover_red(why, only, held=True)
+                return
+            if why:                                      # 定时发布没人看着:照样发,平台自己截;卡片亮红、发完列出来
+                self._cover_red(why, None)
+                self.say(f"⚠ 定时发布:{why},封面传不上 —— 照样发,封面平台自己截;发完列出哪几条没带封面")
+            else:
+                self.card_cov.hide()
         ncov = 0 if cmode == "不传" else sum(1 for i in rows if apicover.find(self.videos[i].path))
-        cov_line = ("封面:不传,平台自己截" if cmode == "不传" else
+        cov_line = (("封面:这次不要封面,平台自己截" if no_cov else "封面:不传,平台自己截") if cmode == "不传" else
                     f"封面:{ncov} 条有同名封面会传上去({cmode})" +
                     (f",{len(rows) - ncov} 条没放封面,软件自动挑一帧不黑的传上去" if ncov < len(rows) else ""))
         msg = msg.replace("\n\n发吗?", f"\n{cov_line}\n\n发吗?")
@@ -2844,7 +3005,7 @@ class ApiTab(QWidget):
         gate = {"last": 0.0}
         glock = threading.Lock()
         upsem = threading.Semaphore(6 if per_acc > 1 else 10 ** 6)       # 所有号加起来同时最多传 6 条(4 个号 × 5 条挤在一起反而慢)
-        stats = {"ok": 0, "fail": 0, "unsure": 0, "skip": 0, "done": 0, "bad_acc": [], "fails": [], "acc_ok": {}}
+        stats = {"ok": 0, "fail": 0, "unsure": 0, "skip": 0, "done": 0, "bad_acc": [], "fails": [], "acc_ok": {}, "nocov": []}
         slock = threading.Lock()
 
         def bump(k, n=1):
@@ -2970,6 +3131,8 @@ class ApiTab(QWidget):
                     (f";封面{r.get('cover')}" if r.get("cover") else "") + (";封面是软件自动挑的一帧" if auto_cov else "")
                 if str(r.get("cover") or "").startswith(("没传上", "平台不收")):
                     emit(-1, f"「{v.title}」发了,但封面{r['cover']}")
+                    with slock:
+                        stats["nocov"].append(f"{nick}:{v.title}")
                 bump("ok")
                 try:
                     if "id" in rid:
@@ -3055,14 +3218,20 @@ class ApiTab(QWidget):
                        (f" · 号的密钥坏了没发 {stats['skip']}({'、'.join(stats['bad_acc'])})" if stats["skip"] else "") +
                        (f" · 停下了没发 {not_run}" if stopped() and not_run > 0 else "") +
                        (f" · 发够了,多的 {spilled} 条挪到明天的文件夹({tmr})" if spilled else "") +
-                       (f" · 没发够(素材不够 / 没发成):{'、'.join(short)}" if short else ""))
+                       (f" · 没发够(素材不够 / 没发成):{'、'.join(short)}" if short else "") +
+                       (f" · {len(stats['nocov'])} 条封面没传上(平台自己截的)" if stats["nocov"] else ""))
             self._reload_after = bool(spilled)
+            self._cov_after = list(stats["nocov"])
             bad = stats["fail"] or stats["unsure"] or stats["skip"]
             lst = "".join(f"\n · {t[:26]}:{why}" for t, why in stats["fails"][:6]) + \
                 ("\n · …" if len(stats["fails"]) > 6 else "")
+            ncl = "".join(f"\n · {t[:34]}" for t in stats["nocov"][:8]) + ("\n · …(全部在下面日志里)" if len(stats["nocov"]) > 8 else "")
             self._popup = ("发完了", summary + (f"\n\n这几条要你看一下:{lst}\n\n列表已经切到「只看有问题的」。"
                                                "结果不明的去后台看一眼,再右键标「发了 / 没发」;网络问题的网好了再点「现在发布」,"
-                                               "会接着发没发的(发过的不会重发)。" if bad else ""), bool(bad))
+                                               "会接着发没发的(发过的不会重发)。" if bad else "") +
+                           (f"\n\n这 {len(stats['nocov'])} 条发出去了,但封面没传上(创作罐头里的企鹅号没登录?),"
+                            f"用的是平台自己截的一帧,要换去企鹅号后台改:{ncl}" if stats["nocov"] else ""),
+                           bool(bad or stats["nocov"]))
             self._show_bad_after = bool(bad)
             return summary
         self._pub_begin(plan_n)
@@ -3281,7 +3450,7 @@ class ApiTab(QWidget):
         names = apiacc.nicks()
         # 教育号(用户 2026-10-26):取了钥匙只用来「去企鹅号核对」,单独存,发布那边看不到;视频照旧在创作罐头里发
         from qe import plan as P
-        edu = [n for g in P.plan(self.st) if g.get("cat") == "教育" for n in (g.get("accounts") or {}) if n not in names]
+        edu = [n for g in P.plan(self.st) if g.get("cat") in P.CZGT_CATS for n in (g.get("accounts") or {}) if n not in names]
         labels = names + [n + EDU_TAG for n in edu]
         if not labels:
             QMessageBox.information(parent, "登录取钥匙", "还没有号。先「从旧软件搬账号…」。")
@@ -3340,7 +3509,7 @@ class ApiTab(QWidget):
             k = keys[labels.index(pick)]
         # 硬拦(审查 2026-10-26):扫错了号 / 16 个号和教育号的钥匙串了 → 不换,钥匙不动。
         # 不拦的话:选 PUBG 扫成教育号,点「换上」以后 PUBG 的视频全用接口发进教育号;反过来核对全错
-        edu_names = {n for g in P.plan(self.st) if g.get("cat") == "教育" for n in (g.get("accounts") or {})}
+        edu_names = {n for g in P.plan(self.st) if g.get("cat") in P.CZGT_CATS for n in (g.get("accounts") or {})}
         edu_names |= {a["nick"] for a in apiacc.qload()}
         other = str(k.get("name") or "").strip()
         why = ""
@@ -3386,7 +3555,7 @@ class ApiTab(QWidget):
                 return
         try:
             from qe import plan as P
-            edu = {x for g in P.plan(self.st) if g.get("cat") == "教育" for x in (g.get("accounts") or {})}
+            edu = {x for g in P.plan(self.st) if g.get("cat") in P.CZGT_CATS for x in (g.get("accounts") or {})}
             n = apiacc.migrate(db, skip=edu)                # 教育号只在罐头里发,不搬进接口发布名单
         except Exception as e:
             QMessageBox.warning(self, "搬账号", f"没搬成:{e}")
