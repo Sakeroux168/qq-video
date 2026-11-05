@@ -75,10 +75,14 @@ def _real(p: str) -> str:
 
 
 def _rel_in_day(st, row: dict) -> str:
-    """教育号:视频在那天的日期文件夹下面的哪几层(「家长研习空间\\小王」);认不出给 ""。"""
+    """教育号:视频在那天的日期文件夹下面的哪几层(「家长研习空间\\小王」);认不出给 ""。
+    号文件夹直接放在素材文件夹下面的(11-05 起):从素材文件夹算(「研习社」)。"""
     root, date = st.get("material_root") or "", row.get("date") or ""
     try:
-        rel = os.path.relpath(os.path.dirname(row.get("path") or ""), os.path.join(root, date))
+        d = os.path.dirname(row.get("path") or "")
+        rel = os.path.relpath(d, os.path.join(root, date))
+        if rel.startswith("..") and not os.path.isdir(os.path.join(root, date)):
+            rel = os.path.relpath(d, root)
     except ValueError:                                       # 不在一个盘(换过盘符)
         return ""
     return "" if rel in (".", "") or rel.startswith("..") else rel
@@ -184,11 +188,18 @@ def target_dir(st, row: dict, md: str) -> str:
             # 号的视频直接放在号文件夹里、没有日期文件夹的(电竞情报馆那种):挪回原来的文件夹(审查:原来直接报找不到)
             return orig if orig and os.path.isdir(orig) else ""
         return _day_dir(acc_dir, md, api=True)
+    film = F.film_accounts(st).get(row.get("account") or "")
+    if film:                                                 # 影视号:挪回原来的文件夹(不在素材文件夹下面)
+        orig = os.path.dirname(row.get("path") or "")
+        return orig if os.path.isdir(orig) else film
     rel = _rel_in_day(st, row)
     parts = rel.split(os.sep) if rel else []
     if parts and F.day_of(parts[0]):                         # 原来是「10.15\\10.15\\家长研习空间」这种套了一层同名日期的:去掉那层
         parts = parts[1:]
-    return os.path.normpath(os.path.join(_day_dir(st["material_root"], md), *parts))
+    day = _day_dir(st["material_root"], md)
+    if parts and not os.path.isdir(day) and os.path.isdir(os.path.join(st["material_root"], parts[0])):
+        return os.path.normpath(os.path.join(st["material_root"], *parts))     # 没有日期文件夹了:回号文件夹
+    return os.path.normpath(os.path.join(day, *parts))
 
 
 def pull_back(st, rec, row: dict, md: str, out: dict | None = None) -> tuple[str, str]:

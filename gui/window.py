@@ -1190,7 +1190,8 @@ class MainWindow(QMainWindow):
         if d:
             return d
         date = self.c_date.currentData() or ""
-        return os.path.join(self.st["material_root"], date) if date else self.st["material_root"]
+        day = os.path.join(self.st["material_root"], date) if date else ""
+        return day if day and os.path.isdir(day) else self.st["material_root"]      # 没有日期文件夹了(11-05 起):开素材文件夹
 
     def _table_menu(self, pos):
         row = self.table.rowAt(pos.y())
@@ -1706,11 +1707,18 @@ class MainWindow(QMainWindow):
             return 0
         root = os.path.normcase(os.path.normpath(self.st["material_root"]))
         tmr = plan.tomorrow_folder()
-        n, accs = 0, set()
+        n, kept, accs = 0, 0, set()
         for v in self.videos:
-            if self.rec.status_of(v.path) or self.row_note.get(v.path, "").startswith("挪到明天") or not os.path.isfile(v.path):
+            if self.rec.status_of(v.path) or self.row_note.get(v.path, "").startswith(("挪到明天", "留到明天")) or not os.path.isfile(v.path):
                 continue
             if self._edu_left(v.account) != 0:
+                continue
+            if F.in_flat(v.path, self.st):             # 号文件夹里没有日期(11-05 起):不用挪,留着明天接着发
+                kept += 1
+                accs.add(v.account)
+                v.skip = "这天发够规定条数了,留到明天"
+                self.row_note[v.path] = "留到明天"
+                self._fill_row(self.videos.index(v))
                 continue
             day_dir = os.path.dirname(v.path)
             while day_dir and os.path.normcase(os.path.dirname(day_dir)) != root and os.path.dirname(day_dir) != day_dir:
@@ -1732,10 +1740,11 @@ class MainWindow(QMainWindow):
             self.row_note[v.path] = f"挪到明天({tmr})"
             if v in self.videos:
                 self._fill_row(self.videos.index(v))
-        if n:
-            self.say(f"{'、'.join(sorted(accs))} 这天发够规定条数了:还没发的 {n} 条挪到了明天的文件夹 {tmr}")
+        if n or kept:
+            self.say(f"{'、'.join(sorted(accs))} 这天发够规定条数了:还没发的 " +
+                     "、".join(x for x in (f"{n} 条挪到了明天的文件夹 {tmr}" if n else "", f"{kept} 条留在号文件夹里明天接着发" if kept else "") if x))
             self._update_scope()
-        return n
+        return n + kept
 
     def _edu_short(self) -> str:
         """勾上的号里这天还没发够、又没得摆了的:「家长小天地 还差 3 条」(不能少发:素材不够要说)。"""
@@ -2295,6 +2304,8 @@ class MainWindow(QMainWindow):
             return
         dst = F.archive_target(self.st, date)
         src = os.path.join(self.st["material_root"], date)
+        if not os.path.isdir(src) and F.flat_account_dirs(self.st):
+            return self._move_flat(date, dst)
         left = []
         for acc, dirs in F.account_dirs(self.st["material_root"], date, self.st).items():
             for d in dirs:
@@ -2333,6 +2344,32 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "挪走", f"挪不动:{e.strerror or e}\n\n(有文件开着?关掉再试)")
             return
         self.say(f"「{date}」挪到了 {dst}")
+        self._load_dates()
+
+    def _move_flat(self, date: str, dst: str):
+        """没有日期文件夹了(11-05 起):只挪已发的(连同封面),没发的留在号文件夹明天接着发。"""
+        sent, left = [], 0
+        for acc, d in F.flat_account_dirs(self.st):
+            for v in F.scan_account(d, acc, date):
+                if self.rec.status_of(v.path) == "已发":
+                    sent.append((d, v))
+                else:
+                    left += 1
+        if not sent:
+            QMessageBox.information(self, "挪走", "号文件夹里还没有已发的视频,没有要挪的。")
+            return
+        if not self._ask("这天发完了,挪走", f"把已发的 {len(sent)} 条(连同封面)挪到:\n{dst}\n\n" +
+                         (f"没发的 {left} 条留在号文件夹里,明天接着发。\n\n" if left else "") + "挪吗?", "挪走", "先不"):
+            return
+        from qe.fsops import MoveError
+        try:
+            n, errs = self._bg(f"正在把已发的 {len(sent)} 条挪走…(网络盘上可能要一会儿)", lambda: F.move_flat(self.st, date, sent))
+        except MoveError as e:
+            QMessageBox.warning(self, "挪走", str(e))
+            return
+        if errs:
+            QMessageBox.warning(self, "挪走", f"挪了 {n} 条,还有 {len(errs)} 个挪不动(留在原处):\n" + "\n".join(errs[:5]))
+        self.say(f"已发的 {n} 条挪到了 {dst}" + (f",没发的 {left} 条留着明天发" if left else ""))
         self._load_dates()
 
     def _bg(self, title: str, fn):

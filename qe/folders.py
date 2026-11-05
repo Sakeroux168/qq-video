@@ -2,6 +2,10 @@
 实际每个人放法都不一样 → 界面用 scan_account():号文件夹整个翻一遍,按名字配封面(见下面)。
 
 发完一整天:把 <日期> 文件夹剪切到 X:\\知乎视频\\内容查看\\<月>月发布视频\\企鹅号\\教育\\ 下面。
+
+2026-11-05 起放法改了(用户:「点开小学生教育文件夹进去,直接就是两个账号了」,影视暂时也一样):
+    小学生教育\\<号的缩写>\\*.mp4 + 封面            高热剧集二创\\<号>\\<随便一层>\\*.mp4 + 封面
+没有日期文件夹了,里面的东西就是「今天」要发的;老的日期文件夹照样认(号文件夹下面的日期文件夹只在选那天时才算)。
 """
 import os
 import re
@@ -12,6 +16,8 @@ VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".flv", ".wmv")
 _DATE_RE = re.compile(r"^(\d{1,2})[.\-_月](\d{1,2})日?$")
 # 日期文件夹会被人改名加后缀(10.17 真有人把「10.14」改成「10.14（101）」),月 / 日只看开头
 _DAY_RE = re.compile(r"^\s*(\d{1,2})[.\-_月](\d{1,2})(?!\d)")
+# 一个文件夹是不是日期文件夹:标题文件夹也可能开头是日期(「11.11 省钱攻略」),这里要整个名字都是日期
+_DATE_DIR_RE = re.compile(r"^\s*\d{1,2}[.\-_月]\d{1,2}日?\s*(?:[（(][^）)]*[）)])?\s*$")
 
 
 @dataclass
@@ -59,6 +65,17 @@ def day_of(date: str) -> str:
     return f"{int(m.group(1))}.{int(m.group(2))}" if m else ""
 
 
+def _is_date_dir(name: str) -> bool:
+    return bool(_DATE_DIR_RE.match(name or ""))
+
+
+def today_md() -> str:
+    """今天(北京时间),「11.5」这样。"""
+    from .config import bj_now
+    n = bj_now()
+    return f"{n.month}.{n.day}"
+
+
 def _subdirs(d: str) -> list[str]:
     """d 下面的文件夹名(按名字排)。用 scandir 认:名字末尾带空格的(苹果电脑建的)os.path.isdir 认不出,会悄悄漏掉。"""
     with os.scandir(d) as it:
@@ -70,25 +87,21 @@ def _match_dirs(root: str, date: str, st) -> tuple[dict[str, list[str]] | None, 
     ① 名字(去掉前后空格)正好是号名 / 缩写的,归那个号;
     ② 不是正好,但名字里含某个号的缩写(「研习空间2」「小天地（补）」),而且只含一个号的,也归它;
        名字带「已发 / 不要…」的不这么猜;一个文件夹两个号都像的,不分(算不认识,免得发错号);
-    ③ 日期里又套了一层同名日期(归档里见过 10.15\\10.15\\研习空间),里面那层也照样认。"""
+    ③ 日期里又套了一层同名日期(归档里见过 10.15\\10.15\\研习空间),里面那层也照样认;
+    ④ 今天:素材文件夹下面直接放的号文件夹(11-05 起的放法)也算这天的,认法和①②一样。"""
     out: dict[str, list[str]] = {name: [] for name in st.account_names()}
     films = _film_dirs(date, st)                     # 影视号:自己的文件夹\日期(11-03 加的,放法和教育号反过来)
     base = os.path.join(root, date)
+    tops = _flat_names(root) if day_of(date) == today_md() else []
     try:
         subs = _subdirs(base)
     except OSError:
-        if not any(films.values()):
+        if not any(films.values()) and not tops:
             return None, []
         subs = []
     for name, ds in films.items():
         out[name] = ds
-    alias: dict[str, set] = {}                       # 缩写 → 哪些号(只认教育那种放法的号)
-    for name in st.account_names():
-        if name in films:
-            continue
-        for a in st.aliases_of(name):
-            if a.strip():
-                alias.setdefault(a.strip(), set()).add(name)
+    alias = _aliases(st)
     unknown: list[str] = []
     places = [(base, s) for s in subs if s.strip() != date.strip()]
     for s in subs:                                   # ③ 套了一层同名日期
@@ -99,14 +112,81 @@ def _match_dirs(root: str, date: str, st) -> tuple[dict[str, list[str]] | None, 
             except OSError:
                 unknown.append(s)
     for b, s in places:
-        hits = alias.get(s.strip(), set())
-        if not hits and not _skip_dir(s):            # ② 名字里含缩写(缩写至少两个字,免得一个字到处都像)
-            hits = {n for a, ns in alias.items() if len(a) >= 2 and a in s for n in ns}
+        hits = _hits(alias, s)
         if len(hits) == 1:
             out[next(iter(hits))].append(os.path.join(b, s))
         else:
             unknown.append(os.path.relpath(os.path.join(b, s), base))
+    for s in tops:                                   # ④ 号文件夹直接在素材文件夹下面
+        hits = _hits(alias, s)
+        if len(hits) == 1:
+            out[next(iter(hits))].append(os.path.join(root, s))
+        else:
+            unknown.append(s)
     return out, unknown
+
+
+def _aliases(st) -> dict[str, set]:
+    """缩写 → 哪些号(只认教育那种放法的号)。"""
+    films = film_accounts(st)
+    alias: dict[str, set] = {}
+    for name in st.account_names():
+        if name in films:
+            continue
+        for a in st.aliases_of(name):
+            if a.strip():
+                alias.setdefault(a.strip(), set()).add(name)
+    return alias
+
+
+def _hits(alias: dict[str, set], s: str) -> set:
+    hits = alias.get(s.strip(), set())
+    if not hits and not _skip_dir(s):                # ② 名字里含缩写(缩写至少两个字,免得一个字到处都像)
+        hits = {n for a, ns in alias.items() if len(a) >= 2 and a in s for n in ns}
+    return hits
+
+
+def _flat_names(root: str) -> list[str]:
+    """素材文件夹下面不是日期的文件夹(「已发 / 重复删除」这种不算)。"""
+    try:
+        return [s for s in _subdirs(root) if not _is_date_dir(s) and not _skip_dir(s, os.path.join(root, s))]
+    except OSError:
+        return []
+
+
+def flat_account_dirs(st) -> list[tuple[str, str]]:
+    """教育号直接放在素材文件夹下面的号文件夹:[(号, 文件夹)]。"""
+    alias, root, out = _aliases(st), st["material_root"], []
+    for s in _flat_names(root):
+        hits = _hits(alias, s)
+        if len(hits) == 1:
+            out.append((next(iter(hits)), os.path.join(root, s)))
+    return out
+
+
+def _film_flat(d: str) -> bool:
+    """影视号文件夹下面直接有东西(不只是日期文件夹):11-05 起的放法。"""
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                if e.is_dir():
+                    if not _is_date_dir(e.name) and not _skip_dir(e.name, e.path):
+                        return True
+                elif os.path.splitext(e.name)[1].lower() in VIDEO_EXTS:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def in_flat(path: str, st) -> bool:
+    """这个视频是不是在号文件夹里(没有日期文件夹这一层):发够了不用挪去明天,留着明天接着发。"""
+    p = os.path.normcase(os.path.normpath(path))
+    for r in [st["material_root"]] + list(film_accounts(st).values()):
+        r = os.path.normcase(os.path.normpath(r))
+        if p.startswith(r + os.sep):
+            return not _is_date_dir(p[len(r) + 1:].split(os.sep)[0])
+    return False
 
 
 def film_accounts(st) -> dict[str, str]:
@@ -120,27 +200,36 @@ def film_accounts(st) -> dict[str, str]:
 
 
 def _film_dirs(date: str, st) -> dict[str, list[str]]:
-    """影视号这天的文件夹:号文件夹下面日期是这天的那些(「11.3」「11.3（补）」都算)。"""
+    """影视号这天的文件夹:号文件夹下面日期是这天的那些(「11.3」「11.3（补）」都算);
+    今天算号文件夹本身(11-05 起没有日期文件夹了,里面别的天的日期文件夹 scan_account 不翻)。"""
     day = day_of(date)
     out = {}
     for name, d in film_accounts(st).items():
         try:
-            out[name] = [os.path.join(d, s) for s in _subdirs(d) if day and day_of(s) == day]
+            out[name] = [os.path.join(d, s) for s in _subdirs(d) if day and _is_date_dir(s) and day_of(s) == day]
         except OSError:
             out[name] = []
+        if day == today_md() and _film_flat(d):
+            out[name] = [d]                          # 里面今天的日期文件夹 scan_account 会翻到,不重复算
     return out
 
 
 def all_dates(st) -> list[str]:
-    """日期下拉里有哪些天:素材文件夹的日期文件夹 + 影视号文件夹下的日期(影视那边有、教育这边没有的,按「11.3」这样加进来)。"""
-    dates = list_dates(st["material_root"])
+    """日期下拉里有哪些天:素材文件夹的日期文件夹 + 影视号文件夹下的日期(影视那边有、教育这边没有的,按「11.3」这样加进来);
+    号文件夹直接放在外面的(11-05 起)算今天,号文件夹本身不是日期,不进下拉。"""
+    tops = {os.path.basename(d) for _a, d in flat_account_dirs(st)}
+    dates = [d for d in list_dates(st["material_root"]) if d not in tops and (not tops or day_of(d))]
     have = {day_of(d) for d in dates}
-    for d in film_accounts(st).values():
+    films = film_accounts(st).values()
+    for d in films:
         for s in list_dates(d):
-            k = day_of(s)
+            k = day_of(s) if _is_date_dir(s) else ""
             if k and k not in have:
                 have.add(k)
                 dates.append(k)
+    today = today_md()
+    if today not in have and (tops or any(_film_flat(d) for d in films)):
+        dates.append(today)
     return sorted(dates, key=lambda n: ((0, int(day_of(n).split(".")[0]), int(day_of(n).split(".")[1])) if day_of(n) else (1, 0, 0), n))
 
 
@@ -383,9 +472,13 @@ def scan_account(acc_dir: str, account: str, date: str, report: list | None = No
     tools: dict[str, list[tuple]] = {}               # 名字(norm) → [(封面工具的文件夹, 员工, 文件夹名)](横屏16x9.png / 竖屏9x16.png / 修改 (1).png)
     base = os.path.normpath(acc_dir)
     rep = report if report is not None else []
+    # 号文件夹没有套在日期下面(11-05 起的放法):它里面别的天的日期文件夹(「剧讯幕后社\\11.4」)选那天才看
+    flat = not (day_of(os.path.basename(base)) or day_of(os.path.basename(os.path.dirname(base))))
     for cur, dirs, files in os.walk(base, onerror=lambda e: rep.append(("打不开", getattr(e, "filename", "") or str(e), 0))):
         keep = []
         for d in sorted(dirs):
+            if flat and cur == base and _is_date_dir(d) and day_of(d) != day_of(date):
+                continue
             if _skip_dir(d, os.path.join(cur, d)):
                 rep.append(("跳过", os.path.join(cur, d), _count_videos(os.path.join(cur, d))))
             else:
@@ -485,6 +578,38 @@ def emp_dir(acc_dir: str, emp: str) -> str:
 def archive_target(st, date: str) -> str:
     root = str(st.get("archive_root") or "").replace("{month}", month_of(date) or "?")
     return os.path.join(root, date)
+
+
+def move_flat(st, date: str, sent: list, on_file=None) -> tuple[int, list[str]]:
+    """号文件夹直接放在素材文件夹下面的(11-05 起):没有日期文件夹可以整个挪,只挪已发的(连同封面)到
+    归档\\<日期>\\<号文件夹>\\…,没发的留着明天接着发,号文件夹不动。sent = [(号文件夹, 视频)]。返回 (挪了几条, 挪不动的)。"""
+    from .fsops import MoveError, move_tree, safe_move_file, unique
+    from .redo import extras
+    if not str(st.get("archive_root") or "").strip():
+        raise MoveError("设置里「发完挪到」是空的,先填好再挪")
+    dst = archive_target(st, date)
+    n, errs = 0, []
+    for acc_dir, v in sent:
+        rel = os.path.relpath(os.path.dirname(v.path), acc_dir)
+        to = os.path.normpath(os.path.join(dst, os.path.basename(acc_dir), rel))
+        more = extras(v.path)
+        try:
+            safe_move_file(v.path, unique(os.path.join(to, os.path.basename(v.path))))
+        except OSError as e:
+            errs.append(f"{os.path.basename(v.path)}:{e}")
+            continue
+        n += 1
+        if on_file:
+            on_file(v.path)
+        for p, _k, r in more:
+            try:
+                if os.path.isdir(p):
+                    errs += move_tree(p, os.path.join(to, r))[1]
+                else:
+                    safe_move_file(p, unique(os.path.join(to, r)))
+            except OSError as e:
+                errs.append(f"{os.path.basename(p)}:{e}")
+    return n, errs
 
 
 def move_date(st, date: str, merge: bool = False, on_file=None) -> str:

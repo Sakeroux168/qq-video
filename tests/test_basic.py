@@ -3112,6 +3112,74 @@ def test_ai_cover(tmp: Path):
     check(C.rkey(3 / 4) in (v.plan.get("ai") or {}), "「恢复自动」重新配封面:AI 挪过的框从记录里套回来,不再问 AI")
 
 
+def test_flat_folders(tmp: Path):
+    print("[罐头发的号没有日期文件夹了(用户 2026-11-05):小学生教育\\研习社 直接是号;里面的就是今天的;发够了留着;发完只挪已发的]")
+    from types import SimpleNamespace
+    from qe import folders as F, redo
+    from qe.config import Settings
+    import gui.window as W
+    today = F.today_md()
+    root = tmp / "flat" / "小学生教育"
+    st = Settings(tmp / "flat_st.json")
+    st["material_root"] = str(root)
+    st["archive_root"] = str(tmp / "flat" / "内容查看" / "{month}月发布视频" / "教育")
+    film = tmp / "flat" / "高热剧集二创" / "剧讯幕后社"
+    st["accounts"] = [{"name": "家长研习空间", "aliases": ["研习空间", "研习社"]}, {"name": "家长小天地", "aliases": ["小天地"]},
+                      {"name": "剧讯幕后社", "aliases": [], "dir": str(film)}]
+    a = root / "研习社"
+    a.mkdir(parents=True)
+    (root / "小天地").mkdir()
+    (root / "不认识").mkdir()
+    (root / "重复删除").mkdir()
+    for n in ("第一条", "第二条"):
+        (a / f"{n}.mp4").write_bytes(b"x")
+        (a / f"{n}.jpg").write_bytes(b"x")
+        (a / n).mkdir()
+        _img(a / n / "横屏16x9.png", 64, 36)
+        (a / n / "原图.png").write_bytes(b"x")
+    (film / "幕后社").mkdir(parents=True)
+    (film / "幕后社" / "今天的.mp4").write_bytes(b"x")
+    (film / "1.1" / "幕后社").mkdir(parents=True)
+    (film / "1.1" / "幕后社" / "老的.mp4").write_bytes(b"x")
+    ds = F.all_dates(st)
+    check(sorted(ds) == sorted(["1.1", today]), f"日期下拉:有今天,号文件夹和别的文件夹不混进去 -> {ds}")
+    ad = F.account_dirs(str(root), today, st)
+    check(ad["家长研习空间"] == [str(a)] and ad["剧讯幕后社"] == [str(film)], f"今天:号文件夹直接认 -> {ad}")
+    check(F.unknown_dirs(str(root), today, st) == ["不认识"], "不认识的文件夹提醒;「重复删除」不算")
+    check(not F.account_dirs(str(root), "1.1", st)["家长研习空间"], "别的天:号文件夹不算(只有今天算)")
+    vs = F.scan_account(str(a), "家长研习空间", today)
+    check(len(vs) == 2 and all(v.png.endswith("横屏16x9.png") for v in vs) and {v.employee for v in vs} == {F.NO_EMP},
+          "视频直接在号文件夹里:读得到,封面工具的文件夹配得上")
+    fv = [v.title for d in ad["剧讯幕后社"] for v in F.scan_account(d, "剧讯幕后社", today)]
+    check(fv == ["今天的"], f"影视号今天不翻里面的日期文件夹 -> {fv}")
+    old = [v.title for d in F.account_dirs(str(root), "1.1", st)["剧讯幕后社"] for v in F.scan_account(d, "剧讯幕后社", "1.1")]
+    check(old == ["老的"], f"选那天才看日期文件夹 -> {old}")
+    check(F.in_flat(vs[0].path, st) and F.in_flat(str(film / "幕后社" / "今天的.mp4"), st)
+          and not F.in_flat(str(film / "1.1" / "幕后社" / "老的.mp4"), st) and not F.in_flat(str(root / "11.1" / "研习社" / "a.mp4"), st),
+          "分得清号文件夹里的和日期文件夹里的")
+    # 发够了:留着,不挪去明天
+    said = []
+    fake = SimpleNamespace(worker=None, batch_id="", st=st, videos=[vs[1]], row_note={}, rec=SimpleNamespace(status_of=lambda p: ""),
+                           _edu_left=lambda acc: 0, _fill_row=lambda i: None, say=said.append, _update_scope=lambda: None)
+    n = W.MainWindow._edu_spill(fake)
+    check(n == 1 and vs[1].skip.startswith("这天发够") and os.path.isfile(vs[1].path) and "明天接着发" in said[0],
+          f"发够规定条数:留在号文件夹,不建明天的文件夹 -> {said} {[x.name for x in root.iterdir()]}")
+    vs[1].skip = ""
+    # 发完挪走:只挪已发的
+    dst = F.archive_target(st, today)
+    moved, errs = F.move_flat(st, today, [(str(a), vs[0])])
+    to = Path(dst) / "研习社"
+    check(moved == 1 and not errs and (to / "第一条.mp4").is_file() and (to / "第一条.jpg").is_file() and (to / "第一条" / "横屏16x9.png").is_file(),
+          f"已发的连封面挪到 归档\\日期\\号文件夹 -> {errs}")
+    check((a / "第二条.mp4").is_file() and (a / "第二条").is_dir() and not (a / "第一条").exists() and not (a / "第一条.jpg").exists(),
+          "没发的留着;号文件夹不动")
+    row = {"date": today, "path": str(a / "第一条.mp4"), "account": "家长研习空间", "platform": ""}
+    check(redo.locate(st, row) == str(to / "第一条.mp4"), f"找视频重发:归档里找得到 -> {redo.locate(st, row)}")
+    check(redo.target_dir(st, row, today) == str(a), f"挪回来重发:回号文件夹,不建日期文件夹 -> {redo.target_dir(st, row, today)}")
+    frow = {"date": today, "path": str(film / "幕后社" / "今天的.mp4"), "account": "剧讯幕后社", "platform": ""}
+    check(redo.target_dir(st, frow, today) == str(film / "幕后社"), "影视号:挪回原来的文件夹")
+
+
 def test_title_date(tmp: Path):
     print("[标题里的日期(用户 2026-11-03):只发今天 / 昨天的,将来的、更早的都不要;「3号选手」不算日期;右键放行]")
     from datetime import date
@@ -5965,6 +6033,7 @@ if __name__ == "__main__":
     test_accounts_manage(tmp)
     test_ai_cover(tmp)
     test_title_date(tmp)
+    test_flat_folders(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
