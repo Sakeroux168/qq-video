@@ -224,7 +224,7 @@ def platform_between(cl, start: str, end: str, max_pages: int = 2000, stopped=No
                 vi = a.get("article_video_info") or {}
                 p = {"aid": _aid_of_item(a), "vid": str(vi.get("vid") or ""), "title": str(a.get("article_title") or ""),
                      "flag": str(a.get("article_pub_flag") or ""), "deleted": str(a.get("article_del_flag") or "") == "已删除",
-                     "time": t}
+                     "time": t, "img": str(a.get("article_imgurl") or ""), "url": str(a.get("article_url") or "")}
                 key = p["aid"] or (("v:" + p["vid"]) if p["vid"] else "")
                 if key and key in seen:
                     continue

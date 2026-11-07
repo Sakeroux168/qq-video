@@ -3,7 +3,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('models/face_detection_yunet_2023mar.onnx', 'models')],
+    datas=[('models/face_detection_yunet_2023mar.onnx', 'models'), ('resdet/resdet.exe', 'resdet'), ('resdet/licenses', 'resdet/licenses')],
     hiddenimports=['gui.window', 'qe.config', 'qe.folders', 'qe.cover', 'qe.records', 'qe.cdp', 'qe.prepare', 'openpyxl'],
     hookspath=[],
     hooksconfig={},

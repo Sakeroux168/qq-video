@@ -31,6 +31,9 @@ _api_mod.ApiTab.AUTO_UNSURE = False                          # 测试里不自�
 _api_mod.ApiTab.COVER_CHECK = False                          # 测试里不去看这台电脑上真开着的罐头登没登着
 import gui.window as _win_mod                                # noqa: E402
 _win_mod.MainWindow.AI_COVER = False                         # 测试里不让 AI 看封面(真 Key 会花钱)
+_win_mod.MainWindow.BLACK_SCAN = False                       # 测试里不去读真号的封面
+_win_mod.MainWindow.SHARP_CHECK = False                      # 测试里不在后台查清晰度
+_api_mod.ApiTab.SHARP_CHECK = False
 _REAL_ASK = _api_mod.ask                                     # 有的测试会换掉 ask():留一份真的
 
 
@@ -3180,6 +3183,235 @@ def test_flat_folders(tmp: Path):
     check(redo.target_dir(st, frow, today) == str(film / "幕后社"), "影视号:挪回原来的文件夹")
 
 
+def test_black_cover(tmp: Path):
+    print("[黑封面(用户 2026-11-06):很小的字幕也算黑;发前换掉黑图;发完读平台封面列出来;只读]")
+    import io
+    from PIL import Image, ImageDraw
+    from qe import blackcover as B
+
+    def pic(fn):
+        im = Image.new("RGB", (640, 360), "black")
+        fn(ImageDraw.Draw(im))
+        return im
+    black = pic(lambda d: None)
+    subtitle = pic(lambda d: d.rectangle([250, 300, 390, 312], fill="white"))
+    big = pic(lambda d: d.rectangle([40, 120, 600, 240], fill="white"))
+    normal = Image.new("RGB", (640, 360), (120, 150, 90))
+    check(B.is_black_img(black) and B.is_black_img(subtitle), "纯黑、只有一小行字幕:算黑")
+    check(not B.is_black_img(big) and not B.is_black_img(normal), "黑底大字、正常画面:不算")
+    d = tmp / "blk"
+    d.mkdir()
+    black.save(d / "黑.jpg")
+    normal.save(d / "好.jpg")
+    (d / "坏.jpg").write_bytes(b"not a picture")
+    check(B.is_black(str(d / "黑.jpg")) and not B.is_black(str(d / "好.jpg")) and not B.is_black(str(d / "坏.jpg")), "本地图:黑的认得出,读不出来的不算黑")
+
+    def jpg(im):
+        b = io.BytesIO()
+        im.save(b, "JPEG")
+        return b.getvalue()
+    imgs = {"u1": jpg(black), "u2": jpg(normal), "u3": jpg(subtitle)}
+
+    class Cl:
+        def list_articles(self, page, limit):
+            rows = [("a1", "黑的", "u1", "正常"), ("a2", "好的", "u2", "正常"), ("a3", "小字幕", "u3", "正常"), ("a4", "没图", "", "正常"),
+                    ("a5", "删了的", "u1", "已删除"), ("a6", "读不出", "u9", "正常")]
+            return {"total": len(rows), "articles": [] if page > 1 else [
+                {"article_id": i, "article_title": t, "article_imgurl": u, "article_url": "http://x/" + i, "article_del_flag": f,
+                 "article_pub_time": "2026-11-06 10:00:00", "article_pub_flag": "1", "article_video_info": {"vid": "v" + i}}
+                for i, t, u, f in rows]}
+
+    def fetch(u):
+        return imgs[u]
+    got, bad = B.scan_one({"nick": "甲"}, "2026-11-06", "2026-11-06", make_client=lambda a: Cl(), fetch=fetch)
+    check([x["title"] for x in got] == ["黑的", "小字幕"] and got[0]["nick"] == "甲" and got[0]["url"] == "http://x/a1",
+          f"读平台封面:列出黑的,删了的不算 -> {got}")
+    check(bad == 2, f"没图 / 读不出来的记下几张,不当成没问题 -> {bad}")
+    B.save("2026-11-06", got)
+    check(B.load("2026-11-06") == got and B.load("2026-11-07") == [], "查到的记下来(软件重开还在),别的天不算")
+    # 窗口
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from gui.black_dialog import BlackDialog
+    dlg = BlackDialog("2026-11-06", None, items=got)
+    check(dlg.t.rowCount() == 2 and dlg.t.item(0, 1).text() == "黑的" and "2 条" in dlg.lab_done.text(), "窗口列出来:号 / 标题 / 时间")
+    dlg.copy()
+    check(QApplication.clipboard().text() == "甲\t黑的\n甲\t小字幕", "复制标题")
+    dlg.close()
+    # 发之前:放的封面是黑的,换软件挑的一帧
+    from PySide6.QtWidgets import QMessageBox
+    from qe import apiacc, autocover, omapi
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    app = QApplication.instance()
+    day = tmp / "blkpub" / "游戏视频" / "CSGO--CSGO战神君" / "10.18"
+    day.mkdir(parents=True)
+    for n in ("黑图", "好图"):
+        (day / f"{n}.mp4").write_bytes(b"x")
+    black.save(day / "黑图.jpg")
+    normal.save(day / "好图.jpg")
+    picked = tmp / "blkpub" / "挑的.jpg"
+    normal.save(picked)
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_blkpub.json")
+    st["api_roots"] = [str(tmp / "blkpub" / "游戏视频")]
+    st["api_archive"] = str(tmp / "blkpub" / "发布" / "{date}")
+    st["api_interval"] = 0
+    st["quota_open"] = True
+    logs = []
+    tab = T.ApiTab(st, Records(tmp / "rec_blkpub.sqlite"), logs.append)
+    tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
+    tab._update_scope()
+    sent = {}
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, path, title, cat, before_publish=None, cover="", cover_upload=None, **k):
+            if before_publish:
+                before_publish("V" + title)
+            sent[title] = cover
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功", "cover": "传了"}
+    real = (omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning, autocover.pick)
+    omapi.Client, T.ask, autocover.pick = Fake, (lambda *a, **k: True), (lambda p: str(picked))
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: 0)
+    try:
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy() and len(sent) == 2, 30)
+        app.processEvents()
+        check(sent.get("黑图") == str(picked), f"放的封面是黑的:传软件挑的一帧 -> {sent}")
+        check(os.path.basename(sent.get("好图", "")) == "好图.jpg", "放的封面正常:照旧传它")
+        check("封面是黑的" in tab.logbox.toPlainText(), "日志里说了一声")
+    finally:
+        omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning, autocover.pick = real
+        apiacc.save([])
+
+
+def test_sharp(tmp: Path):
+    print("[发布前查清晰度(用户 2026-11-06):低清放大看 resdet 的尺寸要两帧一致;整条糊看最清楚的一帧;只提醒不拦;记下来不重查]")
+    import numpy as np
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from qe import sharp as S
+    raw = "640:0.61 325:0.50\n360:0.60 111:0.70"
+    check(S.sizes(raw, 1080, 608) == [(640, 360)], f"resdet 的话读得出:宽高比例一致才算 -> {S.sizes(raw, 1080, 608)}")
+    check(S.sizes("810:0.7\n456:0.7", 1080, 608) == [], "0.75 倍是压缩的假信号,不算")
+    check(S.sizes("720:0.7\n405:0.7", 1080, 608) == [], "720 放大到 1080(我们转竖屏就有):不算")
+    check(S.sizes("640:0.50\n360:0.50", 1080, 608) == [], "分数不够:不算")
+    check(S.sizes("681:0.7\n380:0.7", 720, 406) == [], "720×406 估成 681×380:几乎没放大,不算")
+    check(S.sizes("坏的", 1080, 608) == [], "读不出来:不算")
+    check(S.agree([[(640, 360)], [], [(641, 361)]]) == (640, 360), "两帧都出现(差一点算一样):算")
+    check(S.agree([[(640, 360)], [(480, 270)], []]) is None, "每帧说的尺寸都不一样:是噪声,不算")
+    rng = np.random.default_rng(1)
+    sharp_f = (rng.random((608, 1080)) * 255).astype("uint8")
+    yy, xx = np.mgrid[0:608, 0:1080]
+    soft = (127 + 100 * np.sin(xx / 90) * np.sin(yy / 70)).astype("uint8")
+    r = S.check("x", "", 10, grab=lambda t: sharp_f, detect=lambda g: "640:0.6\n360:0.6")
+    check(r["hits"] == [{"kind": "low", "w": 640, "h": 360}], f"低清放大:记下估的尺寸 -> {r}")
+    r = S.check("x", "", 10, grab=lambda t: soft, detect=lambda g: "")
+    check([x["kind"] for x in r["hits"]] == ["blur"], f"4 帧都没有清楚的:算糊 -> {r}")
+    got = []
+    S.check("x", "", 10, grab=lambda t: got.append(round(t)) or sharp_f, detect=lambda g: "")
+    check(got == [2, 4, 6, 8], f"抽 4 帧 -> {got}")
+    bar = np.zeros((1920, 1080), dtype="uint8")
+    bar[656:1264] = sharp_f
+    check(S.active(bar).shape == (608, 1080), "上下黑边去掉再看")
+    check(S.check("x", "", 10, grab=lambda t: sharp_f, detect=lambda g: "")["hits"] == [], "清楚的:没事")
+    bad = False
+    try:
+        S.check("x", "", 10, grab=lambda t: None)
+    except OSError:
+        bad = True
+    check(bad, "一帧都读不出来:报错,不记成没问题")
+    real = S.resdet_path
+    S.resdet_path = lambda: ""
+    check(S.check("x", "", 10, grab=lambda t: sharp_f)["hits"] == [], "没放 resdet:照样跑,只看糊不糊")
+    S.resdet_path = real
+    check(S.text({"hits": [{"kind": "low", "w": 640, "h": 360}], "ok": False}) == "疑似低清放大(约 640×360),看一眼", "表格里的话")
+    check(S.text({"hits": [{"kind": "blur"}], "ok": True}) == "" and S.text({"hits": []}) == "" and S.text(None) == "", "人说过没问题 / 没问题:不写")
+    # 后台查:查过的不重查、读不出来的不记;只提醒,状态还是能发
+    from types import SimpleNamespace
+    from gui.sharp_worker import SharpWorker
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    d = tmp / "shp" / "游戏视频" / "CSGO--CSGO战神君" / "10.18"
+    d.mkdir(parents=True)
+    (d / "好.mp4").write_bytes(b"1")
+    (d / "糊.mp4").write_bytes(b"22")
+    (d / "坏.mp4").write_bytes(b"333")
+    calls = []
+
+    def fake(path, ff, dur, stop=None):
+        calls.append(os.path.basename(path))
+        if path.endswith("坏.mp4"):
+            raise OSError("读不出")
+        return {"hits": [{"kind": "blur", "score": 50}] if path.endswith("糊.mp4") else []}
+    rc = S.check
+    S.check = fake
+    try:
+        vs = [SimpleNamespace(path=str(d / n), checks={"dur": 10}) for n in ("好.mp4", "糊.mp4", "坏.mp4")]
+        w = SharpWorker(vs, [0, 1, 2])
+        w.run()
+        check(sorted(calls) == ["坏.mp4", "好.mp4", "糊.mp4"] and w.n_bad == 1, f"三条都查 -> {calls}")
+        check(S.flagged(vs[1].sharp) and not S.flagged(vs[0].sharp) and not hasattr(vs[2], "sharp"), "糊的记下;读不出来的不记,下次再查")
+        calls.clear()
+        w = SharpWorker(vs, [0, 1])
+        w.run()
+        check(not calls, "文件没变:不再查")
+        S.STORE.set_ok(vs[1].path, True)
+        check(not S.flagged(S.STORE.get(vs[1].path)), "右键「清晰度没问题」以后不再提")
+        S.STORE.set_ok(vs[1].path, False)
+        from qe import apiacc
+        apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+        st = Settings(tmp / "st_shp.json")
+        st["api_roots"] = [str(tmp / "shp" / "游戏视频")]
+        tab = T.ApiTab(st, Records(tmp / "rec_shp.sqlite"), lambda m: None)
+        tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+        app = QApplication.instance()
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 3)
+        i = next(k for k, v in enumerate(tab.videos) if v.title == "糊")
+        tab.videos[i].checks = dict(tab.videos[i].checks or {}, bad_read=False, landscape=False, squarish=False, w=1080, h=1920, platform=[], tags=[])
+        tab.videos[i].sharp = S.STORE.get(tab.videos[i].path)
+        tab._fill(i)
+        st_, probs = tab._status_text(i)
+        check("画面可能很糊" in tab.items[i].text(2) and st_.startswith("能发") and not probs, f"备注里提醒,状态还是能发 -> {tab.items[i].text(2)} / {st_}")
+        # 右键菜单:视频行、号那一行都要弹得出来(11-06 写漏变量:右键一点就报错,「给号选文件夹」都没了)
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QMenu
+        shown = []
+
+        class FakeMenu(QMenu):
+            def exec(self, *a):
+                texts = [x.text() for x in self.actions()]
+                for x in self.actions():
+                    if x.menu():
+                        texts += [y.text() for y in x.menu().actions()]
+                shown.append(texts)
+        real_menu, real_at = T.QMenu, tab.tree.itemAt
+        T.QMenu = FakeMenu
+        try:
+            tab.tree.itemAt = lambda p: tab.items[i]
+            tab._menu(QPoint(1, 1))
+            group = tab.items[i].parent()
+            tab.tree.itemAt = lambda p: group
+            tab._menu(QPoint(1, 1))
+        finally:
+            T.QMenu, tab.tree.itemAt = real_menu, real_at
+        check(len(shown) == 2 and "清晰度没问题" in shown[0], f"视频行右键:有「清晰度没问题」 -> {len(shown)}")
+        check(len(shown) == 2 and all(any("换个文件夹" in t for t in x) for x in shown), "视频行、号那一行右键:都能给号选文件夹")
+        tab.set_sharp_ok(i)
+        check("很糊" not in tab.items[i].text(2), "标过没问题:提醒没了")
+        apiacc.save([])
+    finally:
+        S.check = rc
+
+
 def test_title_date(tmp: Path):
     print("[标题里的日期(用户 2026-11-03):只发今天 / 昨天的,将来的、更早的都不要;「3号选手」不算日期;右键放行]")
     from datetime import date
@@ -6034,6 +6266,8 @@ if __name__ == "__main__":
     test_ai_cover(tmp)
     test_title_date(tmp)
     test_flat_folders(tmp)
+    test_black_cover(tmp)
+    test_sharp(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

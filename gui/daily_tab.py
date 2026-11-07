@@ -69,6 +69,10 @@ class DailyTab(QWidget):
                      "软件记成已发、企鹅号上其实没有的,能「拎回来重发」。教育号取了钥匙的也一起查。\n只查一个号:表里右键那个号「去企鹅号核对…」")
         b.clicked.connect(lambda: self.verify())
         top.addWidget(b)
+        b = QPushButton("查黑封面")
+        b.setToolTip("去企鹅号读这天发的封面(只读),把纯黑、只有很小字幕的列出来,好去后台改。\n发完 10 分钟软件也会自动查一遍今天的")
+        b.clicked.connect(lambda: self.window().show_black(self.day()))
+        top.addWidget(b)
         v.addLayout(top)
 
         self.cards = StatCards([("游戏", "游戏"), ("教育", "教育"), ("动漫", "动漫"), ("影视", "影视"), ("总", "总发布量")],

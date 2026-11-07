@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from qe import apiacc, apisrc, checks, plan, titleclean, topic, vertical, wmstore
+from qe import apiacc, apisrc, checks, plan, sharp, titleclean, topic, vertical, wmstore
 from qe.config import bj_now, bj_str, data_dir
 from qe.records import pkey
 from html import escape as html_escape
@@ -356,6 +356,12 @@ class ApiTab(QWidget):
         self._cov_only = None                            # 亮红那次点「现在发布」时发的是哪些(右键只发某个号的)
         self._nocover_once = False                       # 「这次不要封面」:只管下一次发布
         hv.addWidget(self.card_cov)
+        # 发完查到的黑封面(用户 2026-11-06:我好去修改);平时藏着
+        self.b_black = QPushButton("看看是哪几条")
+        self.b_black.clicked.connect(lambda: self.window().show_black())
+        self.card_black = ProbCard("warn", "", [self.b_black])
+        self.card_black.hide()
+        hv.addWidget(self.card_black)
 
         self.b_detail = QPushButton("")
         self.b_detail.setObjectName("toggle")
@@ -1390,6 +1396,9 @@ class ApiTab(QWidget):
         note = "、".join(probs) if c else ""
         if hint:
             note = (note + "、" if note else "") + f"(AI 觉得像《{hint}》,不拦)"
+        fuzzy = sharp.text(getattr(v, "sharp", None)) if c and not self._sent(i) else ""
+        if fuzzy:
+            note = (note + "、" if note else "") + fuzzy
         for col, t in enumerate([v.title, res, note, st]):
             it.setText(col, t)
             it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else t)
@@ -1772,6 +1781,9 @@ class ApiTab(QWidget):
                     m.addAction("其实有水印(先不发)", lambda: self.set_wm_ok(i, False)).setEnabled(not busy)
                 else:
                     m.addAction("没水印 / 不用管,这条能发", lambda: self.set_wm_ok(i, True)).setEnabled(not busy)
+            if i != -1 and sharp.flagged(getattr(self.videos[i], "sharp", None)):
+                m.addSeparator()
+                m.addAction("清晰度没问题", lambda: self.set_sharp_ok(i))
             m.addSeparator()
             if sel:
                 mc = m.addMenu("检查")
@@ -1924,9 +1936,47 @@ class ApiTab(QWidget):
             MainWindow.reveal(self.videos[row].path)
 
     # ---------------- 后台活 ----------------
+    # ---------------- 查清晰度(只提醒,不拦)----------------
+    SHARP_CHECK = True                                # 测试里关掉
+
+    def _sharp_stop(self):
+        w = getattr(self, "sharp_worker", None)
+        if w and w.isRunning():
+            w.stop = True
+
+    def _sharp_start(self):
+        """别的活干完了,后台查还没查过的。一直在读网络盘,所以一开始干别的就停(_start),干完接着查。"""
+        if not self.SHARP_CHECK or not self.st.get("sharp_check", True) or self.busy():
+            return
+        w = getattr(self, "sharp_worker", None)
+        if w and w.isRunning():
+            return
+        rows = [i for i, v in enumerate(self.videos) if v.checks and not self._sent(i) and getattr(v, "sharp", None) is None]
+        if not rows:
+            return
+        from gui.sharp_worker import SharpWorker
+        w = SharpWorker(self.videos, rows, self)
+        w.one.connect(lambda i, w=w: self._fill(i) if w.videos is self.videos and i in self.items else None)
+        w.finished.connect(lambda w=w: self._sharp_done(w))
+        self.sharp_worker = w
+        w.start()
+
+    def _sharp_done(self, w):
+        if w.stop:
+            self._sharp_start()
+        elif w.n_bad:
+            self.say(f"查了清晰度:{w.n_bad} 条疑似模糊,不拦发布,看一下备注那一格")
+
+    def set_sharp_ok(self, i: int):
+        v = self.videos[i]
+        sharp.STORE.set_ok(v.path, True)
+        v.sharp = sharp.STORE.get(v.path)
+        self._fill(i)
+
     def _start(self, fn, title: str, quiet: bool = False):
         if self.busy():
             return False
+        self._sharp_stop()
         self._quiet = quiet
         self._job_title = (title.split(":")[0].split("(")[0].split(":")[0].rstrip("…") + "…") if title else ""
         self._busy(True)
@@ -1980,6 +2030,8 @@ class ApiTab(QWidget):
         self._busy(False)
         if msg:
             self.say(msg)
+        if p and p.get("ok") and hasattr(self.window(), "schedule_black_scan"):
+            self.window().schedule_black_scan()           # 等平台处理好封面,再去查有没有黑的
         if self._auto == "发":                            # 定时发布发完了 / 停下了
             pop = getattr(self, "_popup", None)
             bad = bool(pop and pop[2]) or "停下了没发" in (msg or "")
@@ -1997,6 +2049,7 @@ class ApiTab(QWidget):
         self._clean_empty_dirs()                          # 发空了的文件夹删掉(发了的已经在归档里,列表上「已发」照旧看得见,不用重读)
         self._sched_changed()
         self._reorder()                                   # 发完的号沉底
+        self._sharp_start()
         if getattr(self, "_reload_after", False):          # 多的挪到明天了:重读列表(挪走的不在这天了)
             self._reload_after = False
             self.load()
@@ -3101,8 +3154,11 @@ class ApiTab(QWidget):
                         raise _Taken()
                     rid["id"] = got
                     rid["vid"] = vid
-                from qe import apicover, autocover, omcover
+                from qe import apicover, autocover, blackcover, omcover
                 src = apicover.find(v.path) if cmode != "不传" else ""
+                if src and blackcover.is_black(src):      # 员工放的封面是黑的(截了黑的第一帧,11-06 查到的黑封面都是这样):换一帧
+                    emit(-1, f"「{v.title}」放的封面是黑的,换成软件挑的一帧")
+                    src = ""
                 auto_cov = False
                 if not src and cmode != "不传":
                     # 员工没放封面:软件自己挑一帧不黑、不糊的(用户 2026-10-26:平台拿第一帧,很多是黑屏;选了全自动)

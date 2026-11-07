@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushBu
 
 from qe import plan
 from qe.config import bj_now
-from gui.widgets import Bar, GLYPH, ICON_FONT, Ring, fade_in, glyph_label, repolish, roll, tok
+from gui.widgets import Bar, GLYPH, ICON_FONT, ProbCard, Ring, fade_in, glyph_label, repolish, roll, tok
 
 WEEK = "一二三四五六日"
 CAT_ICON = {"游戏": ("game", "acc"), "教育": ("school", "green"), "动漫": ("movie", "orange"), "影视": ("movie", "green")}
@@ -121,6 +121,12 @@ class TodayTab(QWidget):
         rl.addWidget(self.prob, 1)
         self.prob.hide()
         v.addWidget(self.rings_w)
+        # 发完查到的黑封面(用户 2026-11-06);平时藏着
+        self.b_black = QPushButton("看看是哪几条")
+        self.b_black.clicked.connect(lambda: self.main.show_black())
+        self.card_black = ProbCard("warn", "", [self.b_black])
+        self.card_black.hide()
+        v.addWidget(self.card_black)
 
         two = QHBoxLayout()
         two.setSpacing(12)

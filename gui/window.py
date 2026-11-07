@@ -10,14 +10,16 @@ import copy
 import os
 import time
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from qe import blackcover
 from qe import cover as C
+from qe import sharp
 from qe import folders as F
 from qe import plan
 from qe.config import APP_VERSION, bj_now, bj_str, data_dir
@@ -336,6 +338,9 @@ class MainWindow(QMainWindow):
         self.worker: BatchWorker | None = None
         self.cover_worker: CoverWorker | None = None
         self.ai_worker: AiCoverWorker | None = None
+        self.black_worker = None
+        self.sharp_worker = None
+        self._black_timer = None
         self._unattended = False          # 定时发布正在自己发(没人看着)
         self._sched_skip: set[str] = set()  # 定时发布这一轮跳过的(没摆好 / 文件没了):不再拿来摆
         self._sched_tries = 0             # 一整批出错(罐头没开 / 掉登录 …)连着重试了几次
@@ -713,6 +718,7 @@ class MainWindow(QMainWindow):
         from gui.widgets import set_badge
         self.api_tab.on_badge = lambda n: set_badge(self.nav, 2, str(n) if n else "")
         self.api_tab._update_sum()
+        self._black_cards(blackcover.load(self._black_day()))
 
     def goto(self, key: str):
         """跳到某一页(「今天」页的「下一步」点了用):today / edu / api / daily / records。"""
@@ -729,6 +735,57 @@ class MainWindow(QMainWindow):
             self.refresh_records()
         if p is not self.today:
             fade_in(p, 260)                           # 换页淡入一下(用户要活泼一点)
+
+    # ---------------- 黑封面 ----------------
+    BLACK_SCAN = True                                 # 测试里关掉(不去读真号)
+    BLACK_WAIT_MS = 10 * 60 * 1000                    # 发完等 10 分钟再查:平台要处理封面
+
+    @staticmethod
+    def _black_day() -> str:
+        return bj_now().strftime("%Y-%m-%d")
+
+    def schedule_black_scan(self):
+        """发完了:等一会儿去读平台上的封面(用户 2026-11-06)。又发了一批就重新等。"""
+        if not self.BLACK_SCAN:
+            return
+        if self._black_timer is None:
+            self._black_timer = QTimer(self)
+            self._black_timer.setSingleShot(True)
+            self._black_timer.timeout.connect(self._black_fire)
+        self._black_timer.start(self.BLACK_WAIT_MS)
+
+    def _black_fire(self):
+        if self.api_tab.busy():                       # 还在发:发完会再等一轮
+            return
+        if self.black_worker and self.black_worker.isRunning():
+            return
+        from gui.black_dialog import BlackWorker
+        day = self._black_day()
+        w = BlackWorker(day, self)
+        w.finished.connect(lambda w=w, d=day: self._black_got(d, w.items, w.errs))
+        self.black_worker = w
+        w.start()
+
+    def _black_got(self, day: str, items: list, errs: list | None = None):
+        if day != self._black_day():
+            return
+        blackcover.save(day, items)
+        self._black_cards(items)
+        if items:
+            self.say(f"查了平台封面:今天有 {len(items)} 条黑封面,去后台改")
+        if errs:
+            self.say(f"⚠ 查黑封面:{len(errs)} 个号没查成({errs[0]})")
+
+    def _black_cards(self, items: list):
+        """亮红 / 收起(今天页、游戏 / 动漫页各一张)。"""
+        for c in (self.today.card_black, self.api_tab.card_black):
+            c.set(f"今天有 {len(items)} 条黑封面,去后台改", "bad")
+            c.setVisible(bool(items))
+
+    def show_black(self, day: str = ""):
+        from gui.black_dialog import BlackDialog
+        day = day or self._black_day()
+        BlackDialog(day, self, items=blackcover.load(day) or None, on_scan=self._black_got).exec()
 
     def play_splash(self):
         """开场:「Hi,欢迎使用本工作台」→ 淡出,露出「今天」页(用户 2026-10-18)。设置里能关。"""
@@ -995,12 +1052,15 @@ class MainWindow(QMainWindow):
         if self.ai_worker and self.ai_worker.isRunning():
             self.ai_worker.stop = True
             self.ai_worker.wait(15000)
+        if self.sharp_worker and self.sharp_worker.isRunning():
+            self.sharp_worker.stop = True
         todo = [v for v in self.videos if not self.rec.status_of(v.path)]
         if todo:
             self.cover_worker = CoverWorker(self.videos, self.adj, self)
             self.cover_worker.one.connect(self._fill_row)
             self.cover_worker.finished.connect(self._update_scope)     # 认完了:「这次摆几条」重算
             self.cover_worker.finished.connect(self._ai_covers)        # 软件裁完第一轮:AI 接着看第二轮
+            self.cover_worker.finished.connect(self._sharp_start)      # 查清晰度(只提醒)
             self.cover_worker.start()
         rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path)]
         if rows:                                       # 看哪些是横屏 / 偏方(读过的直接用)
@@ -1010,6 +1070,38 @@ class MainWindow(QMainWindow):
             self.dim_worker.start()
         self._vert_count()
         self._refresh_buttons()
+
+    SHARP_CHECK = True                               # 测试里关掉
+
+    def _sharp_start(self):
+        """后台查还没查过的清晰度,只提醒不拦。换了员工勾选就停,下一轮接着查。"""
+        if not self.SHARP_CHECK or not self.st.get("sharp_check", True) or (self.cover_worker and self.cover_worker.stop):
+            return
+        if self.sharp_worker and self.sharp_worker.isRunning():
+            return
+        rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path) and getattr(v, "sharp", None) is None]
+        if not rows:
+            return
+        from gui.sharp_worker import SharpWorker
+        w = SharpWorker(self.videos, rows, self)
+        w.one.connect(lambda i, w=w: self._fill_row(i) if w.videos is self.videos else None)
+        w.finished.connect(lambda w=w: self._sharp_done(w))
+        self.sharp_worker = w
+        w.start()
+
+    def _sharp_done(self, w):
+        if w.stop:
+            self._sharp_start()
+        elif w.n_bad:
+            self.say(f"查了清晰度:{w.n_bad} 条疑似模糊,不拦发布,看一下状态那一格")
+
+    def set_sharp_ok(self):
+        for r in sorted({ix.row() for ix in self.table.selectedIndexes()}):
+            v = self.videos[r]
+            if sharp.flagged(getattr(v, "sharp", None)):
+                sharp.STORE.set_ok(v.path, True)
+                v.sharp = sharp.STORE.get(v.path)
+                self._fill_row(r)
 
     AI_ASKER = None                                  # 测试里换掉(绝不真问 AI)
     AI_COVER = True                                  # 测试里关掉(这台电脑上有真的百炼 Key)
@@ -1066,15 +1158,18 @@ class MainWindow(QMainWindow):
         shp = "" if (stt or note or skip or wmb) else getattr(v, "shape", "")
         dims = getattr(v, "dims", None)
         stxt = f"{shp} {dims[0]}×{dims[1]},要转竖屏" if shp and dims else ""
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or stxt or "还没发")]):
+        fuzzy = "" if stt or note or skip or wmb or stxt else sharp.text(getattr(v, "sharp", None))
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or stxt or fuzzy or "还没发")]):
             it = QTableWidgetItem(t)
             if c == 0:
                 from gui.widgets import THUMB
                 it.setData(THUMB, v.cover or v.png or v.vcover or v.jpg)      # 封面小图(草图 ②)
             if c == 4 and (note or skip):
                 it.setToolTip(note or skip)
-            if c == 4 and (skip or wmb or stxt):
+            if c == 4 and (skip or wmb or stxt or fuzzy):
                 it.setBackground(YELLOW)
+            if c == 4 and fuzzy:
+                it.setToolTip("只是提醒,不拦发布。看过没问题:右键「清晰度没问题」")
             if c == 4 and stxt:
                 it.setToolTip("横屏 / 偏方(3:4、正方形):点上面「转标准竖屏」转成 1080×1920(上下黑边、中间原画面)")
             if c == 4 and wmb:
@@ -1232,6 +1327,8 @@ class MainWindow(QMainWindow):
                 m.addAction("其实有水印(先不摆)", lambda: self.set_wm_ok(False))
             else:
                 m.addAction("没水印 / 不用管,能摆", lambda: self.set_wm_ok(True))
+        if any(sharp.flagged(getattr(self.videos[r], "sharp", None)) for r in {ix.row() for ix in self.table.selectedIndexes()}):
+            m.addAction("清晰度没问题", self.set_sharp_ok)
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     # ---------- 查水印 ----------
@@ -2272,6 +2369,7 @@ class MainWindow(QMainWindow):
             self.say(f"记下:没摆成的 {m} 条也是你手动补好一起发的")
         self.batch_id = ""
         self._after_batch()
+        self.schedule_black_scan()
 
     def batch_dropped(self):
         if not self.batch_id:
@@ -2736,6 +2834,9 @@ class MainWindow(QMainWindow):
         k_trust.setChecked(bool(self.st.get("ai_cover_trust", False)))
         k_trust.setToolTip("前期先别勾:你自己再过一遍,看 AI 挑得准不准。觉得它靠谱了再勾上。")
         f.addRow("", k_aic)
+        k_sharp = QCheckBox("发布前查清晰度:疑似低清放大、很糊的标出来(只提醒,不拦发布)")
+        k_sharp.setChecked(bool(self.st.get("sharp_check", True)))
+        f.addRow("", k_sharp)
         f.addRow("", k_trust)
         outer.addWidget(g1)
 
@@ -2855,7 +2956,7 @@ class MainWindow(QMainWindow):
         self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
                        archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
-                       ai_cover=k_aic.isChecked(), ai_cover_trust=k_trust.isChecked(),
+                       ai_cover=k_aic.isChecked(), ai_cover_trust=k_trust.isChecked(), sharp_check=k_sharp.isChecked(),
                        api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(),
                        game_words={ln.split("=", 1)[0].strip(): [x.strip() for x in ln.split("=", 1)[1].replace(",", "、").replace("，", "、").split("、") if x.strip()]
                                    for ln in e_games.toPlainText().splitlines() if "=" in ln and ln.split("=", 1)[0].strip()}, api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
@@ -2882,7 +2983,8 @@ class MainWindow(QMainWindow):
                 "\n\n关了软件就不会自己发了。真要关吗?", "关掉", "不关", default_no=True):
             e.ignore()
             return
-        for wk in (self.wm_worker, self.blur_worker, getattr(self, "dim_worker", None), self.vert_worker):
+        for wk in (self.wm_worker, self.blur_worker, getattr(self, "dim_worker", None), self.vert_worker, self.sharp_worker,
+                   getattr(self.api_tab, "sharp_worker", None), self.black_worker):
             if wk and wk.isRunning():
                 wk.stop = True
                 wk.wait(60000)
