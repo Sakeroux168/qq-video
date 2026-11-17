@@ -85,11 +85,13 @@ def clean_tag(tag: str) -> str:
 
 
 def with_topic(stem: str, tag: str) -> str | None:
-    """批量改话题:结尾的话题全换成这一个(原来没有话题就接在后面)。不用改返回 None。"""
+    """批量改话题:先把标题里的 @ / 乱码 / 转义残片 / 联系人 / 孤立 n 清掉,再把结尾的话题全换成这一个。不用改返回 None。"""
     tag = clean_tag(tag)
     if not tag:
         return None
-    p = split_topics(stem)
+    from . import titleclean
+    base = titleclean.clean(stem) or stem
+    p = split_topics(base)
     out = sanitize(join_topic(p, tag) if p["tags"] else f"{re.sub(r'[\s#＃]+$', '', p['body'])}#{tag}")
     out = tidy(out) or out                        # 产出的再整理一遍写法(审查:「标题 #原神#」会产出「##」)
     return None if out == stem else out
@@ -136,21 +138,24 @@ def parse_order(raw: str, n: int) -> list[int]:
     return out + [k for k in range(1, n + 1) if k not in out]
 
 
-def ask_ai(body: str, tags: list[str], key: str, model: str = "qwen-plus",
+def ask_ai(body: str, tags: list[str], key, model: str = "qwen-plus",
            base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1", timeout: int = 60) -> str:
     """问 AI 留哪个话题,返回那个话题。读不出顺序抛 RuntimeError(可以再试)。"""
     import requests
-    if not key:
+    from .aiconf import as_ai, clean, tokens
+    ai = as_ai(key, model, base_url)                     # key:百炼 Key 或 aiconf.AI(自己的模型)
+    if not ai.key:
         raise RuntimeError("要用 AI 挑话题,先在「设置」里填阿里百炼 Key")
-    body_json = {"model": model, "messages": topic_messages(body, tags), "temperature": 0, "max_tokens": 400}
-    if "dashscope" in base_url:
-        body_json["enable_thinking"] = False
-    r = requests.post(base_url.rstrip("/") + "/chat/completions", json=body_json,
-                      headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, timeout=timeout)
+    body_json = {"model": ai.model, "messages": topic_messages(body, tags), "temperature": 0, "max_tokens": tokens(ai, 400), **ai.extra()}
     try:
-        raw = r.json()["choices"][0]["message"]["content"]
+        r = requests.post(ai.url(), json=body_json, headers={"Authorization": f"Bearer {ai.key}", "Content-Type": "application/json"}, timeout=timeout)
+    except (requests.RequestException, ValueError):      # ValueError:Key 里有中文
+        raise RuntimeError(f"连不上{ai.who}(网络?)")
+    try:
+        raw = clean(r.json()["choices"][0]["message"]["content"])
     except Exception:
-        raise RuntimeError(f"AI 没回话:{r.status_code} {r.text[:120]}")
+        from .aierr import why
+        raise RuntimeError(why(r, ai.who) or f"{ai.who}没回话:{r.status_code} {r.text[:120]}")
     order = parse_order(raw, len(tags))
     if not order:
         raise RuntimeError("AI 回的顺序读不出来,再试一次")
@@ -158,12 +163,14 @@ def ask_ai(body: str, tags: list[str], key: str, model: str = "qwen-plus",
 
 
 def new_name(stem: str, pick=None) -> str | None:
-    """这个文件名只留一个话题以后叫什么。不用改返回 None。pick(body, tags) 负责 2 个以上时挑哪个。"""
-    p = split_topics(stem)
+    """这个文件名清掉多余残片并只留一个话题以后叫什么。不用改返回 None。pick(body, tags) 负责 2 个以上时挑哪个。"""
+    from . import titleclean
+    base = titleclean.clean(stem) or stem
+    p = split_topics(base)
     tags = p["tags"]
     if len(tags) == 0:
-        return None
-    if len(tags) == 1:
+        out = base
+    elif len(tags) == 1:
         out = join_topic(p, tags[0])
     else:
         out = join_topic(p, pick(p["body"], tags))

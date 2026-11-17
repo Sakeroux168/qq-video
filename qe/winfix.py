@@ -63,3 +63,16 @@ def unminimize() -> int:
             u.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
             n += 1
     return n
+
+
+def bring_to_front() -> int:
+    """把创作罐头窗口提到最前面(双击坏封面去罐头里搜视频时调用)。"""
+    if sys.platform != "win32" or os.environ.get("QE_NO_WINFIX"):
+        return 0
+    u = ctypes.windll.user32
+    n = 0
+    for hwnd in czgt_windows():
+        u.ShowWindow(hwnd, 9 if u.IsIconic(hwnd) else 5)           # SW_RESTORE=9, SW_SHOW=5
+        u.SetForegroundWindow(hwnd)
+        n += 1
+    return n

@@ -77,10 +77,11 @@ def problems(v) -> list[str]:
     td = titledate.problem(getattr(v, "account", ""), v.title)
     if td:
         out.append(td)
+    clean_b = titleclean.clean(v.title) or v.title
     if len(c.get("tags") or []) > 1:
         out.append(f"{len(c['tags'])} 个话题")
-    elif topic.bad_format(v.title) and format_kind(v.title) != "结尾多了空格":   # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
-        out.append(format_kind(v.title))             # 只是结尾多个空格:发的时候自己去掉,不算要处理(新员工试用 2026-10-21)
+    elif topic.bad_format(clean_b) and format_kind(clean_b) != "结尾多了空格":   # 一个话题但写成「# 话题」「##话题」:平台可能不认成话题
+        out.append(format_kind(clean_b))             # 只是结尾多个空格:发的时候自己去掉,不算要处理(新员工试用 2026-10-21)
     from . import gamecheck                          # 标题像别的游戏的(用户 2026-10-20:和平精英传成了 PUBG)
     g = gamecheck.alien(getattr(v, "account", ""), v.title)
     if g:
@@ -90,6 +91,12 @@ def problems(v) -> list[str]:
     if wm_blocks(c.get("ads")):                      # 查到口播广告、人还没说「不是广告」
         from .ads import label
         out.append(label(c["ads"]["hits"]))
+    if wm_blocks(c.get("crop")):                     # 字幕被裁(用户 2026-11-07):打回同事重找
+        from .cropcheck import TEXT
+        out.append(TEXT)
+    if wm_blocks(c.get("outro")):                    # 结尾求关注 / 别人账号 / 二维码(用户 2026-11-16):剪掉再发
+        from .outrocheck import TEXT as OUTRO_TEXT
+        out.append(OUTRO_TEXT)
     return out
 
 

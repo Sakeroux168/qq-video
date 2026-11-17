@@ -114,7 +114,7 @@ def set_cat(st, nick: str, cat: str) -> None:
     st.save()
 
 
-def rename(st, old: str, new: str) -> None:
+def rename(st, old: str, new: str) -> str:
     """改号名(用户 2026-11-03:新增时号名打错了,「双击可编辑名称,我懒得删了再重新添加」)。
     每天规定、分组、罐头号名单、接口账号、有多少发多少、手选的文件夹都跟着改;钥匙不动。
     以前的发布记录还记在旧名字下面(不改记录库)。出错抛 ValueError。"""
@@ -145,6 +145,28 @@ def rename(st, old: str, new: str) -> None:
     if any(a.get("nick") == old for a in al):
         apiacc.save([dict(a, nick=new) if a.get("nick") == old else a for a in al])
     st.save()
+    return _move_login(old, new)
+
+
+def _move_login(old: str, new: str) -> str:
+    """改号名时「登录取钥匙」的浏览器登录目录跟着改名(用户 2026-11-09:号名写错了,「不会还要再重新登录一次吧」)。
+    返回 ""(好了 / 本来就没有)或者一句提醒(浏览器开着挪不动:下次取钥匙要重新扫码)。"""
+    import os
+    import re
+    from .config import data_dir
+    src = data_dir() / "浏览器登录" / (re.sub(r'[<>:"/\\|?*\s]', "_", old) or "号")
+    if not src.is_dir():
+        return ""
+    dst = data_dir() / "浏览器登录" / (re.sub(r'[<>:"/\\|?*\s]', "_", new) or "号")
+    if dst.exists() and any(dst.iterdir()):
+        return f"「{new}」已经有一个浏览器登录了,原来「{old}」的登录没挪(下次取钥匙用的是「{new}」那个)"
+    try:
+        if dst.exists():
+            dst.rmdir()                                   # 空的(之前点过一下没登录):去掉再挪
+        os.replace(src, dst)
+    except OSError:
+        return f"「{old}」的登录浏览器还开着,登录没跟着改名 —— 把那个浏览器窗口关掉再改一次名(先改回「{old}」再改成「{new}」),就不用重新扫码"
+    return ""
 
 
 def set_folder(st, nick: str, folder: str) -> None:

@@ -441,7 +441,7 @@ def _settle(tab):
 def test_api_tab(tmp: Path):
     print("[接口发页:手选文件夹(旧软件的「选择」)/ 一条一条发、间隔 / 发完挪走、记录]")
     from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import apiacc, apisrc, omapi
     from qe.config import Settings
     from qe.records import Records
@@ -619,7 +619,7 @@ def test_audit_r1(tmp: Path):
     print("[审查第 1 轮修的:密钥不进日志 / 结果不明不重发 / 撤销不改已发的 / 转竖屏不覆盖 / 重名序号位置 / 间隔]")
     import requests
     from PySide6.QtWidgets import QApplication, QMessageBox
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import apiacc, omapi, topic, vertical
     from qe.config import Settings
     from qe.records import Records
@@ -863,7 +863,7 @@ def test_audit_r2(tmp: Path):
 
     # 2. 摆到一半停了:已经摆好的那几条照样等人确认
     from PySide6.QtWidgets import QApplication, QMessageBox
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from gui.window import MainWindow
     st2 = Settings(tmp / "aw.json")
     st2["material_root"] = str(tmp / "nothing")
@@ -886,7 +886,7 @@ def test_audit_r2(tmp: Path):
 def test_ui_r1(tmp: Path):
     print("[界面审查修的:没发成说人话 / 号密钥坏了剩下的标「没轮到」/ 发完总结 / 结尾空格单独说 / 窗口能缩窄]")
     from PySide6.QtWidgets import QApplication, QPushButton
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import apiacc, checks, omapi, topic
     from qe.config import Settings
     from qe.records import Records
@@ -898,6 +898,10 @@ def test_ui_r1(tmp: Path):
     check("密钥" in short and "登录取钥匙" in tip, "换 token 失败:说密钥不对 + 去登录取钥匙")
     short, tip = T.friendly(OSError(22, "Invalid argument", r"X:\2企鹅号视频\游戏视频\a.mp4"))
     check("素材盘" in short and "双击打开素材盘" in tip, "读不了视频文件(11-03 X 盘断了):说素材盘断了 + 下一步")
+    short, tip = T.friendly(FileNotFoundError(2, "No such file or directory", str(tmp / "改了名的.mp4")))
+    check("改名" in short and "刷新" in tip and "素材盘" not in short, f"文件夹在、文件没了(11-09 被人改短了名字):说改名 / 挪走了 -> {short}")
+    short, tip = T.friendly(FileNotFoundError(2, "No such file or directory", r"Q:\没这个盘\a.mp4"))
+    check("素材盘" in short, "连文件夹都没了:还是说素材盘断了")
     import requests
     short, _tip = T.friendly(requests.ConnectionError("连不上"))
     check("素材盘" not in short, "网络错误(也是 OSError)不当成素材盘断了")
@@ -1041,7 +1045,7 @@ def test_bughunt(tmp: Path):
     import json
     import time as _t
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import apiacc, apisrc, fsops, omapi, topic
     from qe.config import Settings
     from qe.records import Records
@@ -1227,7 +1231,7 @@ def test_bughunt(tmp: Path):
 def test_daily_plan(tmp: Path):
     print("[每日规定条数 / 实际(按发出去的日期)/ 复制到企业微信表]")
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import plan
     from qe.config import Settings
     from qe.records import Records
@@ -1533,8 +1537,9 @@ def test_window_dups(tmp: Path):
     w.c_date.setCurrentIndex(w.c_date.findData("10.17"))
     top = next(w.tree.topLevelItem(i) for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地")
     kids = {top.child(k).data(0, Qt.ItemDataRole.UserRole + 3): top.child(k) for k in range(top.childCount())}
-    check(kids["张"].text(1) == "1 条" and kids["李"].text(1).startswith("3 条") and "2 条不发" in kids["李"].text(1),
-          f"树:李 3 条里 2 条不发 -> 张「{kids['张'].text(1)}」李「{kids['李'].text(1)}」")
+    check(kids["张"].text(1) == "1 条" and kids["李"].toolTip(1).startswith("3 条") and "发过同名 1,1 条不发" in kids["李"].toolTip(1)
+          and kids["李"].text(1) == "3 条 · 1 不发 · 1 发过同名",
+          f"树:李 3 条里 2 条不发 -> 张「{kids['张'].text(1)}」李「{kids['李'].text(1)}」/「{kids['李'].toolTip(1)}」")
     for it in kids.values():
         it.setCheckState(0, Qt.CheckState.Checked)
     t0 = time.time()
@@ -1622,7 +1627,7 @@ def test_window_renamed(tmp: Path):
     w.c_date.setCurrentIndex(w.c_date.findData("10.14（101）"))
     top = next(w.tree.topLevelItem(i) for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "家长小天地")
     li = top.child(0)
-    check("发了 1" in li.text(1) and "2 条不发" in li.text(1), f"同一天改了名的算已发,别天的 / 归档过的照旧不发 -> {li.text(1)}")
+    check("发了 1" in li.toolTip(1) and "发过同名 2" in li.toolTip(1) and li.text(1).startswith("发了 1/"), f"同一天改了名的算已发,别天的 / 归档过的照旧不发 -> {li.text(1)}")
     check(rec.status_of(str(a / "李" / "发过的.mp4")) == "已发", "记下了新位置,按路径就认得出")
     check(rec.status_of(str(arch)) == "已发", "已经挪到归档的那条,归档位置没被盖掉")
     li.setCheckState(0, Qt.CheckState.Checked)
@@ -1656,7 +1661,7 @@ def test_at_titles(tmp: Path):
     TC.store().set("CSGO战神君", ad.title, True)
     check(not any("广告" in p for p in checks.problems(ad)), "人点了「剪好了」就能发(按 号 + 标题 记)")
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from gui.window import MainWindow
     from qe.config import Settings
     from qe.records import Records
@@ -1687,7 +1692,7 @@ def test_at_titles(tmp: Path):
 def test_schedule(tmp: Path):
     print("[定时发布:定好 / 到点 / 软件没开着错过了 / 别让电脑睡]")
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from gui import schedule as S
     from qe.config import Settings
     st = Settings(tmp / "s_sched.json")
@@ -1926,7 +1931,7 @@ def test_sched_api(tmp: Path):
 def test_api_wm(tmp: Path):
     print("[高级检查:查水印(记在硬盘上)/ 普通检查过的只查水印 / 右键「没水印」能发]")
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import apiacc, checks, watermark, wmstore
     from qe.config import Settings
     from qe.records import Records
@@ -2087,7 +2092,7 @@ def test_ads(tmp: Path):
     print("[查口播广告 / 剪掉广告:挨着的广告句连成一段、只拦很像广告的、剪完变短、原片进「广告原片」]")
     import subprocess
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import ads, apiacc, asr, checks, cut, vertical, wmstore
     from qe.config import Settings
     from qe.records import Records
@@ -2167,7 +2172,7 @@ def test_cover_cache_unique(tmp: Path):
 def test_cover_dialog_src(tmp: Path):
     print("[封面预览:显示封面的标题和位置、对不上标红、自己换封面 / 用回自动的]")
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from gui.cover_dialog import CoverDialog
     from qe import cover as C
     from qe.adjust import Adjustments
@@ -2363,6 +2368,31 @@ def test_window(tmp: Path):
     w.rec.mark_batch_published("X")
     acc, vids2 = w.next_batch()
     check(vids2[0].title != vids[0].title and len(vids2) == 10, "发过的下一批不再拿")
+    # 用户 2026-11-09:「我按错了 没发没发…居然还不能弄回来」→ 右键「不算已发」
+    r0, r1 = w.videos.index(vids[0]), w.videos.index(vids[1])
+    w.rec.manual_published(vids[1])
+    day = w.rec.sent_row(vids[1].path)["published_at"][:10]
+    n0 = w.rec.sent_on(day).get("家长研习空间", 0)
+    w.table.clearSelection()
+    w.table.selectRow(r0)
+    from PySide6.QtCore import QItemSelectionModel
+    w.table.selectionModel().select(w.table.model().index(r1, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    w.table.selectionModel().select(w.table.model().index(2 if 2 not in (r0, r1) else 3, 0),
+                                    QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    check(len(w._sent_sel()) == 2, f"选中 3 条、2 条是已发:菜单写 2 条 -> {len(w._sent_sel())}")
+    asked = []
+    w._ask = lambda *a, **k: asked.append(a) or False
+    w.unmark_sent()
+    check(asked and w.rec.status_of(vids[0].path) == "已发", "点了「先不」:不改")
+    w._ask = lambda *a, **k: True
+    w.unmark_sent()
+    check(w.rec.status_of(vids[0].path) == "" and w.rec.status_of(vids[1].path) == "", "改回还没发:这批发好了的、手动标的都改回来")
+    check(w.rec.sent_on(day).get("家长研习空间", 0) == n0 - 2 and w.table.item(r0, 4).text() != "已发", "每天的已发数跟着减,行里不写已发")
+    check(not [r for r in w.rec.rows() if r["status"] == "已发" and r["path"] in (vids[0].path, vids[1].path)]
+          and w.rec.conn.execute("SELECT COUNT(*) FROM posts WHERE status='作废' AND note LIKE '%按错了%'").fetchone()[0] == 2,
+          "记录不删,改成作废、备注写着按错了")
+    acc, vids3 = w.next_batch()
+    check(vids[0] in vids3, "改回来的下一批还会摆")
     w.close()
 
 
@@ -2415,7 +2445,7 @@ def test_window_scan(tmp: Path):
     w._load_dates()                                   # 「刷新」
     wait()
     no = kid(F.NO_EMP)
-    check(no.checkState(0) == Qt.CheckState.Checked and w.table.rowCount() == 3 and "1 条没无字封面" in no.text(1),
+    check(no.checkState(0) == Qt.CheckState.Checked and w.table.rowCount() == 3 and "1 条没无字封面" in no.toolTip(1) and no.text(1) == "3 条 · 1 没封面",
           f"刷新:新加的看得到、勾着的还勾着 -> {w.table.rowCount()} 行,{no.text(1)}")
     # 标成已发:树上「发了 N」跟着变
     w.table.selectRow(0)
@@ -2984,7 +3014,12 @@ def test_accounts_manage(tmp: Path):
     check(dup, "同名的号加不了第二个")
     # 改名(用户 2026-11-03:号名打错了,双击改):文件夹里写的还是老名字 → 素材文件夹填完整文件夹名照样找得到
     st["api_picked"] = {"11.3": {"FPS射击游戏馆": "x"}}
-    A.rename(st, "FPS射击游戏馆", "FPS游戏射击馆")
+    from qe import omlogin
+    from qe.config import data_dir
+    (Path(omlogin.profile_dir("FPS射击游戏馆")) / "Cookies").write_text("x")
+    warn = A.rename(st, "FPS射击游戏馆", "FPS游戏射击馆")
+    check(not warn and (data_dir() / "浏览器登录" / "FPS游戏射击馆" / "Cookies").is_file()
+          and not (data_dir() / "浏览器登录" / "FPS射击游戏馆").exists(), "改号名:登录取钥匙的浏览器登录跟着改名(不用重新扫码)")
     r = {x["nick"]: x for x in A.rows(st)}
     check("FPS游戏射击馆" in r and "FPS射击游戏馆" not in r and apiacc.find("FPS游戏射击馆")
           and st["api_picked"]["11.3"] == {"FPS游戏射击馆": "x"}, "改号名:规定、接口账号、手选的文件夹都跟着改")
@@ -3013,7 +3048,7 @@ def test_ai_cover(tmp: Path):
     print("[AI 第二轮看封面(用户 2026-11-03):判断完不完整 / 有没有字;不完整的、没认出脸的 AI 自己挪框再看;"
           "还不行的、有字的标黄;人看过 / 调过框的不看;记下来不重复问]")
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     import json
     from qe import aicover, cover as C, folders as F
     import gui.window as W
@@ -3181,12 +3216,19 @@ def test_flat_folders(tmp: Path):
     check(redo.target_dir(st, row, today) == str(a), f"挪回来重发:回号文件夹,不建日期文件夹 -> {redo.target_dir(st, row, today)}")
     frow = {"date": today, "path": str(film / "幕后社" / "今天的.mp4"), "account": "剧讯幕后社", "platform": ""}
     check(redo.target_dir(st, frow, today) == str(film / "幕后社"), "影视号:挪回原来的文件夹")
+    # 左边那行:发过同名的单写,不算进「不发」(用户 2026-11-07)
+    mk = lambda p, skip="": SimpleNamespace(path=p, skip=skip, png="x")
+    rows = [mk("a"), mk("b", "发过同名"), mk("c", "发过同名"), mk("d", "0 字节,视频是坏的")]
+    fake2 = SimpleNamespace(rec=SimpleNamespace(status_of=lambda p: "已发" if p == "a" else ""))
+    t = W.MainWindow._emp_text(fake2, rows)
+    check(t == "4 条,发了 1,发过同名 2,1 条不发(同名 / 坏的)", f"发过同名单写 -> {t}")
 
 
 def test_black_cover(tmp: Path):
     print("[黑封面(用户 2026-11-06):很小的字幕也算黑;发前换掉黑图;发完读平台封面列出来;只读]")
     import io
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFilter
+    import numpy as np
     from qe import blackcover as B
 
     def pic(fn):
@@ -3197,25 +3239,39 @@ def test_black_cover(tmp: Path):
     subtitle = pic(lambda d: d.rectangle([250, 300, 390, 312], fill="white"))
     big = pic(lambda d: d.rectangle([40, 120, 600, 240], fill="white"))
     normal = Image.new("RGB", (640, 360), (120, 150, 90))
+    sharp_pic = Image.new("RGB", (640, 360), (40, 80, 140))
+    ds = ImageDraw.Draw(sharp_pic)
+    for x in range(0, 640, 40):
+        for y in range(0, 360, 40):
+            if ((x + y) // 40) % 2 == 0:
+                ds.rectangle([x, y, x + 36, y + 36], fill=(230, 190, 70))
+    blurry = sharp_pic.filter(ImageFilter.GaussianBlur(14))
+    # 画面全糊、只有底下露一条清楚字幕(11-16《新版本水上飞机》那种):分块算照样抓得出是模糊封面
+    blurry_sub = blurry.copy()
+    ImageDraw.Draw(blurry_sub).rectangle([200, 344, 440, 356], fill=(255, 230, 0), outline=(0, 0, 0), width=2)
     check(B.is_black_img(black) and B.is_black_img(subtitle), "纯黑、只有一小行字幕:算黑")
     check(not B.is_black_img(big) and not B.is_black_img(normal), "黑底大字、正常画面:不算")
+    check(B.is_blurry_img(blurry) and B.is_blurry_img(blurry_sub) and not B.is_blurry_img(sharp_pic) and not B.is_blurry_img(black),
+          "模糊图(含底下露半行清楚字幕的)算模糊封面;清楚图不算;黑封面不重复算成模糊")
     d = tmp / "blk"
     d.mkdir()
     black.save(d / "黑.jpg")
+    blurry_sub.save(d / "糊.jpg")
     normal.save(d / "好.jpg")
     (d / "坏.jpg").write_bytes(b"not a picture")
     check(B.is_black(str(d / "黑.jpg")) and not B.is_black(str(d / "好.jpg")) and not B.is_black(str(d / "坏.jpg")), "本地图:黑的认得出,读不出来的不算黑")
+    check(B.is_blurry(str(d / "糊.jpg")) and not B.is_blurry(str(d / "好.jpg")) and not B.is_blurry(str(d / "坏.jpg")), "本地图:模糊的认得出,读不出来的不算")
 
     def jpg(im):
         b = io.BytesIO()
         im.save(b, "JPEG")
         return b.getvalue()
-    imgs = {"u1": jpg(black), "u2": jpg(normal), "u3": jpg(subtitle)}
+    imgs = {"u1": jpg(black), "u2": jpg(normal), "u3": jpg(subtitle), "u4": jpg(blurry_sub)}
 
     class Cl:
         def list_articles(self, page, limit):
             rows = [("a1", "黑的", "u1", "正常"), ("a2", "好的", "u2", "正常"), ("a3", "小字幕", "u3", "正常"), ("a4", "没图", "", "正常"),
-                    ("a5", "删了的", "u1", "已删除"), ("a6", "读不出", "u9", "正常")]
+                    ("a5", "删了的", "u1", "已删除"), ("a6", "读不出", "u9", "正常"), ("a7", "糊的", "u4", "正常")]
             return {"total": len(rows), "articles": [] if page > 1 else [
                 {"article_id": i, "article_title": t, "article_imgurl": u, "article_url": "http://x/" + i, "article_del_flag": f,
                  "article_pub_time": "2026-11-06 10:00:00", "article_pub_flag": "1", "article_video_info": {"vid": "v" + i}}
@@ -3224,21 +3280,24 @@ def test_black_cover(tmp: Path):
     def fetch(u):
         return imgs[u]
     got, bad = B.scan_one({"nick": "甲"}, "2026-11-06", "2026-11-06", make_client=lambda a: Cl(), fetch=fetch)
-    check([x["title"] for x in got] == ["黑的", "小字幕"] and got[0]["nick"] == "甲" and got[0]["url"] == "http://x/a1",
-          f"读平台封面:列出黑的,删了的不算 -> {got}")
+    check([(x["title"], x["kind"]) for x in got] == [("黑的", "黑封面"), ("小字幕", "黑封面"), ("糊的", "模糊封面")]
+          and got[0]["nick"] == "甲" and got[0]["url"] == "http://x/a1",
+          f"读平台封面:黑封面和模糊封面都列出来,删了的不算 -> {got}")
+    check(B.summary_text(got) == "2 条黑封面、1 条模糊封面", f"汇总字样 -> {B.summary_text(got)}")
     check(bad == 2, f"没图 / 读不出来的记下几张,不当成没问题 -> {bad}")
     B.save("2026-11-06", got)
     check(B.load("2026-11-06") == got and B.load("2026-11-07") == [], "查到的记下来(软件重开还在),别的天不算")
     # 窗口
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from gui.black_dialog import BlackDialog
     dlg = BlackDialog("2026-11-06", None, items=got)
-    check(dlg.t.rowCount() == 2 and dlg.t.item(0, 1).text() == "黑的" and "2 条" in dlg.lab_done.text(), "窗口列出来:号 / 标题 / 时间")
+    check(dlg.t.rowCount() == 3 and dlg.t.item(0, 1).text() == "黑的" and dlg.t.item(2, 2).text() == "模糊封面"
+          and "2 条黑封面、1 条模糊封面" in dlg.lab_done.text(), f"窗口列出来:号 / 标题 / 问题 / 时间 -> {dlg.lab_done.text()}")
     dlg.copy()
-    check(QApplication.clipboard().text() == "甲\t黑的\n甲\t小字幕", "复制标题")
+    check(QApplication.clipboard().text() == "甲\t黑的\n甲\t小字幕\n甲\t糊的", "复制标题")
     dlg.close()
-    # 发之前:放的封面是黑的,换软件挑的一帧
+    # 发之前:放的封面是黑的或模糊的,都换软件挑的一帧
     from PySide6.QtWidgets import QMessageBox
     from qe import apiacc, autocover, omapi
     from qe.config import Settings
@@ -3247,9 +3306,10 @@ def test_black_cover(tmp: Path):
     app = QApplication.instance()
     day = tmp / "blkpub" / "游戏视频" / "CSGO--CSGO战神君" / "10.18"
     day.mkdir(parents=True)
-    for n in ("黑图", "好图"):
+    for n in ("黑图", "糊图", "好图"):
         (day / f"{n}.mp4").write_bytes(b"x")
     black.save(day / "黑图.jpg")
+    blurry_sub.save(day / "糊图.jpg")
     normal.save(day / "好图.jpg")
     picked = tmp / "blkpub" / "挑的.jpg"
     normal.save(picked)
@@ -3262,7 +3322,7 @@ def test_black_cover(tmp: Path):
     logs = []
     tab = T.ApiTab(st, Records(tmp / "rec_blkpub.sqlite"), logs.append)
     tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
-    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 3)
     for v in tab.videos:
         v.checks = dict(v.checks or {}, bad_read=False, landscape=False, w=1080, h=1920)
     tab._update_scope()
@@ -3282,11 +3342,11 @@ def test_black_cover(tmp: Path):
     QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: 0)
     try:
         tab.run_publish()
-        _wait(app, lambda: not tab.busy() and len(sent) == 2, 30)
+        _wait(app, lambda: not tab.busy() and len(sent) == 3, 30)
         app.processEvents()
-        check(sent.get("黑图") == str(picked), f"放的封面是黑的:传软件挑的一帧 -> {sent}")
+        check(sent.get("黑图") == str(picked) and sent.get("糊图") == str(picked), f"放的封面是黑的或模糊的:都传软件挑的一帧 -> {sent}")
         check(os.path.basename(sent.get("好图", "")) == "好图.jpg", "放的封面正常:照旧传它")
-        check("封面是黑的" in tab.logbox.toPlainText(), "日志里说了一声")
+        check("封面是黑的" in tab.logbox.toPlainText() and "封面太模糊" in tab.logbox.toPlainText(), "日志里都说了一声")
     finally:
         omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning, autocover.pick = real
         apiacc.save([])
@@ -3296,7 +3356,7 @@ def test_sharp(tmp: Path):
     print("[发布前查清晰度(用户 2026-11-06):低清放大看 resdet 的尺寸要两帧一致;整条糊看最清楚的一帧;只提醒不拦;记下来不重查]")
     import numpy as np
     from PySide6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import sharp as S
     raw = "640:0.61 325:0.50\n360:0.60 111:0.70"
     check(S.sizes(raw, 1080, 608) == [(640, 360)], f"resdet 的话读得出:宽高比例一致才算 -> {S.sizes(raw, 1080, 608)}")
@@ -3407,9 +3467,154 @@ def test_sharp(tmp: Path):
         check(len(shown) == 2 and all(any("换个文件夹" in t for t in x) for x in shown), "视频行、号那一行右键:都能给号选文件夹")
         tab.set_sharp_ok(i)
         check("很糊" not in tab.items[i].text(2), "标过没问题:提醒没了")
+        # 用户 2026-11-09:刷新以后查过的不要再查(原来每条都排队「查中」)
+        tab.load()
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 3)
+        left = sorted(v.title for v in tab.videos if getattr(v, "sharp", None) is None)
+        check(left == ["坏"], f"刷新:查过的直接挂上结果,只剩没查成的要查 -> {left}")
         apiacc.save([])
     finally:
         S.check = rc
+
+
+def test_crop_back(tmp: Path):
+    print("[字幕被裁(用户 2026-11-07):满屏的 AI 看 7 帧,3 帧以上算;不发;打回挪进「打回视频\\账号名」;右键能放行]")
+    import numpy as np
+    from PIL import Image
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from gui.sharp_worker import SharpWorker
+    from qe import apiacc, checks, cropcheck as K, folders as F, wmstore
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    rng = np.random.default_rng(2)
+    full = Image.fromarray((rng.random((1280, 720, 3)) * 255).astype("uint8"))
+    bars = np.zeros((1920, 1080, 3), dtype="uint8")
+    bars[656:1264] = (rng.random((608, 1080, 3)) * 255).astype("uint8")
+    bars = Image.fromarray(bars)
+    land = Image.fromarray((rng.random((720, 1280, 3)) * 255).astype("uint8"))
+    check(K.full_screen(full) and not K.full_screen(bars) and not K.full_screen(land), "满屏竖屏才看;上下黑边、横屏不看")
+    check(K.parse('好的{"subtitle":"有","cut":"切断了"}') and not K.parse('{"subtitle":"有","cut":"没切断"}'), "AI 的话读得出")
+    asked = []
+
+    def aski(ans):
+        def f(im):
+            asked.append(1)
+            return ans.pop(0)
+        return f
+    r = K.check("x", "", 10, "k", grab=lambda t: full, asker=aski([True, False, True, False, True, False, False]))
+    check(r["hits"] == [{"n": 3, "of": 7}] and len(asked) == 7, f"7 帧有 3 帧被切:算被裁 -> {r}")
+    check(K.check("x", "", 10, "k", grab=lambda t: full, asker=aski([True, True, False, False, False, False, False]))["hits"] == [], "只有 2 帧:不算(AI 偶尔看错)")
+    asked.clear()
+    check(K.check("x", "", 10, "k", grab=lambda t: bars, asker=aski([]))["hits"] == [] and not asked, "有黑边的:不问 AI(省钱)")
+    bad = False
+    try:
+        K.check("x", "", 10, "k", grab=lambda t: None, asker=aski([]))
+    except OSError:
+        bad = True
+    check(bad, "读不出来:报错,不记成没问题")
+    bad = False
+
+    def boom(im):
+        raise RuntimeError("AI 没回话")
+    try:
+        K.check("x", "", 10, "k", grab=lambda t: full, asker=boom)
+    except RuntimeError:
+        bad = True
+    check(bad, "AI 没回话:报错,不记成没问题")
+    # 打回去哪
+    day = tmp / "crp" / "游戏视频" / "CSGO--CSGO战神君" / "10.18"
+    day.mkdir(parents=True)
+    mroot = tmp / "crp" / "小学生教育"
+    check(K.back_dir(str(mroot), "甲") == str(tmp / "crp" / "打回视频" / "甲"), "打回去素材盘的 打回视频\\账号名")
+    t = K.names_text([("甲", "一"), ("乙", "二"), ("甲", "三")])
+    check("【甲】2 条\n  一\n  三" in t and "【乙】1 条" in t, f"名单按号分 -> {t}")
+    for n in ("裁", "好"):
+        (day / f"{n}.mp4").write_bytes(b"x")
+        (day / f"{n}.jpg").write_bytes(b"y")
+    (day / "裁").mkdir()
+    (day / "裁" / "横屏16x9.png").write_bytes(b"z")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_crp.json")
+    st["api_roots"] = [str(tmp / "crp" / "游戏视频")]
+    st["material_root"] = str(mroot)
+    tab = T.ApiTab(st, Records(tmp / "rec_crp.sqlite"), lambda m: None)
+    tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, squarish=False, w=720, h=1280, platform=[], tags=[])
+    real = K.check
+    K.check = lambda path, ff, dur, key, stop=None, asker=None: {"hits": [{"n": 3, "of": 4}] if path.endswith("裁.mp4") else []}
+    try:
+        w = SharpWorker(tab.videos, [0, 1], want_sharp=False, crop_key="k", need_crop=tab._crop_todo)
+        w.run()
+    finally:
+        K.check = real
+    check(w.n_crop == 1, f"查出 1 条 -> {w.n_crop}")
+    i = next(k for k, v in enumerate(tab.videos) if v.title == "裁")
+    g = 1 - i
+    check("字幕被裁" in checks.problems(tab.videos[i]) and not tab._can_send(i), "被裁的:不能发")
+    check(tab._can_send(g), "没被裁的:照常能发")
+    tab._fill(i)
+    tab._update_scope()
+    check(not tab.card_crop.isHidden() and "1 条字幕被裁" in tab.card_crop.title.text() and tab.b_crop.text() == "打回 1 条", f"卡片亮了,按钮写几条 -> {tab.b_crop.text()}")
+    shown = []
+
+    class FakeMenu(QMenu):
+        def exec(self, *a):
+            shown.append([x.text() for x in self.actions()])
+    real_menu, real_at = T.QMenu, tab.tree.itemAt
+    T.QMenu = FakeMenu
+    tab.tree.itemAt = lambda p: tab.items[i]
+    try:
+        tab._menu(QPoint(1, 1))
+    finally:
+        T.QMenu, tab.tree.itemAt = real_menu, real_at
+    check("没被裁,这条能发" in shown[0], "右键能放行")
+    tab.set_crop_ok(i, True)
+    check(tab._can_send(i) and tab.card_crop.isHidden(), "放行以后能发,卡片收起")
+    tab.set_crop_ok(i, False)
+    check(not tab._can_send(i), "改回来:又不能发")
+    rs = (T.ask, QMessageBox.information)
+    said = []
+    T.ask = lambda *a, **k: said.append(a[2]) or True
+    try:
+        tab.tree.clearSelection()
+        tab.crop_back()
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 1)
+    finally:
+        T.ask = rs[0]
+    back = tmp / "crp" / "打回视频" / "CSGO战神君"
+    check((back / "裁.mp4").is_file() and (back / "裁.jpg").is_file() and (back / "裁" / "横屏16x9.png").is_file() and not (day / "裁.mp4").exists(),
+          "打回:视频、封面、封面文件夹都挪进 打回视频\\账号名,不删")
+    check((day / "好.mp4").is_file() and [v.title for v in tab.videos] == ["好"], "别的不动;列表里没有它了")
+    check("这些视频字幕被裁了" in QApplication.clipboard().text() and "裁" in QApplication.clipboard().text(), "名单复制好了")
+    apiacc.save([])
+    # 影视号(教育 / 影视页)
+    from types import SimpleNamespace
+    import gui.window as W
+    film = tmp / "crp" / "高热剧集二创" / "剧讯幕后社"
+    (film / "幕后社").mkdir(parents=True)
+    for n in ("裁", "好"):
+        (film / "幕后社" / f"{n}.mp4").write_bytes(b"x")
+        (film / "幕后社" / f"{n}.jpg").write_bytes(b"y")
+    mk = lambda n, c: SimpleNamespace(path=str(film / "幕后社" / f"{n}.mp4"), title=n, account="剧讯幕后社", date="11.7", crop=c)
+    vs2 = [mk("裁", {"hits": [{"n": 3}], "ok": False}), mk("好", {"hits": [], "ok": False})]
+    check(W.MainWindow._title_block(vs2[0]) == "字幕被裁" and W.MainWindow._title_block(vs2[1]) == "", "影视号被裁的:不摆,写清楚")
+    st2 = {"material_root": str(mroot), "accounts": [{"name": "剧讯幕后社", "aliases": [], "dir": str(film)}]}
+    selected = []
+    pane = SimpleNamespace(batch_id="", worker=None, videos=vs2, st=SimpleNamespace(get=st2.get, __getitem__=st2.__getitem__),
+                           rec=SimpleNamespace(status_of=lambda p: ""), table=SimpleNamespace(selectedIndexes=lambda: selected),
+                           _confirm=lambda *a: True, say=lambda m: None, _load_tree=lambda: None)
+    pane._crop_rows = lambda rows=None: W.MainWindow._crop_rows(pane, rows)
+    pane.st = st2
+    W.MainWindow.crop_back(pane)
+    bk = tmp / "crp" / "打回视频" / "剧讯幕后社"
+    check((bk / "裁.mp4").is_file() and (bk / "裁.jpg").is_file() and (film / "幕后社" / "好.mp4").is_file(), "影视号打回:同一个「打回视频」下按号分,别的不动")
+    check("【剧讯幕后社】1 条" in QApplication.clipboard().text(), "影视号名单也复制好了")
+    check(not any(v.title == "裁" for v in F.scan_account(str(film), "剧讯幕后社", F.today_md())), "打回以后软件不再读到它")
 
 
 def test_title_date(tmp: Path):
@@ -4161,7 +4366,7 @@ def test_clean_dirs(tmp: Path):
 def test_edit_quota(tmp: Path):
     print("[每天规定条数自己改(用户 2026-10-22:有个号要从 10 条变成 30 条):每日汇总里双击一个号改]")
     from PySide6.QtWidgets import QApplication, QInputDialog
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     from qe import plan
     from qe.config import Settings
     from qe.records import Records
@@ -5369,7 +5574,7 @@ def test_cd_items(tmp: Path):
 def _no_dialogs():
     """测试里不弹框:中文确认框(gui.api_tab.ask)一律点「是」,提示框一律关掉(不然 offscreen 下会一直等人点)。"""
     from PySide6.QtWidgets import QApplication, QMessageBox
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     import gui.api_tab as T
     T._real_ask = T.ask                            # test_misfire 要测真的确认框
     T.ask = lambda *a, **k: True
@@ -6180,6 +6385,1169 @@ def test_quota_free(tmp: Path):
     check(plan.left_today(rec, st, "电竞情报馆", day) == 50, "关掉以后:电竞也按 80 条卡")
 
 
+def test_check_status(tmp: Path):
+    """用户 2026-11-07:查过 / 没查 / 没查成 要分得清,还要能自己点「重新检查」。"""
+    print("\n[检查状态:每条一格、进度、重新检查]")
+    import threading
+    from PySide6.QtWidgets import QApplication
+    from qe import apiacc, checkline as L, cropcheck as K, folders as F, outrocheck as O, sharp as S
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    import gui.window as W
+    app = QApplication.instance() or QApplication([])
+    # 翻成字
+    check(L.state(None) == L.TODO and L.state({"hits": []}) == L.OK and L.state({"hits": [1]}) == L.BAD
+          and L.state({"hits": [1], "ok": True}) == L.PASSED and L.state({"hits": [1], "blurred": True}) == L.FIXED, "没查 / 没问题 / 有问题 / 放行 / 已剪")
+    check(L.state({"hits": []}, busy=True) == L.BUSY, "重新检查时旧结果不算数:查中")
+    check(L.state(None, err=True) == L.FAIL and L.state(None, sent=True) == L.NA and L.state(None, need=False) == L.NA and L.state(None, on=False) == L.OFF and L.state(None, key=False) == L.NOKEY,
+          "没查成 / 已发不用查 / 这种号不查 / 关了 / 没填 Key 分得清")
+    check(L.cell((L.OK, L.OK)) == "清晰 ✓  字幕 ✓" and L.cell((L.BUSY, L.BUSY)) == "查中" and L.cell((L.BAD, L.NA)) == "疑似模糊  字幕 不用查" and L.cell((L.FAIL, L.OK)) == "清晰 没查成  字幕 ✓", "表格里的字")
+    check(L.cell((L.OK, L.OK, L.FIXED)) == "清晰 ✓  字幕 ✓  结尾 已剪" and L.cell((L.BUSY, L.BUSY, L.BUSY)) == "查中", "三项一起显示")
+    check(L.progress([(L.OK, L.NA), (L.OK, L.NA)]) == "检查查完了:清晰度 2/2  —— 没查到问题", "这种号不查字幕:进度里不写;查完没问题说一句")
+    check(L.progress([(L.BAD, L.NA), (L.OK, L.BAD)]) == "检查查完了:清晰度 2/2 · 字幕 1/1  —— 查到 1 条模糊 · 1 条字幕被裁", "查完了:顶上那行也写查到几条不对的")
+    check(L.progress([(L.OK, L.BUSY), (L.FAIL, L.OK)]) == "正在检查:清晰度 1/2 · 字幕 1/2 · 1 条没查成", "进度写查到哪、几条没查成")
+    check(L.progress([(L.OK, L.NOKEY)]) == "检查查完了:清晰度 1/1 · 字幕没填 Key  —— 没查到问题", "没填 Key:说清楚")
+    check(L.unchecked_text([(L.OK, L.OK)]) == "" and L.unchecked_text([(L.TODO, L.OK), (L.BUSY, L.TODO), (L.OK, L.NOKEY)]) == "还有 2 条没查完(清晰度 2 条、字幕被裁 1 条),现在发就不查了。", "发布前提醒一句")
+    check(L.group_text([(L.OK, L.OK)]) == "查完了 · 没问题" and L.group_text([(L.OK, L.OK), (L.TODO, L.OK)]) == "查了 1/2" and L.group_text([(L.FAIL, L.OK)]) == "1 条没查成", "号那一行")
+    # 用户 2026-11-10:「查完了咋不说有没有查到不对的?必须要我点进去看」
+    g = L.group_text([(L.BAD, L.OK), (L.BAD, L.NA), (L.OK, L.BAD), (L.PASSED, L.OK)])
+    check(g == "查完了 · 2 条模糊 · 1 条字幕被裁", f"查完了:直接写查到几条不对的(放行过的不算) -> {g}")
+    g = L.group_text([(L.BAD, L.OK), (L.TODO, L.OK)])
+    check(g == "查了 1/2 · 1 条模糊", f"还在查:已经查到的也写上 -> {g}")
+    # 接口页
+    d = tmp / "chk" / "游戏视频" / "CSGO--CSGO战神君" / "10.18"
+    d.mkdir(parents=True)
+    for n, b in (("好", b"1"), ("糊", b"22")):
+        (d / f"{n}.mp4").write_bytes(b)
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_chk.json")
+    st["api_roots"] = [str(tmp / "chk" / "游戏视频")]
+    st["ai_key"] = "test"
+    tab = T.ApiTab(st, Records(tmp / "rec_chk.sqlite"), lambda m: None)
+    tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, squarish=False, w=720, h=1280, platform=[], tags=[], dur=10)
+    i = next(k for k, v in enumerate(tab.videos) if v.title == "糊")
+    g = 1 - i
+    calls, boom, gate = [], [], [None]
+
+    def fsharp(path, ff, dur, stop=None):
+        calls.append("清" + os.path.basename(path))
+        if gate[0]:
+            gate[0].wait(20)
+        if os.path.basename(path) in boom:
+            raise OSError("读不出")
+        return {"hits": [{"kind": "blur", "score": 50}] if path.endswith("糊.mp4") else []}
+
+    def fcrop(path, ff, dur, key, stop=None, asker=None):
+        calls.append("字" + os.path.basename(path))
+        return {"hits": []}
+
+    def foutro(path, ff, dur, key, stop=None, grab=None, asker=None, shot_dir=""):
+        calls.append("尾" + os.path.basename(path))
+        return {"hits": []}
+
+    def settle(idle):
+        _wait(app, idle)
+        for _ in range(5):
+            app.processEvents()
+            time.sleep(0.02)
+        _wait(app, idle)
+        app.processEvents()
+    idle1 = lambda: not (tab.sharp_worker and tab.sharp_worker.isRunning())
+    rs, rk, ro, rask = S.check, K.check, O.check, T.ask
+    S.check, K.check, O.check = fsharp, fcrop, foutro
+    tab.SHARP_CHECK = True
+    try:
+        tab._fill(0), tab._fill(1)
+        tab._check_refresh()
+        check(tab.items[0].text(4) == "没查" and tab.lab_check.text() == "检查:清晰度 0/2 · 字幕 0/2 · 结尾 0/2", f"还没查:写没查 -> {tab.items[0].text(4)} / {tab.lab_check.text()}")
+        tab._sharp_start()
+        settle(idle1)
+        check(tab.items[g].text(4) == "清晰 ✓  字幕 ✓  结尾 ✓" and tab.items[i].text(4) == "疑似模糊  字幕 ✓  结尾 ✓", f"查完:每条写清楚 -> {tab.items[g].text(4)} / {tab.items[i].text(4)}")
+        check(tab.lab_check.text().startswith("检查查完了:清晰度 2/2 · 字幕 2/2 · 结尾 2/2"), f"进度 -> {tab.lab_check.text()}")
+        check(tab.groups["CSGO战神君"].text(4) == "查完了 · 1 条模糊", f"号那一行写查完了、查到几条 -> {tab.groups['CSGO战神君'].text(4)}")
+        check(tab.b_recheck.text() == "重新检查 2 条", f"没选管全部 -> {tab.b_recheck.text()}")
+        tab.items[g].setSelected(True)
+        tab._update_scope()
+        check(tab.b_recheck.text() == "重新检查 1 条", f"跟着选中走 -> {tab.b_recheck.text()}")
+        tab.tree.clearSelection()
+        tab._update_scope()
+        # 查过、文件没变:自动的不再查;人点了就真查
+        calls.clear()
+        tab._sharp_start()
+        settle(idle1)
+        check(not calls, "自动的:查过的不再查")
+        tab.set_sharp_ok(i)
+        tab._check_refresh()
+        check(tab.items[i].text(4) == "清晰 放行  字幕 ✓  结尾 ✓", f"人说没问题:写放行 -> {tab.items[i].text(4)}")
+        tab.recheck()
+        settle(idle1)
+        check(sorted(calls) == ["字好.mp4", "字糊.mp4", "尾好.mp4", "尾糊.mp4", "清好.mp4", "清糊.mp4"], f"点重新检查:不管查没查过都再查 -> {calls}")
+        check(tab.items[i].text(4) == "清晰 放行  字幕 ✓  结尾 ✓" and not tab._recheck_paths, f"你点过没问题的还算数,查完清单空了 -> {tab.items[i].text(4)}")
+        # 只查选中的
+        calls.clear()
+        tab.items[g].setSelected(True)
+        tab._update_scope()
+        tab.recheck()
+        settle(idle1)
+        check(sorted(calls) == ["字好.mp4", "尾好.mp4", "清好.mp4"], f"选中了:只查选中的 -> {calls}")
+        tab.tree.clearSelection()
+        tab._update_scope()
+        # 没查成
+        boom.append("好.mp4")
+        tab._recheck_paths.add(tab.videos[g].path)
+        tab.videos[g].sharp = None
+        tab._sharp_start()
+        settle(idle1)
+        check(tab.items[g].text(4) == "清晰 没查成  字幕 ✓  结尾 ✓" and "1 条没查成" in tab.lab_check.text(), f"读不出来:写没查成 -> {tab.items[g].text(4)} / {tab.lab_check.text()}")
+        check(tab.groups["CSGO战神君"].text(4) == "1 条没查成", "号那一行也写")
+        boom.clear()
+        # 正在查的时候点:手上这一轮停下,接着查人点的;中间写查中
+        gate[0] = threading.Event()
+        calls.clear()
+        tab._recheck_paths.add(tab.videos[g].path)
+        tab.videos[g].sharp = None
+        tab._sharp_start()
+        _wait(app, lambda: calls)
+        tab._check_refresh()
+        check(tab.items[g].text(4) == "查中" and tab.lab_check.text().startswith("正在检查"), f"查的时候写查中 -> {tab.items[g].text(4)} / {tab.lab_check.text()}")
+        tab.recheck()
+        check(tab.sharp_worker.stop, "手上这一轮先停")
+        old = tab.sharp_worker
+        gate[0].set()
+        _wait(app, lambda: tab.sharp_worker is not old)
+        gate[0] = None
+        settle(idle1)
+        check("清糊.mp4" in calls and "字糊.mp4" in calls and "尾糊.mp4" in calls and not tab._recheck_paths, f"接着把人点的查完 -> {calls}")
+        # 字幕关了
+        st["crop_check"] = False
+        tab.videos[i].crop = None
+        tab.videos[i].checks.pop("crop", None)
+        tab._check_refresh()
+        check(tab.items[i].text(4) == "清晰 放行  字幕 关了  结尾 ✓", f"设置关了:写关了 -> {tab.items[i].text(4)}")
+        st["crop_check"] = True
+        # 多的时候问一声
+        seen = []
+        T.ask = lambda *a, **k: seen.append(a[2]) or False
+        tab._recheck_rows = lambda: [0, 1] * 20
+        tab.recheck()
+        check(seen and "40 条" in seen[0] and not tab._recheck_paths, "条数多:先问一声,点先不就不查")
+        del tab._recheck_rows
+        T.ask = rask
+        apiacc.save([])
+        # 罐头页:字幕被裁只查影视号,结尾求关注教育和影视都查
+        st2 = Settings(tmp / "st_chk2.json")
+        st2["ai_key"] = "test"
+        film = tmp / "chk" / "高热剧集二创" / "影视号甲"
+        film.mkdir(parents=True)
+        (film / "片.mp4").write_bytes(b"333")
+        edu = tmp / "chk" / "小学生教育"
+        edu.mkdir(parents=True)
+        (edu / "课.mp4").write_bytes(b"4444")
+        st2["accounts"] = [{"name": "影视号甲", "aliases": [], "dir": str(film)}]
+        w = W.MainWindow(st2, Records(tmp / "rec_chk2.sqlite"))
+        w.AI_COVER = False
+        w.SHARP_CHECK = True
+        idle2 = lambda: not (w.sharp_worker and w.sharp_worker.isRunning())
+        w.videos = [F.Video(str(film / "片.mp4"), "片", "影视号甲", "e", "10.18"), F.Video(str(edu / "课.mp4"), "课", "研习社", "e", "10.18")]
+        w.table.setRowCount(2)
+        w._fill_row(0), w._fill_row(1)
+        w._check_line()
+        check(w.table.columnCount() == 6 and w.table.item(0, 5).text() == "没查", f"还没查 -> {w.table.item(0, 5).text()}")
+        check(w.table.item(1, 5).text() == "清晰 没查  字幕 不用查  结尾 没查", f"教育:字幕不用查,结尾要查 -> {w.table.item(1, 5).text()}")
+        check(w.lab_check.text() == "检查:清晰度 0/2 · 字幕 0/1 · 结尾 0/2", f"进度只算要查的 -> {w.lab_check.text()}")
+        calls.clear()
+        w._sharp_start()
+        settle(idle2)
+        check(sorted(calls) == ["字片.mp4", "尾片.mp4", "尾课.mp4", "清片.mp4", "清课.mp4"], f"影视号三项都查,教育查清晰度和结尾 -> {calls}")
+        check(w.table.item(0, 5).text() == "清晰 ✓  字幕 ✓  结尾 ✓" and w.table.item(1, 5).text() == "清晰 ✓  字幕 不用查  结尾 ✓"
+              and w.lab_check.text().startswith("检查查完了:清晰度 2/2 · 字幕 1/1 · 结尾 2/2"),
+              f"查完 -> {w.table.item(0, 5).text()} / {w.table.item(1, 5).text()} / {w.lab_check.text()}")
+        check(w.b_recheck.text() == "重新检查 2 条", f"没选管全部 -> {w.b_recheck.text()}")
+        w.table.selectRow(1)
+        check(w.b_recheck.text() == "重新检查 1 条", f"跟着选中走 -> {w.b_recheck.text()}")
+        calls.clear()
+        w.recheck()
+        settle(idle2)
+        check(sorted(calls) == ["尾课.mp4", "清课.mp4"], f"重新检查选中的教育:不会去查字幕 -> {calls}")
+        w.table.clearSelection()
+        calls.clear()
+        w.recheck()
+        settle(idle2)
+        check(sorted(calls) == ["字片.mp4", "尾片.mp4", "尾课.mp4", "清片.mp4", "清课.mp4"], f"没选:全部再查 -> {calls}")
+        check(w.table.item(0, 4).text() == "还没发", f"「状态」那格不受影响 -> {w.table.item(0, 4).text()}")
+        w.close()
+    finally:
+        S.check, K.check, O.check, T.ask = rs, rk, ro, rask
+        apiacc.save([])
+
+
+def test_ai_errors(tmp: Path):
+    """用户 2026-11-09:百炼欠费了,软件只写「AI 没回话(KeyError)」,看不出来 → 写清楚;欠费 / Key 不对的后台别一条一条接着问。"""
+    print("\n[阿里百炼报错写清楚]")
+    from types import SimpleNamespace
+    import requests
+    from PIL import Image
+    from qe import aierr, cropcheck as K, dupname, gamecheck, topic
+    from gui.sharp_worker import SharpWorker
+
+    class R:
+        def __init__(self, status, body):
+            self.status_code, self._b, self.text = status, body, str(body)
+
+        def json(self):
+            if isinstance(self._b, Exception):
+                raise self._b
+            return self._b
+    arrear = R(400, {"error": {"message": "Access denied, please make sure your account is in good standing.", "type": "Arrearage", "code": "Arrearage"}})
+    check(aierr.why(arrear) == aierr.ARREARS and aierr.hard(aierr.why(arrear)), "欠费(兼容接口):认得出,算再问也没用")
+    check(aierr.why(R(400, {"code": "Arrearage", "message": "x"})) == aierr.ARREARS, "欠费(原生接口,扩图用的):也认得出")
+    check(aierr.why(R(401, {"error": {"code": "invalid_api_key"}})) == aierr.BADKEY and aierr.hard(aierr.BADKEY), "Key 不对")
+    check(aierr.why(R(429, {"error": {"code": "Throttling.RateQuota"}})) == aierr.BUSY and not aierr.hard(aierr.BUSY), "太频繁:说等一会儿,下次还会再试")
+    check(aierr.why(R(500, ValueError("不是 JSON"))) == "" and aierr.why(R(200, {"choices": []})) == "", "认不出来的:给空,调用的地方照旧写")
+    real = requests.post
+    seen = []
+
+    def fake(*a, **k):
+        seen.append(1)
+        return arrear
+    requests.post = fake
+    try:
+        msgs = []
+        for f in (lambda: K.ask(Image.new("RGB", (72, 128)), "k"),
+                  lambda: dupname.ask_ai("标题", [], "k"),
+                  lambda: gamecheck._ask_once("和平精英", ["一个标题"], "k", "qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1", 60),   # ask_ai 测试里换掉了
+                  lambda: topic.ask_ai("正文", ["#a", "#b"], "k")):
+            try:
+                f()
+                msgs.append("没报错")
+            except RuntimeError as e:
+                msgs.append(str(e))
+        check(all(m == aierr.ARREARS for m in msgs), f"字幕被裁 / 重名改标题 / 串游戏 / 挑话题:都写欠费 -> {msgs}")
+
+        def boom(*a, **k):
+            raise requests.ConnectionError("断网")
+        requests.post = boom
+        try:
+            K.ask(Image.new("RGB", (72, 128)), "k")
+            m = ""
+        except RuntimeError as e:
+            m = str(e)
+        check(m.startswith("连不上阿里百炼"), f"断网:写连不上,不是欠费 -> {m}")
+    finally:
+        requests.post = real
+    # 后台查字幕被裁:欠费一次就不再问后面的
+    asked = []
+
+    def fcrop(path, ff, dur, key, stop=None, asker=None):
+        asked.append(path)
+        raise RuntimeError(aierr.ARREARS)
+    rk = K.check
+    K.check = fcrop
+    try:
+        vs = [SimpleNamespace(path=f"x{i}.mp4", checks={"dur": 10}) for i in range(6)]
+        w = SharpWorker(vs, list(range(6)), want_sharp=False, crop_key="k", need_crop=lambda v: True)
+        w.run()
+    finally:
+        K.check = rk
+    check(len(asked) <= 3 and w.errors and w.errors[0] == aierr.ARREARS, f"欠费:最多同时在问的那几条,后面的不问了 -> 问了 {len(asked)} 条")
+    check(all(getattr(v, "crop", None) is None for v in vs), "没查成的不记成没问题")
+
+
+def test_own_ai(tmp: Path):
+    """用户 2026-11-09:试试自己部署的模型(地址 / 模型 / Key 自己填)。文字的活问它;认得图才让它看图。"""
+    print("\n[自己的模型]")
+    import requests
+    from PIL import Image
+    from qe import aiconf as A, aierr, cropcheck as K, dupname, topic
+    from qe.config import Settings
+    st = Settings(tmp / "st_own.json")
+    st["ai_key"] = "bailian"
+    check(A.text(st).base == A.DASH and A.text(st).key == "bailian" and A.vision(st).model == A.VISION_MODEL, "没填:全用阿里百炼")
+    st["own_ai_url"], st["own_ai_model"] = "http://127.0.0.1:8788/v1", "deepseek-v4.1-flash"
+    check(A.text(st).base == A.DASH, "没填全(缺 Key):还用阿里百炼")
+    st["own_ai_key"] = "mine"
+    t, v = A.text(st), A.vision(st)
+    check(t.own and t.url() == "http://127.0.0.1:8788/v1/chat/completions" and t.model == "deepseek-v4.1-flash" and t.key == "mine" and t.extra() == {},
+          "填全了:文字的活问自己的模型,不带百炼的参数")
+    check(v.base == A.DASH and v.key == "bailian", "还没试过认不认图:看图的活还问阿里百炼")
+    st["own_ai_vision"] = A.sig(t.base, t.model)
+    check(A.vision(st).own, "试过、认得图:看图的活也问它")
+    st["own_ai_model"] = "别的模型"
+    check(not A.vision(st).own and A.text(st).model == "别的模型", "换了模型:认图要再试一下")
+    st["own_ai_model"] = "deepseek-v4.1-flash"
+    check(A.clean("<think>想一想\n很久</think>\n好") == "好" and A.tokens(t, 60) == 1500 and A.tokens(A.as_ai("k", "m"), 60) == 60, "先想一想的模型:去掉想的过程、多给字数")
+    # 「试一下」
+    def fake_post(ai, content, n, timeout):
+        if isinstance(content, list):
+            raise RuntimeError("你自己的模型没回话(HTTP 400)image not supported")
+        return "好"
+    r = A.probe(t, post=fake_post)
+    check(r["text"][0] and not r["image"][0] and "不认图" in r["image"][1], f"只认文字的:文字能用、看图不认 -> {r}")
+    r = A.probe(t, post=lambda ai, c, n, to: "红色的圆形" if isinstance(c, list) else "好")
+    check(r["text"][0] and r["image"][0], "认得图的:都能用")
+    r = A.probe(t, post=lambda ai, c, n, to: "蓝色方块" if isinstance(c, list) else "好")
+    check(not r["image"][0], "看图瞎说的:当它不认图")
+    # 真的发出去长什么样(假的 requests.post)
+    sent = []
+
+    class R:
+        status_code = 200
+        text = ""
+
+        def __init__(self, content=None, status=200, body=None):
+            self.status_code, self._b = status, body if body is not None else {"choices": [{"message": {"content": content}}]}
+
+        def json(self):
+            return self._b
+    real = requests.post
+
+    def fake(url, json=None, headers=None, timeout=None):
+        sent.append((url, json, headers))
+        return R("<think>嗯</think>新的说法" if "cut" not in str(json) else '{"subtitle":"有","cut":"切断了"}')
+    requests.post = fake
+    try:
+        out = dupname.ask_ai("原来的标题", [], t)
+        u, body, hd = sent[-1]
+        check(out == "新的说法" and u == t.url() and body["model"] == "deepseek-v4.1-flash" and "enable_thinking" not in body
+              and hd["Authorization"] == "Bearer mine" and body["max_tokens"] == 1500, "处理重名:问自己的模型,回答去掉想的过程")
+        dupname.ask_ai("原来的标题", [], "bailian")
+        check(sent[-1][0].startswith(A.DASH) and sent[-1][1]["enable_thinking"] is False, "传的是百炼 Key 字符串:照旧问百炼")
+        check(K.ask(Image.new("RGB", (72, 128)), A.vision(st)) and sent[-1][0] == t.url(), "字幕被裁:认得图的自己模型")
+        requests.post = lambda *a, **k: R(status=401, body={"error": {"message": "invalid api key", "code": 401}})
+        try:
+            dupname.ask_ai("x", [], t)
+            m = ""
+        except RuntimeError as e:
+            m = str(e)
+        check(m == "你自己的模型 Key 不对(去「设置」里重填)" and aierr.hard(m), f"Key 不对:说是自己模型的 Key -> {m}")
+
+        def down(*a, **k):
+            raise requests.ConnectionError("拒绝连接")
+        requests.post = down
+        try:
+            dupname.ask_ai("x", [], t)
+            m = ""
+        except RuntimeError as e:
+            m = str(e)
+        check(m.startswith("连不上你自己的模型"), f"服务没开:说连不上自己的模型 -> {m}")
+    finally:
+        requests.post = real
+
+
+def test_vcheck(tmp: Path):
+    """用户 2026-11-09:「再来一个功能去企鹅号查 选中的视频有没有发上去」—— 罐头页右键,只读,按标题对;对不上的人自己勾了再改。"""
+    print("\n[去企鹅号查选中的]")
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, omapi, verify
+    from qe import folders as F
+    from qe.records import Records
+    import gui.vcheck_dialog as VD
+    today = "2026-11-09"
+
+    def art(t, at, flag="发布成功", dele=""):
+        return {"article_id": "", "article_title": t, "article_pub_time": at, "article_pub_flag": flag, "article_del_flag": dele}
+
+    class C:
+        def __init__(self, arts):
+            self.arts, self.pages = sorted(arts, key=lambda a: a["article_pub_time"], reverse=True), 0
+
+        def list_articles(self, page=1, limit=10):
+            self.pages += 1
+            return {"articles": self.arts[(page - 1) * limit: page * limit], "total": len(self.arts)}
+    arts = [art("家庭开支管控难养成强制储蓄习惯", "2026-11-09 10:00:00"),
+            art("家长容易焦虑内耗七句心理暗示平复情绪稳定养育心态", "2026-11-09 10:05:00"),   # 企鹅号截短了
+            art("被打回的那条", "2026-11-09 11:00:00", flag="审核未通过"),
+            art("定时的那条", "2026-11-10 08:00:00", flag="10"),
+            art("其实发了的", "2026-11-08 20:00:00"),
+            art("很早以前的", "2026-10-01 20:00:00")]
+    items = [{"i": 0, "title": "家庭开支管控难，养成强制储蓄习惯", "sent_day": today},
+             {"i": 1, "title": "家长容易焦虑内耗，七句心理暗示，平复情绪稳定养育心态，给孩子更好的成长", "sent_day": today},
+             {"i": 2, "title": "被打回的那条", "sent_day": today},
+             {"i": 3, "title": "按错了标成已发的", "sent_day": today},
+             {"i": 4, "title": "定时的那条", "sent_day": ""},
+             {"i": 5, "title": "其实发了的", "sent_day": ""},
+             {"i": 6, "title": "还没发的", "sent_day": ""},
+             {"i": 7, "title": "很早以前的", "sent_day": ""}]
+    cl = C(arts)
+    r = {x["i"]: x for x in verify.check_videos(cl, items, today)}
+    check(r[0]["kind"] == "on" and not r[0]["fix"] and "11-09 10:00" in r[0]["text"], f"已发、企鹅号上有:对上 -> {r[0]['text']}")
+    check(r[1]["kind"] == "on", f"企鹅号把长标题截短了:也认得 -> {r[1]['text']}")
+    check(r[2]["kind"] == "bad" and r[2]["fix"] == "unsend" and "打回" in r[2]["text"], f"被打回:能改回还没发 -> {r[2]['text']}")
+    check(r[3]["kind"] == "none" and r[3]["fix"] == "unsend" and "没找到" in r[3]["text"], f"按错了标成已发的:企鹅号上没有 -> {r[3]['text']}")
+    check(r[4]["kind"] == "wait" and r[4]["fix"] == "mark" and "定时没到点" in r[4]["text"] and r[4]["at"].startswith("2026-11-10"),
+          f"定时没到点:算在企鹅号上,能标成已发 -> {r[4]['text']}")
+    check(r[5]["kind"] == "on" and r[5]["fix"] == "mark" and r[5]["at"] == "2026-11-08 20:00:00", "软件记没发、企鹅号上其实有:能标成已发(时间用企鹅号上的)")
+    check(r[6]["kind"] == "none" and not r[6]["fix"], "没发、企鹅号上也没有:对上了,不用改")
+    check(r[7]["kind"] == "none" and not r[7]["fix"], f"很早以前发过同标题的:不算这次的 -> {r[7]['text']}")
+    check(cl.pages == 1, f"一个号的后台列表只翻一遍 -> {cl.pages} 页")
+    # 窗口:用假的钥匙 / 客户端,勾上了才改
+    rec = Records(tmp / "vck.sqlite")
+    d0 = tmp / "vck"
+    d0.mkdir()
+    vids = []
+    for t in ("被打回的那条", "其实发了的", "家庭开支管控难，养成强制储蓄习惯"):
+        (d0 / f"{t}.mp4").write_bytes(b"x")
+        vids.append(F.Video(path=str(d0 / f"{t}.mp4"), title=t, account="家长小天地", employee="", date="11.9"))
+    vids.append(F.Video(path=str(d0 / "没钥匙的.mp4"), title="没钥匙的", account="别的号", employee="", date="11.9"))
+    rec.manual_published(vids[0], at=f"{today} 11:00:00")
+    rec.manual_published(vids[2], at=f"{today} 10:00:00")
+    its = [{"i": k, "title": v.title, "alts": [], "account": v.account, "sent_day": today if k in (0, 2) else ""} for k, v in enumerate(vids)]
+    real = (apiacc.check_accounts, apiacc.unseal, omapi.Client)
+    apiacc.check_accounts = lambda: [{"nick": "家长小天地", "client_id": "c", "secret": "s", "query_only": True}]
+    apiacc.unseal = lambda s: s
+    omapi.Client = lambda *a, **k: C(arts)
+    try:
+        dlg = VD.VCheckDialog(rec, vids, its, today)
+        t0 = time.time()
+        while dlg.w.isRunning() and time.time() - t0 < 10:
+            app.processEvents()
+            time.sleep(0.02)
+        app.processEvents()
+        txt = [dlg.t.item(k, 3).text() for k in range(4)]
+        check("打回" in txt[0] and "企鹅号上有" in txt[1] and "企鹅号上有" in txt[2] and "没取钥匙" in txt[3], f"一条一行说结果 -> {txt}")
+        check("查完了" in dlg.head.text() and "1 条软件记已发" in dlg.head.text() and "1 条查不了" in dlg.head.text(), f"上面一句大字 -> {dlg.head.text()}")
+        check(not dlg.b_unsend.isEnabled() and not dlg.b_mark.isEnabled()
+              and dlg.t.item(0, 0).checkState() == Qt.CheckState.Unchecked and dlg.t.item(2, 0).text() == "", "对不上的默认不勾,按钮灰着;对上的没有勾")
+        dlg.t.item(0, 0).setCheckState(Qt.CheckState.Checked)
+        dlg.t.item(1, 0).setCheckState(Qt.CheckState.Checked)
+        check(dlg.b_unsend.text() == "改回还没发(勾上的 1 条)" and dlg.b_mark.isEnabled(), f"勾上了按钮写几条 -> {dlg.b_unsend.text()}")
+        dlg.apply("unsend")
+        dlg.apply("mark")
+        check(rec.status_of(vids[0].path) == "" and rec.status_of(vids[1].path) == "已发" and rec.status_of(vids[2].path) == "已发",
+              "改回还没发 / 标成已发:只改勾上的")
+        check(rec.sent_row(vids[1].path)["published_at"] == "2026-11-08 20:00:00" and dlg.changed, "标成已发:发布时间用企鹅号上的")
+        check(dlg.t.item(0, 0).text().startswith("✓") and not dlg.b_unsend.isEnabled(), "改完那行写 ✓,按钮又灰了")
+        dlg.close()
+    finally:
+        apiacc.check_accounts, apiacc.unseal, omapi.Client = real
+
+
+def test_outro_cut(tmp: Path):
+    """用户 2026-11-16:结尾有求关注头像 / 别人账号 / 二维码 → 全部号都查,剪前给人看,剪掉照样发,原片进「结尾原片」。"""
+    print("\n[结尾求关注:检测、定位、预览、剪掉、放行]")
+    import subprocess
+    from types import SimpleNamespace
+    import numpy as np
+    import requests
+    from PIL import Image
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication, QMenu
+    from gui.outro_dialog import OutroDialog
+    from gui.sharp_worker import SharpWorker
+    from qe import aierr, apiacc, checkline as L, checks, folders as F, outrocheck as O, vertical, wmstore
+    from qe.config import Settings
+    from qe.records import Records
+    import gui.api_tab as T
+    import gui.window as W
+
+    app = QApplication.instance() or QApplication([])
+    # 1. AI 返回读得出来
+    p1 = O.parse('好的{"found": true, "tiles": [3, 4], "kind": "头像求关注", "reason": "圆头像配点赞关注"}')
+    p2 = O.parse('{"found": false, "tiles": [], "kind": "没有", "reason": "正常台词"}')
+    check(p1["found"] and p1["tiles"] == [3, 4] and p1["kind"] == "头像求关注", f"AI 返回读得对 -> {p1}")
+    check(not p2["found"] and p2["tiles"] == [], f"没找到 -> {p2}")
+
+    # 2. ask() 出错翻译(绝不真问 AI)
+    class _R:
+        def __init__(self, status, body):
+            self.status_code, self._b, self.text = status, body, str(body)
+
+        def json(self):
+            return self._b
+    real_post = requests.post
+    requests.post = lambda *a, **k: _R(400, {"error": {"code": "Arrearage"}})
+    try:
+        try:
+            O.ask(Image.new("RGB", (64, 64)), "k")
+            err = ""
+        except RuntimeError as e:
+            err = str(e)
+        check(err == aierr.ARREARS, f"欠费说清楚 -> {err}")
+    finally:
+        requests.post = real_post
+
+    # 3. 起点定位 + 截图 + 不可读 / AI 报错不放行(用内存模拟帧)
+    rng = np.random.default_rng(7)
+    im_main = Image.fromarray((rng.random((160, 90, 3)) * 200 + 30).astype("uint8"))
+    im_card = Image.new("RGB", (90, 160), (5, 5, 5))
+    im_card.paste(Image.new("RGB", (40, 40), (240, 240, 240)), (25, 60))
+
+    def grab_fake(t):
+        return im_card if t >= 8.0 else im_main
+    r_hit = O.check(str(tmp / "fake_outro.mp4"), "", 10.0, "k", grab=grab_fake,
+                    asker=lambda g: {"found": True, "tiles": [3, 4], "kind": "二维码", "reason": "片尾二维码"},
+                    shot_dir=str(tmp / "oshot"))
+    check(r_hit["hits"] and r_hit["hits"][0]["start"] >= 8.0 and os.path.isfile(r_hit["shot"]),
+          f"算出从卡片出现那帧剪 + 存截图 -> {r_hit}")
+    r_ok = O.check(str(tmp / "fake_ok.mp4"), "", 10.0, "k", grab=lambda t: im_main,
+                   asker=lambda g: {"found": False, "tiles": [], "kind": "没有", "reason": ""})
+    check(r_ok == {"hits": []}, f"正常结尾不算 -> {r_ok}")
+    bad = False
+    try:
+        O.check("x", "", 10.0, "k", grab=lambda t: None, asker=lambda g: {})
+    except OSError:
+        bad = True
+    check(bad, "读不出画面报错,不记成没问题")
+
+    # 4. SharpWorker 遇到硬错误(欠费)不再继续问后面的
+    asked = []
+    ro = O.check
+
+    def fake_boom(path, ff, dur, key, stop=None, grab=None, asker=None, shot_dir=""):
+        asked.append(path)
+        raise RuntimeError(aierr.ARREARS)
+    O.check = fake_boom
+    try:
+        vs_err = [SimpleNamespace(path=f"o{k}.mp4", checks={"dur": 10}) for k in range(6)]
+        sw = SharpWorker(vs_err, list(range(6)), want_sharp=False, outro_key="k", need_outro=lambda v: True)
+        sw.run()
+    finally:
+        O.check = ro
+    check(len(asked) <= 3 and sw.outro_errors and sw.outro_errors[0] == aierr.ARREARS, f"欠费一次就停 -> {len(asked)}")
+
+    # 5. 真 ffmpeg 造一条 5 秒测试短片(前 3.5 秒亮灰,后 1.5 秒暗黑)→ 用 outrocheck.cut 剪掉结尾 → 原片进「结尾原片」
+    ff = vertical.ffmpeg_path()
+    odir = tmp / "outro_real" / "游戏视频" / "CSGO--CSGO战神君" / "10.18"
+    odir.mkdir(parents=True)
+    vid = odir / "测试结尾.mp4"
+    r_ff = subprocess.run(
+        [ff, "-v", "error", "-y",
+         "-f", "lavfi", "-t", "3.5", "-i", "color=c=0x88aacc:s=160x284:r=25",
+         "-f", "lavfi", "-t", "1.5", "-i", "color=c=0x050505:s=160x284:r=25",
+         "-f", "lavfi", "-t", "5.0", "-i", "anullsrc=r=44100:cl=stereo",
+         "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+         "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(vid)],
+        capture_output=True, timeout=60,
+    )
+    check(r_ff.returncode == 0 and vid.is_file(), "本地造测试短视频")
+    guard_err = False
+    try:
+        O.cut(str(vid), 0.2, ff)
+    except RuntimeError:
+        guard_err = True
+    check(guard_err, "剪切起点太靠前(超过六成):拦住不剪")
+    new_v, orig_v, gone = O.cut(str(vid), 3.45, ff)
+    ndur = vertical.probe(new_v, ff)["dur"]
+    check(os.path.isfile(new_v) and os.path.basename(os.path.dirname(orig_v)) == O.ORIG_DIR and os.path.isfile(orig_v)
+          and 3.2 <= ndur <= 3.7 and gone >= 1.2,
+          f"剪掉结尾:新片 {ndur:.2f}s(剪掉 {gone}s),原片进「{O.ORIG_DIR}」")
+    check("结尾原片" in F.ORIG_DIRS, "「结尾原片」放进跳过列表,不再扫描")
+
+    # 6. 接口页完整流程: 查出 -> 拦发布 / 亮红卡 -> 右键放行 / 再标回 -> 预览框剪掉 -> 结尾 已剪 / 能发
+    (odir / "正常.mp4").write_bytes(b"123")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_outro_api.json")
+    st["api_roots"] = [str(tmp / "outro_real" / "游戏视频")]
+    st["ai_key"] = "test"
+    tab = T.ApiTab(st, Records(tmp / "rec_outro_api.sqlite"), lambda m: None)
+    tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+    for v in tab.videos:
+        v.checks = dict(v.checks or {}, bad_read=False, landscape=False, squarish=False, w=160, h=284, platform=[], tags=[], dur=3.5)
+    shot_p = tmp / "shot_api.jpg"
+    im_card.save(str(shot_p))
+    i_bad = next(k for k, v in enumerate(tab.videos) if v.title == "测试结尾")
+    i_ok = 1 - i_bad
+    # 先把测试视频恢复到 5 秒带着结尾的那个文件(用 orig_v 拷一份回来模拟未剪)
+    shutil.copy2(orig_v, tab.videos[i_bad].path)
+
+    def foutro_tab(path, ff, dur, key, stop=None, grab=None, asker=None, shot_dir=""):
+        if path.endswith(("测试结尾.mp4", "教育条.mp4")):
+            return {"hits": [{"start": 3.45, "dur": 5.0, "cut": 1.6, "kind": "头像求关注", "reason": "圆头像配点赞关注"}], "shot": str(shot_p)}
+        return {"hits": []}
+    O.check = foutro_tab
+    try:
+        w = SharpWorker(tab.videos, [0, 1], want_sharp=False, outro_key="k", need_outro=tab._outro_todo)
+        w.run()
+    finally:
+        O.check = ro
+    tab._outro_card()
+    tab._fill(i_bad), tab._fill(i_ok)
+    check(w.n_outro == 1 and O.TEXT in checks.problems(tab.videos[i_bad]) and not tab._can_send(i_bad) and tab._can_send(i_ok),
+          "查到结尾求关注:拦住不发,正常的照常能发")
+    check(not tab.card_outro.isHidden() and "1 条结尾有求关注" in tab.card_outro.title.text() and tab.b_outro.text() == "剪掉结尾 1 条",
+          f"红卡片亮了,按钮写几条 -> {tab.b_outro.text()}")
+
+    shown = []
+
+    class _FakeMenu(QMenu):
+        def exec(self, *a):
+            shown.append([x.text() for x in self.actions()])
+    rm, ra = T.QMenu, tab.tree.itemAt
+    T.QMenu, tab.tree.itemAt = _FakeMenu, (lambda p: tab.items[i_bad])
+    try:
+        tab._menu(QPoint(1, 1))
+    finally:
+        T.QMenu, tab.tree.itemAt = rm, ra
+    check("看结尾截图" in shown[0] and "结尾没问题,这条能发" in shown[0], f"右键有截图和放行 -> {shown[0]}")
+    tab.set_outro_ok(i_bad, True)
+    check(tab._can_send(i_bad) and tab.card_outro.isHidden(), "标成没问题:能发,红卡片收起")
+    tab.set_outro_ok(i_bad, False)
+    check(not tab._can_send(i_bad) and not tab.card_outro.isHidden(), "改回来:又拦住")
+
+    # OutroDialog 本身微调 & 放行按钮测试
+    rel = []
+    dlg = OutroDialog([{"row": i_bad, "title": "测试结尾", "account": "CSGO战神君", "path": tab.videos[i_bad].path,
+                        "start": 3.45, "dur": 5.0, "kind": "头像求关注", "reason": "圆头像配点赞关注", "shot": str(shot_p)}],
+                      on_ok=lambda r: rel.append(r), grab_fn=lambda p, t: im_main if t < 3.45 else im_card)
+    _wait(app, lambda: not dlg._cards[0]["p_left"].pixmap().isNull())
+    dlg._cards[0]["sp"].setValue(3.2)
+    check("剪掉 1.8 秒" in dlg._cards[0]["lab_cut"].text() and dlg.chosen() == [(i_bad, 3.2)],
+          f"预览框微调秒数 -> {dlg._cards[0]['lab_cut'].text()} / {dlg.chosen()}")
+    dlg._cards[0]["b_ok"].click()
+    check(rel == [i_bad] and dlg.chosen() == [] and not dlg.b_go.isEnabled(), "框里点放行:立即触发且不再剪")
+    dlg.reject()
+
+    # 真正通过 ApiTab.cut_outro 剪掉
+    tab.OUTRO_DIALOG = lambda items, parent: [(items[0]["row"], items[0]["start"])]
+    try:
+        tab.cut_outro()
+        _wait(app, lambda: not tab.busy())
+        for _ in range(5):
+            app.processEvents()
+            time.sleep(0.02)
+    finally:
+        tab.OUTRO_DIALOG = None
+    check(tab._can_send(i_bad) and tab.card_outro.isHidden() and tab.items[i_bad].text(4).endswith("结尾 已剪"),
+          f"剪完以后:能发、卡片收起、状态写结尾 已剪 -> {tab.items[i_bad].text(4)}")
+    apiacc.save([])
+
+    # 7. 教育 / 影视页(罐头页):教育号也查结尾、拦摆、剪完能摆
+    edu_d = tmp / "outro_edu" / "小学生教育" / "10.18" / "研习社" / "小王"
+    edu_d.mkdir(parents=True)
+    evid = edu_d / "教育条.mp4"
+    shutil.copy2(orig_v, evid)
+    (edu_d / "教育条.png").write_bytes(b"png")
+    st2 = Settings(tmp / "st_outro_edu.json")
+    st2["material_root"] = str(tmp / "outro_edu" / "小学生教育")
+    st2["ai_key"] = "test"
+    w2 = W.MainWindow(st2, Records(tmp / "rec_outro_edu.sqlite"))
+    w2.AI_COVER = False
+    w2.SHARP_CHECK = False
+    ev = F.Video(str(evid), "教育条", "家长研习空间", "小王", "10.18", png=str(edu_d / "教育条.png"),
+                 cover=str(edu_d / "教育条.png"), cover_kind="横", cover_why="ok")
+    w2.videos = [ev]
+    w2.table.setRowCount(1)
+    O.check = foutro_tab
+    try:
+        sw2 = SharpWorker(w2.videos, [0], want_sharp=False, outro_key="k", need_outro=w2._outro_todo)
+        sw2.run()
+    finally:
+        O.check = ro
+    w2._fill_row(0)
+    w2._outro_button()
+    check(W.MainWindow._title_block(ev) == O.TEXT and not w2._todo() and not w2.b_outro.isHidden() and w2.b_outro.text() == "剪掉结尾 1 条",
+          f"教育号也查结尾:拦住不摆,按钮写 1 条 -> {w2.b_outro.text()}")
+    w2.table.selectRow(0)
+    w2.set_outro_ok(True)
+    check(W.MainWindow._title_block(ev) == "" and len(w2._todo()) == 1 and w2.b_outro.isHidden(), "教育号右键放行:能摆、按钮收起")
+    w2.set_outro_ok(False)
+    check(W.MainWindow._title_block(ev) == O.TEXT and not w2.b_outro.isHidden(), "教育号改回来:又拦住")
+    w2.OUTRO_DIALOG = lambda items, parent: [(items[0]["row"], items[0]["start"])]
+    try:
+        w2.cut_outro()
+        _wait(app, lambda: not (w2.outro_worker and w2.outro_worker.isRunning()))
+        for _ in range(5):
+            app.processEvents()
+            time.sleep(0.02)
+    finally:
+        w2.OUTRO_DIALOG = None
+    check(W.MainWindow._title_block(ev) == "" and len(w2._todo()) == 1 and w2.b_outro.isHidden()
+          and w2.table.item(0, 5).text().endswith("结尾 已剪"),
+          f"教育号剪完:允许摆、按钮收起、写结尾 已剪 -> {w2.table.item(0, 5).text()}")
+    w2.close()
+
+
+def test_bad_cover_fix(tmp: Path):
+    print("[黑/模糊封面自动截清晰图 + 设置开关 + 双击去创作罐头搜视频]")
+    from unittest import mock
+    from PIL import Image
+    from PySide6.QtWidgets import QApplication
+    from qe import blackcover as B
+    from qe.config import DEFAULTS, Settings
+    from qe.records import Records
+    from qe.folders import Video
+
+    app = QApplication.instance() or QApplication([])
+    st = Settings(tmp / "st_badcov.json")
+    check(st.get("bad_cover_auto") is True and st.get("bad_cover_dir") == DEFAULTS["bad_cover_dir"],
+          f"默认开着自动截清晰封面、目录 {DEFAULTS['bad_cover_dir']}")
+
+    # 造视频文件 + 记录(一条靠 aid 找回、一条靠 账号+标题 找回,即使归档挪走也找得回来)
+    arc = tmp / "arc_badcov"
+    vid_dir = arc / "11.16" / "平和"
+    vid_dir.mkdir(parents=True)
+    v1 = vid_dir / "新版本水上飞机：超级！.mp4"
+    v2 = vid_dir / "超长标题测试一二三四五六七八九十甲乙丙丁戊己庚辛壬癸.mp4"
+    v1.write_bytes(b"v1")
+    v2.write_bytes(b"v2")
+
+    rec = Records(tmp / "rec_badcov.sqlite")
+    v_obj1 = Video(path=str(tmp / "orig" / "x1.mp4"), title="新版本水上飞机：超级！?", account="和平精英上分君",
+                   employee="", date="11.16")
+    v_obj2 = Video(path=str(v2), title="超长标题测试一二三四五六七八九十甲乙丙丁戊己庚辛壬癸", account="游研社",
+                   employee="", date="11.16")
+    rec.manual_published(v_obj1, note="article_id=AID111 vid=V1", at="2026-11-16 18:58:59")
+    rec.conn.execute("UPDATE posts SET moved_pkey=? WHERE account=?", (str(v1), "和平精英上分君"))
+    rec.conn.commit()
+    rec.manual_published(v_obj2, note="手动发", at="2026-11-16 19:00:00")
+
+    sample_jpg = tmp / "sample_pick.jpg"
+    Image.new("RGB", (320, 180), (60, 140, 200)).save(sample_jpg)
+    picked_calls = []
+
+    def fake_pick(vp, ffmpeg=""):
+        picked_calls.append(vp)
+        return str(sample_jpg)
+
+    out_dir = tmp / "out_covers"
+    st["bad_cover_dir"] = str(out_dir)
+    st["bad_cover_auto"] = False
+    items_off = [{"nick": "和平精英上分君", "title": "新版本水上飞机：超级！?", "time": "2026-11-16 18:58:59",
+                  "url": "http://x/1", "aid": "AID111", "kind": "模糊封面"}]
+    check(B.export_covers(items_off, st, rec=rec, pick_fn=fake_pick) == 0 and not out_dir.exists(),
+          "设置关着时不截封面、不建输出目录")
+
+    st["bad_cover_auto"] = True
+    items_on = [
+        {"nick": "和平精英上分君", "title": "新版本水上飞机：超级！?", "time": "2026-11-16 18:58:59",
+         "url": "http://x/1", "aid": "AID111", "kind": "模糊封面"},
+        {"nick": "游研社", "title": "超长标题测试一二三四五六七八九十甲乙丙丁戊己庚辛壬癸", "time": "2026-11-16 19:00:00",
+         "url": "http://x/2", "aid": "", "kind": "模糊封面"},
+        {"nick": "和平精英上分君", "title": "找不到原视频的那条", "time": "2026-11-16 19:01:00",
+         "url": "http://x/3", "aid": "NOPE", "kind": "黑封面"},
+    ]
+    got_n = B.export_covers(items_on, st, rec=rec, pick_fn=fake_pick)
+    check(got_n == 2 and len(picked_calls) == 2 and os.path.isfile(items_on[0]["cover_file"])
+          and os.path.isfile(items_on[1]["cover_file"]) and items_on[2]["cover_file"] == "",
+          f"找到 2 个视频截好封面放进指定目录,找不到原视频的不报错 -> {got_n}, {items_on}")
+    # 第二次直接复用现成文件,不再重复抽帧
+    picked_calls.clear()
+    got_n2 = B.export_covers(items_on, st, rec=rec, pick_fn=fake_pick)
+    check(got_n2 == 2 and len(picked_calls) == 0, "目录里已有这张封面图时不重复抽帧")
+    rec.conn.close()
+
+    check(B.search_keyword("27年春节套爆料了？DNF联动仙剑奇侠传1 #DNF") == "27年春节套爆料了？DNF联动仙剑奇侠传1"
+          and B.search_keyword("没有话题的标题") == "没有话题的标题",
+          "搜视频标题时去掉末尾 #话题")
+
+    # 模拟创作罐头 CDP:首页点开 → 跳作品管理 → 筛选日期 → 填不带话题的标题点搜索 + 窗口提到前面
+    actions = []
+    state = {"vis": False, "url": "https://om.qq.com/main"}
+
+    class FakePage:
+        def __init__(self, t, timeout=10):
+            self.t = t
+
+        def ev(self, js, timeout=20):
+            u = self.t.get("url") or ""
+            if "usernameText" in js:
+                return ["和平精英上分君", 1700 if state["vis"] else 0, state["url"]]
+            if "czgts.cn" in u:
+                actions.append(("home_ev", js[:30]))
+                state["vis"] = True
+                return "ok"
+            if js.strip() == "innerWidth":
+                return 1700 if state["vis"] else 0
+            if js.strip() == "location.href":
+                return state["url"]
+            if "location.href =" in js:
+                state["url"] = B.ARTICLE_MANAGE_URL
+                return None
+            if "dates-cls" in js:
+                return {"x": 120, "y": 140}
+            if "calMonths" in js:
+                return {"status": "found", "x": 220, "y": 260}
+            if "panelFooter" in js:
+                return {"x": 320, "y": 360}
+            if "omui-loading" in js:
+                return False
+            if "输入标题关键词搜索内容" in js:
+                return {"x": 500, "y": 140} if "articleManage" in state["url"] else None
+            if "omui-input__search-btn" in js:
+                return {"x": 580, "y": 140}
+            return None
+
+        def cmd(self, m, params=None, timeout=20):
+            actions.append((m, params))
+
+        def click_xy(self, x, y):
+            actions.append(("click", x, y))
+
+        def key(self, k, code):
+            actions.append(("key", k))
+
+        def close(self):
+            pass
+
+    fake_targets = [
+        {"id": "h1", "type": "page", "url": "https://www.czgts.cn/v1/home"},
+        {"id": "om1", "type": "webview", "url": "https://om.qq.com/main"},
+    ]
+    brought = []
+    msg = B.open_in_czgt(
+        "和平精英上分君", "新版本水上飞机 #和平精英", day="2026-11-16",
+        find_ports_fn=lambda: [62176],
+        targets_fn=lambda _p: fake_targets,
+        page_cls=FakePage,
+        bring_fn=lambda: brought.append(1) or 1,
+        sleep_fn=lambda _s: None,
+    )
+    check(state["vis"] and state["url"] == B.ARTICLE_MANAGE_URL
+          and ("click", 120, 140) in actions and actions.count(("click", 220, 260)) == 2
+          and ("click", 320, 360) in actions
+          and ("Input.insertText", {"text": "新版本水上飞机"}) in actions
+          and ("click", 580, 140) in actions
+          and len(brought) >= 2 and "和平精英上分君" in msg and "2026-11-16" in msg,
+          f"双击在创作罐头进作品管理→选日期→去话题搜标题并把窗口提前 -> {msg}, actions={actions}")
+
+    # 窗口列状态 + 双击调 open_in_czgt(带日期)
+    from gui.black_dialog import BlackDialog
+    dlg = BlackDialog("2026-11-16", None, items=items_on, st=st)
+    check(dlg.t.columnCount() == 5 and dlg.t.item(0, 4).text() == "已放到文件夹" and dlg.t.item(2, 4).text() == "没找到原视频",
+          f"窗口第5列显示新封面状态 -> {[dlg.t.item(i, 4).text() for i in range(3)]}")
+    nav_calls = []
+    with mock.patch.object(B, "open_in_czgt",
+                           side_effect=lambda nk, tt, day="": nav_calls.append((nk, tt, day)) or f"已在创作罐头「{nk}」里搜索「{tt}」"):
+        dlg.open_row(0)
+        _wait(app, lambda: not (dlg._nav_w and dlg._nav_w.isRunning()))
+        for _ in range(5):
+            app.processEvents()
+            time.sleep(0.02)
+    check(nav_calls == [("和平精英上分君", "新版本水上飞机：超级！?", "2026-11-16")],
+          f"双击触发去创作罐头按日期搜这条视频 -> {nav_calls}, {dlg.lab_done.text()}")
+    dlg.close()
+
+
+def test_per_account_concurrency(tmp: Path):
+    print("[按号独立干活 + 全局最多 3 条重编码防卡死]")
+    import threading
+    from unittest import mock
+    from PySide6.QtWidgets import QApplication, QFileDialog
+    import gui.api_tab as T
+    from qe import apiacc, checks, omapi, vertical
+    from qe.config import Settings
+    from qe.records import Records
+
+    app = QApplication.instance() or QApplication([])
+    root = tmp / "conc_root"
+    for g, n in (("CSGO", "CSGO战神君"), ("PUBG", "PUBG突围君"), ("DNF", "DNF连招档案馆")):
+        d = root / "游戏视频" / f"{g}--{n}" / "10.18"
+        d.mkdir(parents=True)
+        for k in range(4):
+            (d / f"{g}{k}.mp4").write_bytes(b"v")
+    alt_pubg = tmp / "alt_pubg" / "10.18"
+    alt_pubg.mkdir(parents=True)
+    (alt_pubg / "新选1 ##旧话题.mp4").write_bytes(b"v2")
+
+    accs = [
+        {"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "b", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "DNF连招档案馆", "source_name": "DNF", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+    ]
+    apiacc.save(accs)
+    st = Settings(tmp / "st_conc.json")
+    st["api_roots"] = [str(root / "游戏视频")]
+    st["api_archive"] = str(tmp / "conc_arc" / "{date}")
+    st["api_interval"] = 0
+    st["quota_open"] = True
+    rec = Records(tmp / "rec_conc.sqlite")
+    logs = []
+    tab = T.ApiTab(st, rec, logs.append)
+    tab.SHARP_CHECK = False
+    tab.COVER_CHECK = False
+    tab.set_day("10.18")
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 12)
+    for v in tab.videos:
+        if v.account in ("CSGO战神君", "DNF连招档案馆"):
+            v.checks = {"w": 1920, "h": 1080, "landscape": True, "tags": [], "platform": []}
+        else:
+            v.checks = {"w": 1080, "h": 1920, "landscape": False, "tags": [], "platform": []}
+    tab._update_scope()
+
+    stat = {"cur": 0, "peak": 0, "done_vs": [], "sent": []}
+    sl = threading.Lock()
+    gate = threading.Event()
+
+    def slow_vert(p, ff, stop=None, keep_orig=False):
+        with sl:
+            stat["cur"] += 1
+            stat["peak"] = max(stat["peak"], stat["cur"])
+        gate.wait(2.5)
+        with sl:
+            stat["cur"] -= 1
+            stat["done_vs"].append(p)
+        return p, ""
+
+    class FakeCl:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, p, title, cat, before_publish=None, **k):
+            if before_publish:
+                before_publish("V")
+            stat["sent"].append((title, cat))
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+
+    csgo_rows = [i for i, v in enumerate(tab.videos) if v.account == "CSGO战神君"]
+    dnf_rows = [i for i, v in enumerate(tab.videos) if v.account == "DNF连招档案馆"]
+    orig_csgo_vs = [tab.videos[i] for i in csgo_rows]
+
+    with mock.patch.object(vertical, "to_vertical", side_effect=slow_vert), \
+         mock.patch.object(checks, "check_one", side_effect=lambda v, *a, **k: v.checks.update({"w": 1080, "h": 1920, "landscape": False})), \
+         mock.patch.object(omapi, "Client", FakeCl), \
+         mock.patch.object(T, "ask", return_value=True), \
+         mock.patch.object(QFileDialog, "getExistingDirectory", return_value=str(alt_pubg)):
+        tab.run_vertical(csgo_rows)
+        tab.run_vertical(dnf_rows)
+        check(tab.busy("CSGO战神君") and tab.busy("DNF连招档案馆") and not tab.busy("PUBG突围君") and tab.b_pick.isEnabled(),
+              "CSGO / DNF 转竖屏时:只锁这俩忙号,PUBG 照常空闲且顶部「给号选文件夹」不灰")
+
+        # 1) CSGO 在转竖屏时,给 PUBG 换手选文件夹 → 只重读 PUBG,不影响 CSGO 的 Video 对象与行状态
+        tab.pick_folder("PUBG突围君")
+        _wait(app, lambda: not tab.busy("PUBG突围君") and any(v.title == "新选1 ##旧话题" for v in tab.videos))
+        cur_csgo_vs = [v for v in tab.videos if v.account == "CSGO战神君"]
+        check(cur_csgo_vs == orig_csgo_vs, "别的号选完文件夹重刷后,CSGO 正在转竖屏的 Video 对象原样留着")
+
+        # 2) 同时给空闲的 PUBG 整理标题(并触发发布!)
+        pubg_rows = [i for i, v in enumerate(tab.videos) if v.account == "PUBG突围君"]
+        tab.run_topic(pubg_rows)
+        _wait(app, lambda: not tab.busy("PUBG突围君"))
+        check(any(v.title == "新选1 #旧话题" for v in tab.videos if v.account == "PUBG突围君"),
+              f"CSGO 转竖屏期间,PUBG 照常整理好标题 -> {[v.title for v in tab.videos if v.account == 'PUBG突围君']}")
+
+        pubg_rows = [i for i, v in enumerate(tab.videos) if v.account == "PUBG突围君"]
+        tab.run_publish(pubg_rows)
+        _wait(app, lambda: not tab.busy("PUBG突围君"), 15)
+        check([t for t, _ in stat["sent"]] == ["新选1 #旧话题"],
+              f"CSGO 转竖屏还没完,PUBG 已经先发完了 -> {stat['sent']}")
+
+        # 放行 CSGO + DNF 的 8 条转竖屏(确认全局最多同时 3 条)
+        gate.set()
+        _wait(app, lambda: not tab.busy(), 15)
+    for _ in range(5):
+        app.processEvents()
+        time.sleep(0.02)
+    check(1 <= stat["peak"] <= 3 and len(stat["done_vs"]) == 8
+          and all(v.checks.get("converted") for v in tab.videos if v.account in ("CSGO战神君", "DNF连招档案馆")),
+          f"2 个号同时跑 8 条转竖屏,共用 3 工位上限不超 3 -> peak={stat['peak']}, done={len(stat['done_vs'])}")
+
+    # 3) CSGO 正在发布期间:别的不在发的号(PUBG / DNF)照常能选文件夹、改话题、转竖屏
+    pub_gate = threading.Event()
+    alt_pubg2 = tmp / "alt_pubg2" / "10.18"
+    alt_pubg2.mkdir(parents=True)
+    (alt_pubg2 / "发布期间新选 ##话题2.mp4").write_bytes(b"v3")
+
+    class SlowPubCl:
+        def __init__(self, *a, **k):
+            pass
+
+        def send(self, p, title, cat, before_publish=None, **k):
+            if before_publish:
+                before_publish("V")
+            pub_gate.wait(3.0)
+            stat["sent"].append((title, cat))
+            return {"vid": "V", "article_id": "A", "transaction_id": "P", "status": "成功"}
+
+    csgo_rows = [i for i, v in enumerate(tab.videos) if v.account == "CSGO战神君"]
+    dnf_rows = [i for i, v in enumerate(tab.videos) if v.account == "DNF连招档案馆"]
+    for i in dnf_rows:
+        tab.videos[i].checks["landscape"] = True
+    stat["sent"].clear()
+    with mock.patch.object(omapi, "Client", SlowPubCl), \
+         mock.patch.object(vertical, "to_vertical", side_effect=lambda p, *a, **k: (p, "")), \
+         mock.patch.object(checks, "check_one", side_effect=lambda v, *a, **k: v.checks.update({"w": 1080, "h": 1920, "landscape": False})), \
+         mock.patch.object(T, "ask", return_value=True), \
+         mock.patch.object(QFileDialog, "getExistingDirectory", return_value=str(alt_pubg2)):
+        tab.run_publish(csgo_rows)
+        check(tab.busy("CSGO战神君") and not tab.busy("PUBG突围君") and not tab.busy("DNF连招档案馆")
+              and tab.b_pick.isEnabled() and tab.b_vert.isEnabled() and tab.b_topic.isEnabled(),
+              "CSGO 正在发布时:只锁 CSGO 和防第二批发布,「给号选文件夹 / 转竖屏 / 整理标题」都不灰")
+        tab.pick_folder("PUBG突围君")
+        _wait(app, lambda: not tab.busy("PUBG突围君") and any(v.title == "发布期间新选 ##话题2" for v in tab.videos))
+        pubg_rows = [i for i, v in enumerate(tab.videos) if v.account == "PUBG突围君"]
+        tab.run_topic(pubg_rows)
+        _wait(app, lambda: not tab.busy("PUBG突围君"))
+        check(any(v.title == "发布期间新选 #话题2" for v in tab.videos if v.account == "PUBG突围君"),
+              "CSGO 正在发布期间,PUBG 照常选好新文件夹并整理完话题")
+        tab.run_vertical([i for i, v in enumerate(tab.videos) if v.account == "DNF连招档案馆"])
+        _wait(app, lambda: not tab.busy("DNF连招档案馆"))
+        check(all(not v.checks.get("landscape") for v in tab.videos if v.account == "DNF连招档案馆"),
+              "CSGO 正在发布期间,DNF 照常转完竖屏")
+        pub_gate.set()
+        _wait(app, lambda: not tab.busy(), 15)
+    check(len(stat["sent"]) == 4, f"期间做完别的事后 CSGO 也正常全发完 -> {len(stat['sent'])}")
+
+
+def test_title_extra_clean(tmp: Path):
+    print("[整理标题/话题:孤立 n / u003eu003c / 联系人署名一并删掉,正常标题不误伤]")
+    from types import SimpleNamespace as NS
+    from unittest import mock
+    from PySide6.QtWidgets import QApplication
+    from qe import checks, titleclean as TC, topic
+    from qe.config import Settings
+    from qe.records import Records
+    from gui import api_tab as T
+    from gui.api_tab import ApiTab
+
+    cases = [
+        ('“姐姐，男性的寿命比女性的寿命短6年，如果想同时离开，要选年下男才行”n',
+         '“姐姐，男性的寿命比女性的寿命短6年，如果想同时离开，要选年下男才行”'),
+        ('狠起来连自己的醋也要吃 u003eu003c', '狠起来连自己的醋也要吃'),
+        ('最新封锁枪械推荐u003c便宜-好用u003e#暗区突围', '最新封锁枪械推荐 便宜-好用 #暗区突围'),
+        ('7推年度结算(u003e u003c) 今年的卡面真好看n', '7推年度结算 今年的卡面真好看'),
+        ('我想跟你在一起，不想再经历离散 （yc老师：）', '我想跟你在一起，不想再经历离散'),
+        ('我想跟你在一起，不想再经历离散 (yc老师：） ', '我想跟你在一起，不想再经历离散'),
+        ('狐大侠转场 （ib一滴小鱼泪老师）#光与夜之恋', '狐大侠转场 #光与夜之恋'),
+        ('“天命都不曾拦下我” （yc老师 ）#光与夜之恋', '“天命都不曾拦下我” #光与夜之恋'),
+        ('“带你180秒回顾陆沉心动历程”n这是最幸福的n n（yc：#光与夜之恋',
+         '“带你180秒回顾陆沉心动历程”这是最幸福的 #光与夜之恋'),
+        ('我 陆沉 请你做妻子。n nyc：#光与夜之恋', '我 陆沉 请你做妻子。 #光与夜之恋'),
+        ('近似圆的东西吗n原创： n', '近似圆的东西吗'),
+        ('打法。n#三角洲行动', '打法。#三角洲行动'),
+        ('今天好开心n n n', '今天好开心'),
+        ('好喜欢n所以还是画了n', '好喜欢所以还是画了'),
+    ]
+    for src, want in cases:
+        got = TC.clean(src)
+        check(got == want and TC.dirty(src), f"clean({src!r}) -> {got!r} (want {want!r}, dirty={TC.dirty(src)})")
+
+    keeps = [
+        '说出你最好的朋友的名字（陆沉免答）',
+        '(扶额）简直是荒谬',
+        '三角洲画面参数n卡滤镜分享#三角洲行动',
+        '重刷第n次动漫#青春之旅',
+        '熬了n个大夜写代码',
+        '【沧元图第101集预告逐帧解析来了：】 孟川',
+        '【本人投稿】',
+        'iPhone16ProMax评测 #数码',
+        'Join#话题',
+    ]
+    for src in keeps:
+        check(TC.clean(src) is None and not TC.dirty(src), f"不误伤({src!r}) -> clean={TC.clean(src)!r}, dirty={TC.dirty(src)}")
+
+    # checks.problems 标红且只报要删,不乱报话题写法不对
+    v_n = NS(title='我想跟你在一起（yc老师：）#光与夜之恋', checks={"w": 1080, "h": 1920, "tags": ["光与夜之恋"], "platform": []}, account="PUBG突围君")
+    ps = checks.problems(v_n)
+    check(any("（yc老师：）" in p and "整理标题" in p for p in ps) and "话题写法不对" not in ps,
+          f"problems 只提示要删联系人 -> {ps}")
+
+    # 批量改话题 & AI 挑话题一并清理
+    check(topic.with_topic('“要选年下男才行”n', '光与夜之恋') == '“要选年下男才行”#光与夜之恋'
+          and topic.with_topic('狠起来连自己的醋也要吃 u003eu003c', '光与夜之恋') == '狠起来连自己的醋也要吃#光与夜之恋'
+          and topic.with_topic('我想跟你在一起 （yc老师：）', '光与夜之恋') == '我想跟你在一起#光与夜之恋',
+          "批量改话题一并删掉孤立 n / 转义串 / 联系人")
+    check(topic.new_name('吃醋 u003eu003c #日常 #光与夜之恋', lambda b, t: t[1]) == '吃醋 #光与夜之恋',
+          "AI 挑话题同时清掉转义串")
+
+    # 界面端到端:tidy_titles(只整理写法不用 AI)都能改文件+同名封面
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc
+    from qe.config import bj_now
+    n0 = bj_now()
+    md = f"{n0.month}.{n0.day}"
+    r_ec = tmp / "root_ec"
+    fd = r_ec / "游戏视频" / "PUBG--PUBG突围君" / md
+    fd.mkdir(parents=True)
+    names = [
+        '狠起来连自己的醋也要吃 u003eu003c',
+        '我想跟你在一起 (yc老师：）',
+        '“想同时离开，要选年下男才行”n',
+    ]
+    for nm in names:
+        (fd / f"{nm}.mp4").write_bytes(b"v")
+        (fd / f"{nm}.jpg").write_bytes(b"c")
+    st = Settings(tmp / "s_ec.json")
+    st["api_roots"] = [str(r_ec / "游戏视频")]
+    apiacc.save([{"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "1", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    tab = ApiTab(st, Records(tmp / "r_ec.sqlite"), lambda *a: None)
+    tab.AUTO_UNSURE = False
+    tab.SHARP_CHECK = False
+    tab.COVER_CHECK = False
+    tab.set_day(md)
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 3)
+    for v in tab.videos:
+        v.checks = {"w": 1080, "h": 1920, "landscape": False, "tags": [], "platform": []}
+    with mock.patch.object(T, "ask", return_value=True):
+        tab.tidy_titles(list(range(len(tab.videos))))
+    stems = sorted(os.path.splitext(f)[0] for f in os.listdir(fd) if f.endswith(".mp4"))
+    covers = sorted(os.path.splitext(f)[0] for f in os.listdir(fd) if f.endswith(".jpg"))
+    want_stems = sorted([
+        '狠起来连自己的醋也要吃',
+        '我想跟你在一起',
+        '“想同时离开，要选年下男才行”',
+    ])
+    check(stems == want_stems and covers == want_stems and all(not checks.problems(v) for v in tab.videos if v.checks),
+          f"整理写法一键清掉视频+同名封面 -> {stems}")
+    apiacc.save([])
+
+
+def test_verify_web_and_lag(tmp: Path):
+    print("[去企鹅号核对:OpenAPI 延迟不误打勾 + 开着罐头直读实时列表]")
+    from datetime import timedelta
+    from unittest import mock
+    from qe import cdp, folders as F, verify
+    from qe.config import bj_now
+    from qe.records import Records
+    now = bj_now()
+    day = now.strftime("%Y-%m-%d")
+    yday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    rec = Records(tmp / "r_vlag.sqlite")
+    d = tmp / "vlag_src"
+    d.mkdir()
+    for t in ("刚发1", "刚发2", "其实漏了"):
+        p = d / f"{t}.mp4"
+        p.write_bytes(b"v")
+        rec.manual_published(F.Video(path=str(p), title=t, account="家长小天地", employee="小王", date=f"{now.month}.{now.day}"))
+
+    class LagCl:
+        def list_articles(self, page=1, limit=10):
+            # 模拟企鹅号 OpenAPI 列表延迟:只同步到昨天,今天的还没进接口列表
+            return {"articles": [{"article_title": "昨天的", "article_pub_time": f"{yday} 18:00:00",
+                                  "article_pub_flag": "发布成功"}] if page == 1 else [], "total": 1}
+
+        def article_info(self, aid):
+            return {}
+
+    r_lag = verify.check_edu(LagCl(), rec, "家长小天地", day)
+    check(r_lag.get("lag") and len(r_lag["missing"]) == 3 and all(m["sure"] is False for m in r_lag["missing"]),
+          f"OpenAPI 刚发不久没同步到时:绝不自动打勾(不误拎回重发) -> {r_lag}")
+
+    # 模拟创作罐头正登着「家长小天地」,直接读 /marticle/article/list 实时结果
+    class FakePg:
+        def __init__(self, target, timeout=20):
+            self.n = target["nick"]
+
+        def ev(self, js, timeout=20):
+            if "querySelector" in js:
+                return self.n
+            if "index=1" in js:
+                return {"response": {"code": "0"}, "data": {"articles": [
+                    {"article_id": "A1", "title": "刚发1", "status": "1", "v_status": "2", "del_flag": 0, "pub_time": f"{day} 18:10:00"},
+                    {"article_id": "A2", "title": "刚发2", "status": "1", "v_status": "2", "del_flag": 0, "pub_time": f"{day} 18:10:01"},
+                ]}}
+            return {"response": {"code": "0"}, "data": {"articles": []}}
+
+        def close(self):
+            pass
+
+    with mock.patch.object(verify, "_can_web", return_value=True), \
+         mock.patch.object(cdp, "find_ports", return_value=[62176]), \
+         mock.patch.object(cdp, "targets", return_value=[{"type": "webview", "url": "https://om.qq.com/main", "nick": "家长小天地"}]), \
+         mock.patch.object(cdp, "Page", FakePg):
+        r_web = verify.check_edu(LagCl(), rec, "家长小天地", day)
+    check(r_web.get("source") == "web" and r_web["live"] == 2 and len(r_web["missing"]) == 1
+          and r_web["missing"][0]["title"] == "其实漏了" and r_web["missing"][0]["sure"] is True,
+          f"开着罐头直读实时网页列表:2 条已发对上,只勾真漏掉的 1 条 -> {r_web}")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -6268,6 +7636,16 @@ if __name__ == "__main__":
     test_flat_folders(tmp)
     test_black_cover(tmp)
     test_sharp(tmp)
+    test_crop_back(tmp)
+    test_check_status(tmp)
+    test_ai_errors(tmp)
+    test_own_ai(tmp)
+    test_vcheck(tmp)
+    test_outro_cut(tmp)
+    test_bad_cover_fix(tmp)
+    test_per_account_concurrency(tmp)
+    test_title_extra_clean(tmp)
+    test_verify_web_and_lag(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

@@ -91,12 +91,13 @@ class Records:
             self.conn.commit()
             return cur.rowcount
 
-    def manual_published(self, v, note: str = "人手动发的") -> None:
-        """人在罐头里自己发了(软件没摆成 / 没摆):记成已发,发布时间 = 现在(补记)。"""
+    def manual_published(self, v, note: str = "人手动发的", at: str = "") -> None:
+        """人在罐头里自己发了(软件没摆成 / 没摆):记成已发,发布时间 = 现在(补记);
+        at = 去企鹅号查到的发布时间(「2026-11-09 14:32:10」,每日汇总算到那天)。"""
         with _LOCK:
             self.conn.execute(
                 "INSERT INTO posts(date,account,employee,title,path,cover_kind,batch,status,prepared_at,published_at,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (v.date, v.account, v.employee, v.title, v.path, v.cover_kind, "手动", "已发", "", bj_str(), note))
+                (v.date, v.account, v.employee, v.title, v.path, v.cover_kind, "手动", "已发", "", at or bj_str(), note))
             self.conn.commit()
 
     # ---------------- 接口发的 16 个号(员工一栏记「接口」,和教育的放一起数) ----------------
@@ -289,6 +290,17 @@ class Records:
             self.conn.execute("UPDATE posts SET status='没发成', moved_pkey=NULL, note=note || ? WHERE id=?", (note, rid))
             self.conn.commit()
 
+    def undo_sent(self, path: str, note: str = "(人改回没发:按错了,其实没发)") -> int:
+        """罐头页右键「不算已发」(用户 2026-11-09:按错了标成已发,其实没发):这条的「已发」记录作废,
+        之后算还没发、能再摆,每天的已发数跟着少。记录不删(备注写着改过),不挪文件。返回改了几笔。"""
+        with _LOCK:
+            self._fill()
+            k = pkey(path)
+            cur = self.conn.execute("UPDATE posts SET status='作废', note=note || ? WHERE status='已发' AND (pkey=? OR moved_pkey=?)",
+                                    (note, k, k))
+            self.conn.commit()
+            return cur.rowcount
+
     def problems_on(self, day: str) -> dict:
         """「今天出问题」那张卡(老板试用 2026-10-21):这天没发成的(后来发成了的不算)、
         还不确定发没发的、摆好了还没确认的(后两样不管哪天的,没处理就一直算)。day = 2026-10-21。"""
@@ -319,6 +331,31 @@ class Records:
         with _LOCK:
             return [dict(r) for r in self.conn.execute(
                 "SELECT batch, account, COUNT(*) AS n, MIN(prepared_at) AS at FROM posts WHERE status='摆好' GROUP BY batch ORDER BY at")]
+
+    def find_for_cover(self, nick: str, title: str, aid: str = "") -> list[dict]:
+        """按 article_id 或 账号 + 标题 找发布记录(查出黑 / 模糊封面后回本地找原视频截封面)。"""
+        rows, seen = [], set()
+
+        def add(rs):
+            for r in rs:
+                if r["id"] not in seen:
+                    seen.add(r["id"])
+                    rows.append(dict(r))
+
+        with _LOCK:
+            if aid:
+                add(self.conn.execute("SELECT * FROM posts WHERE note LIKE ? ORDER BY id DESC LIMIT 5",
+                                      (f"%{aid}%",)).fetchall())
+            if nick and title:
+                add(self.conn.execute("SELECT * FROM posts WHERE account=? AND title=? ORDER BY id DESC LIMIT 5",
+                                      (nick, title)).fetchall())
+            if title:
+                add(self.conn.execute("SELECT * FROM posts WHERE title=? ORDER BY id DESC LIMIT 5",
+                                      (title,)).fetchall())
+            if nick and len(title or "") >= 8:
+                add(self.conn.execute("SELECT * FROM posts WHERE account=? AND title LIKE ? ORDER BY id DESC LIMIT 5",
+                                      (nick, f"{title[:24]}%")).fetchall())
+        return rows
 
     def export_xlsx(self, path: str, date: str = "") -> None:
         import openpyxl

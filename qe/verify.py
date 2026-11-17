@@ -130,12 +130,16 @@ def _settle(rec, nick: str, missing: list[dict], live: list[dict], near: list[di
     return out
 
 
-def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None, near: list[dict] | None = None) -> dict:
+def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None, near: list[dict] | None = None,
+              from_web: bool | None = None) -> dict:
     """教育号(用户 2026-10-26:钥匙只用来查,发布照旧走罐头):罐头发的记录没有文章编号,按标题对。
     先对完全一样的(去掉空格标点),再对一个是另一个开头的(企鹅号可能把长标题截短)。
-    plat = 这天的后台列表,near = 前后一天的(跨半夜用);不给就自己去读。"""
+    plat = 这天的后台列表,near = 前后一天的(跨半夜用);不给就先看创作罐头里是不是正登着这个号(实时),没开再读接口。"""
     if plat is None:
-        plat, near = _day_and_near(cl, day)
+        plat, near, is_web = _day_and_near(cl, day, nick=nick)
+    else:
+        is_web = bool(from_web)
+    from_web = is_web if from_web is None else bool(from_web)
     near = near or []
     ours = ours_on(rec, nick, day, edu=True)
     live = [p for p in plat if _on(p)]
@@ -166,17 +170,25 @@ def check_edu(cl, rec, nick: str, day: str, plat: list[dict] | None = None, near
         else:
             missing.append(dict(r, why="", sure=None))
     missing = _settle(rec, nick, missing, live, near)
+    lag_miss = set() if from_web else _lag_suspects(cl, ours, missing, plat, near)
     # 用户 2026-10-26:标题找不到,而这天后台也没有多出来、软件没记的 → 不可能是改了标题发的,就是没发上(打勾);
     # 这天后台有多出来的 → 可能是改了标题发的,不打勾,提示看一眼
+    # 2026-11-17:OpenAPI /article/clientlist 对刚发 1~2 小时内的文章有同步延迟(网页后台立刻能看到);
+    # 没拿到网页实时列表且整批新发一条都没同步到时,绝不自动打勾(免得把刚发好的全部误拎回来重发)
     for m in missing:
         if m["sure"] is None:
-            if left:
+            if m.get("id") in lag_miss or (lag_miss and m.get("title") in lag_miss):
+                m["why"], m["sure"], m["lag"] = (
+                    "企鹅号接口列表对刚发 1~2 小时内的有延迟,先不自动打勾;开着创作罐头登着这个号再点「查」可看实时结果,或过 2 小时再核对",
+                    False, True)
+            elif left:
                 m["why"], m["sure"] = (f"企鹅号这天没找到这个标题;这天后台有 {len(left)} 条软件没记的,"
                                        "可能是在罐头里改了标题发的,看一眼再决定"), False
             else:
                 m["why"], m["sure"] = "企鹅号这天和前后一天都没有这个标题,这天后台也没有别的多出来 —— 没发上", True
     return {"nick": nick, "ours": len(ours), "live": len(live), "ok": sum(1 for p in live if not _wait(p)),
-            "review": sum(1 for p in live if _wait(p)), "missing": missing, "extra": left, "edu": True}
+            "review": sum(1 for p in live if _wait(p)), "missing": missing, "extra": left, "edu": True,
+            "source": "web" if from_web else "api", "lag": any(m.get("lag") for m in missing)}
 
 
 def _shift(day: str, n: int) -> str:
@@ -184,10 +196,180 @@ def _shift(day: str, n: int) -> str:
     return (date.fromisoformat(day) + timedelta(days=n)).isoformat()
 
 
-def _day_and_near(cl, day: str, stopped=None) -> tuple[list[dict], list[dict]]:
-    """读这天 + 前后一天的后台列表(一遍):返回 (这天的, 前后一天的)。"""
-    allp = platform_between(cl, _shift(day, -1), _shift(day, 1), stopped=stopped)
-    return [p for p in allp if p["time"][:10] == day], [p for p in allp if p["time"][:10] != day]
+def _can_web() -> bool:
+    return os.environ.get("QE_NO_WINFIX") != "1"
+
+
+def _same_web_nick(tab_nick: str, want_nick: str) -> bool:
+    t, w = (tab_nick or "").strip().casefold(), (want_nick or "").strip().casefold()
+    if not t or not w:
+        return False
+    if t == w:
+        return True
+    short, long_ = (t, w) if len(t) <= len(w) else (w, t)
+    rest = long_[len(short):]
+    return len(short) >= 2 and long_.startswith(short) and len(rest) <= 2 and rest.isascii()
+
+
+def _web_flag(a: dict, cl) -> str:
+    if int(a.get("del_flag") or 0):
+        return "已删除"
+    rej = str(a.get("reject_reason") or a.get("standard_reject_reason") or "").strip()
+    fail = str(a.get("publishFailedShow") or "0") == "1"
+    st = str(a.get("status") or "")
+    aid = str(a.get("article_id") or "")
+    if (rej or fail or st != "1") and cl is not None and aid:
+        try:
+            info = (cl.article_info(aid) or {}).get("article_info") or {}
+            if info.get("article_pub_flag"):
+                return str(info["article_pub_flag"])
+        except Exception:
+            pass
+    if rej:
+        return "审核不通过"
+    if fail:
+        return "发布失败"
+    if st and st != "1":
+        return "未发布" if st == "0" else st
+    dur = str(((a.get("video") or {}).get("duration")) or "")
+    if a.get("v_pubunfinished") or dur == "00:00:00" or str(a.get("v_status") or "") not in ("2", ""):
+        return "审核中"
+    return "发布成功"
+
+
+def web_between(nick: str, start: str, end: str, cl=None, stopped=None, max_pages: int = 200) -> list[dict] | None:
+    """若创作罐头里正登着 nick 的企鹅号页面,直接只读 /marticle/article/list 拿实时列表(没有接口 1~2 小时延迟);找不到返回 None。"""
+    if not nick:
+        return None
+    try:
+        from . import cdp
+        ports = cdp.find_ports()
+    except Exception:
+        return None
+    if not ports:
+        return None
+    import json
+    tabs = []
+    for port in ports:
+        try:
+            for t in cdp.targets(port):
+                url = t.get("url") or ""
+                if "om.qq.com" in url and "/userauth" not in url.lower() and t.get("type") in ("page", "webview"):
+                    tabs.append(t)
+        except Exception:
+            continue
+    nick_js = "(document.querySelector('[class*=userName],[class*=nick],[class*=user-name],[class*=account],[class*=name]')?.innerText || '').trim()"
+    pick_t = None
+    for t in tabs:
+        try:
+            pg = cdp.Page(t, timeout=8)
+        except Exception:
+            continue
+        try:
+            tn = pg.ev(nick_js, timeout=8) or ""
+            if tn.strip().casefold() == nick.strip().casefold():
+                pick_t = t
+                break
+            if pick_t is None and _same_web_nick(tn, nick):
+                pick_t = t
+        except Exception:
+            continue
+        finally:
+            pg.close()
+    if pick_t is None:
+        return None
+    try:
+        pg = cdp.Page(pick_t, timeout=20)
+    except Exception:
+        return None
+    try:
+        out, seen = [], set()
+        for page in range(1, max_pages + 1):
+            if stopped and stopped():
+                break
+            url = (f"/marticle/article/list?category=&ftype=&search=&startDate={start}&endDate={end}"
+                   f"&num=10&index={page}&readChannel=all&source=&dstChannel=&isPartDst=0&ignoreTotal=0&relogin=1")
+            js = f"(async () => {{ const r = await fetch({json.dumps(url)}, {{credentials: 'include'}}); return await r.json(); }})()"
+            j = pg.ev(js, timeout=20)
+            code = (j.get("response") or {}).get("code", j.get("code")) if isinstance(j, dict) else None
+            if str(code) != "0":
+                return None if page == 1 else out
+            items = ((j.get("data") or {}).get("articles") or []) if isinstance(j, dict) else []
+            if not items:
+                break
+            for a in items:
+                pub_t = str(a.get("pub_time") or a.get("date") or "")
+                aid = str(a.get("article_id") or "")
+                vid = str(a.get("vid") or (a.get("video") or {}).get("vid") or (a.get("article_video_info") or {}).get("vid") or "")
+                key = aid or (("v:" + vid) if vid else "")
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                out.append({
+                    "aid": aid, "vid": vid, "title": str(a.get("title") or ""),
+                    "flag": _web_flag(a, cl), "deleted": bool(int(a.get("del_flag") or 0)),
+                    "time": pub_t, "img": str(a.get("imgurl") or ""), "url": str(a.get("url") or ""),
+                })
+            if len(items) < 10:
+                break
+        return out
+    except Exception:
+        return None
+    finally:
+        pg.close()
+
+
+def _lag_suspects(cl, ours: list[dict], missing: list[dict], plat: list[dict], near: list[dict]) -> set:
+    """OpenAPI /article/clientlist 往往落后 1~2 小时:刚发的整批一条都还没进列表时,认成「延迟」不打勾。"""
+    from datetime import datetime
+    from .config import bj_now
+    if not missing or not ours:
+        return set()
+    now = bj_now().replace(tzinfo=None)
+    recent_miss = []
+    for m in missing:
+        if m.get("sure") is not None or m.get("bad"):
+            continue
+        pt = str(m.get("published_at") or "")[:19]
+        try:
+            age = (now - datetime.strptime(pt, "%Y-%m-%d %H:%M:%S")).total_seconds()
+        except ValueError:
+            continue
+        if -300 <= age < 3 * 3600:
+            recent_miss.append(m)
+    if not recent_miss:
+        return set()
+    # 这一段最近时间里如果已经有部分条对上了,说明列表已经同步到这里(不用挡)
+    missing_keys = {m.get("id") or _tkey(m.get("title", "")) for m in missing}
+    recent_matched = [r for r in ours if (r.get("id") or _tkey(r.get("title", ""))) not in missing_keys
+                      and str(r.get("published_at") or "")[:19] >= min(str(m.get("published_at") or "")[:19] for m in recent_miss)]
+    if recent_matched:
+        return set()
+    newest = max((p.get("time") or "" for p in plat + near), default="")
+    if not newest and cl is not None:
+        try:
+            arts = (cl.list_articles(1, 10) or {}).get("articles") or []
+            newest = max((str(a.get("article_pub_time") or "") for a in arts), default="")
+        except Exception:
+            newest = ""
+    out = set()
+    for m in recent_miss:
+        pt = str(m.get("published_at") or "")[:19]
+        if not newest or pt > newest[:19]:
+            out.add(m.get("id") if m.get("id") is not None else m.get("title"))
+    return out
+
+
+def _day_and_near(cl, day: str, nick: str = "", stopped=None) -> tuple[list[dict], list[dict], bool]:
+    """读这天 + 前后一天的后台列表(一遍):优先读创作罐头实时网页,没有再走 OpenAPI。返回 (这天的, 前后一天的, 是否实时网页)。"""
+    s, e = _shift(day, -1), _shift(day, 1)
+    if nick and _can_web():
+        web = web_between(nick, s, e, cl=cl, stopped=stopped)
+        if web is not None:
+            return [p for p in web if p["time"][:10] == day], [p for p in web if p["time"][:10] != day], True
+    allp = platform_between(cl, s, e, stopped=stopped)
+    return [p for p in allp if p["time"][:10] == day], [p for p in allp if p["time"][:10] != day], False
 
 
 def platform_on(cl, day: str, max_pages: int = 2000) -> list[dict]:
@@ -251,7 +433,10 @@ def platform_between(cl, start: str, end: str, max_pages: int = 2000, stopped=No
 def check_range(cl, rec, nick: str, days: list[str], edu: bool = False, stopped=None) -> dict:
     """一段日子(批量查询):这个号的后台列表只读一遍(多读前后各一天,跨半夜用),再一天一天对。
     返回 {day: check_account / check_edu 的结果}。"""
-    plat = platform_between(cl, _shift(days[0], -1), _shift(days[-1], 1), stopped=stopped)
+    s, e = _shift(days[0], -1), _shift(days[-1], 1)
+    web = web_between(nick, s, e, cl=cl, stopped=stopped) if (nick and _can_web()) else None
+    from_web = web is not None
+    plat = web if from_web else platform_between(cl, s, e, stopped=stopped)
     out = {}
     for d in days:
         if stopped and stopped():
@@ -259,7 +444,7 @@ def check_range(cl, rec, nick: str, days: list[str], edu: bool = False, stopped=
         near_days = (_shift(d, -1), _shift(d, 1))
         one = [p for p in plat if p["time"][:10] == d]
         near = [p for p in plat if p["time"][:10] in near_days]
-        out[d] = (check_edu(cl, rec, nick, d, plat=one, near=near) if edu
+        out[d] = (check_edu(cl, rec, nick, d, plat=one, near=near, from_web=from_web) if edu
                   else check_account(cl, rec, nick, d, plat=one, near=near))
     return out
 
@@ -268,7 +453,7 @@ def check_account(cl, rec, nick: str, day: str, plat: list[dict] | None = None, 
     """一个号:{nick, ours, ok, review, missing:[记录+why], extra:[企鹅号上的]}。
     plat = 已经读好的这天的后台列表、near = 前后一天的(批量查询用);不给就自己去读。"""
     if plat is None:
-        plat, near = _day_and_near(cl, day)
+        plat, near, _ = _day_and_near(cl, day, nick=nick)
     near = near or []
     ours = ours_on(rec, nick, day)
     live = [p for p in plat if _on(p)]
@@ -507,6 +692,64 @@ def export_range_xlsx(path: str, st, rec, days: list[str], by_day: dict) -> str:
         w2.column_dimensions[col].width = w
     wb.save(path)
     return path
+
+
+def _same_title(keys: list[str], t: str) -> bool:
+    """一样(去掉空格标点),或者一个是另一个的开头(至少 8 个字;企鹅号可能把长标题截短)。"""
+    pk = _tkey(t)
+    return any(k and (pk == k or (min(len(k), len(pk)) >= 8 and (k.startswith(pk) or pk.startswith(k)))) for k in keys)
+
+
+def check_videos(cl, items: list[dict], today: str, stopped=None, nick: str = "") -> list[dict]:
+    """罐头页右键「去企鹅号查选中的」(用户 2026-11-09「去企鹅号查 选中的视频有没有发上去」)。一个号调一次,cl 是这个号的。
+    items:[{title, alts:[摆的时候改成的标题…], sent_day:"2026-11-09"(软件记的发布日子)或 ""(软件记没发)}]。
+    已发的读发布那天和前后一天,没发的读最近 3 天(定时发到以后的也算);这些日子的后台列表只翻一遍,按标题对。
+    每条返回 dict(item, kind=on / wait / bad / none, text=大白话, found=企鹅号上那篇, fix=unsend / mark / "", at=企鹅号上的发布时间)。
+    fix 只是「能改」:不自动改,窗口里人自己勾。"""
+    wins = []
+    for it in items:
+        d = it.get("sent_day") or ""
+        wins.append((_shift(d, -1), _shift(d, 1)) if d else (_shift(today, -2), _shift(today, 7)))
+    s = min(w[0] for w in wins) if items else today
+    e = max(w[1] for w in wins) if items else today
+    web = web_between(nick, s, e, cl=cl, stopped=stopped) if (items and nick and _can_web()) else None
+    plat = web if web is not None else (platform_between(cl, s, e, stopped=stopped) if items else [])
+    out = []
+    for it, (a, b) in zip(items, wins):
+        keys = [_tkey(t) for t in [it.get("title")] + list(it.get("alts") or []) if t]
+        cands = [p for p in plat if _same_title(keys, p["title"])]
+        inwin = [p for p in cands if a <= p["time"][:10] <= b]
+        on = [p for p in inwin if _on(p)]
+        pick = (on or inwin or [None])[0]
+        sent = bool(it.get("sent_day"))
+        r = dict(it, found=pick, fix="", at="")
+        if pick is None:
+            r["kind"] = "none"
+            r["text"] = f"企鹅号上 {a[5:]}~{min(b, today)[5:]} 没找到这个标题(在罐头里改过标题发的会对不上,看一眼)"
+            if cands:
+                r["text"] += f";别的日子有 {len(cands)} 条同标题的({cands[0]['time'][5:16]})"
+        elif _on(pick):
+            when = pick["time"][5:16]
+            if _wait(pick):
+                r["kind"] = "wait"
+                r["text"] = f"企鹅号上有,还没真发出去:{'定时没到点' if pick['flag'] == '10' else pick['flag']}({when})"
+            else:
+                r["kind"] = "on"
+                r["text"] = f"企鹅号上有:{pick['flag']} {when}"
+            if len(on) > 1:
+                r["text"] += f";同标题的有 {len(on)} 条(发重了?)"
+            r["at"] = pick["time"]
+        else:
+            r["kind"] = "bad"
+            kind = _bad_kind(pick)
+            r["text"] = {"删了": "在企鹅号上被删了", "没发上": f"企鹅号上是「{pick['flag']}」—— 没发上",
+                         "打回": f"被审核打回了(企鹅号上是「{pick['flag']}」)"}.get(kind, "企鹅号上这条的状态认不出,看一眼")
+        if sent and r["kind"] in ("bad", "none"):
+            r["fix"] = "unsend"
+        elif not sent and r["kind"] in ("on", "wait"):
+            r["fix"] = "mark"
+        out.append(r)
+    return out
 
 
 def _real_path(p: str) -> str:

@@ -15,7 +15,7 @@ import time
 import wave
 from pathlib import Path
 
-from .config import data_dir
+from .config import app_dir, data_dir
 
 _NOWIN = 0x08000000 | 0x00004000 if os.name == "nt" else 0
 MODEL_FILES = ("model.int8.onnx", "tokens.txt")
@@ -25,7 +25,9 @@ _PUNCT = set("，。！？；、,.!?;…~")
 
 
 def model_dir() -> str:
-    for d in (data_dir() / "models" / "sense-voice",
+    for d in (app_dir() / "models" / "sense-voice",
+              app_dir() / "_internal" / "models" / "sense-voice",
+              data_dir() / "models" / "sense-voice",
               Path(os.environ.get("APPDATA", "")) / "ainame" / "models" / "sense-voice"):
         if all((d / f).is_file() for f in MODEL_FILES):
             return str(d)

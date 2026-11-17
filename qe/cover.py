@@ -424,7 +424,8 @@ def wide_cover(path: str, plan: dict, log=lambda m: None) -> str:
     try:
         url = r.json()["output"]["choices"][0]["message"]["content"][0]["image"]
     except Exception:
-        raise RuntimeError(f"AI 扩图没成:{r.status_code} {r.text[:150]}")
+        from .aierr import why
+        raise RuntimeError(why(r) or f"AI 扩图没成:{r.status_code} {r.text[:150]}")
     gen = cv2.imdecode(np.frombuffer(requests.get(url, timeout=60).content, np.uint8), cv2.IMREAD_COLOR)
     if gen is None:
         raise RuntimeError("AI 扩图的结果下载不下来")

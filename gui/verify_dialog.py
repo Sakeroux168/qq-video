@@ -32,7 +32,8 @@ class VerifyWorker(QThread):
             return {"nick": nick, "days": self.days, "edu": bool(a.get("query_only")),
                     "error": omapi.redact(str(e))[:80] if hasattr(omapi, "redact") else str(e)[:80]}
         out = {"nick": nick, "by_day": per, "days": self.days, "edu": bool(a.get("query_only")),
-               "live": 0, "ours": 0, "ok": 0, "review": 0, "missing": [], "extra": []}
+               "live": 0, "ours": 0, "ok": 0, "review": 0, "missing": [], "extra": [],
+               "lag": any(r.get("lag") for r in per.values())}
         for d, r in per.items():
             for k in ("live", "ours", "ok", "review"):
                 out[k] += r.get(k, r["ok"] + r["review"] if k == "live" else 0)
@@ -271,8 +272,10 @@ class VerifyDialog(QDialog):
             return
         n = len(self.rows)
         sure = sum(1 for m in self.rows if m.get("sure", True))
-        self.lab_done.setText((f"查完了:{sure} 条要补(打了勾)" + (f",{n - sure} 条要你看一眼(没打勾)" if n > sure else ""))
-                              if n else "查完了:软件记的已发,企鹅号上都有 ✓")
+        lag = any(r.get("lag") for r in self.results.values())
+        self.lab_done.setText(((f"查完了:{sure} 条要补(打了勾)" + (f",{n - sure} 条要你看一眼(没打勾)" if n > sure else ""))
+                               if n else "查完了:软件记的已发,企鹅号上都有 ✓")
+                              + (" · 刚发 1~2 小时内接口列表有延迟(开着创作罐头登着号再点「查」看实时)" if lag else ""))
         self.b_back.setText("拎回来重发(打勾的)" if n else "拎回来重发")
         self.b_back.setEnabled(bool(n))
         self.b_xls.setEnabled(self.st is not None)

@@ -176,8 +176,10 @@ class AccountsDialog(QDialog):
             if col == 0:
                 new, ok = QInputDialog.getText(self, "改号名", "号名(和企鹅号上的一模一样):", text=nick)
                 if ok and new.strip() and new.strip() != nick:
-                    A.rename(self.st, nick, new)
+                    warn = A.rename(self.st, nick, new)
                     self.changed = True
+                    if warn:
+                        QMessageBox.information(self, "改号名", f"号名改好了。\n\n{warn}")
             elif col == 4:
                 if r["cat"] == "影视":
                     d = QFileDialog.getExistingDirectory(self, f"「{nick}」的素材文件夹", r["folder"] or FILM_ROOT)

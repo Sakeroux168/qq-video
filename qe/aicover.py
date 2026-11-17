@@ -164,9 +164,12 @@ def aim(img_w: float, img_h: float, r: float, box) -> list[float]:
     return [round(cx, 4), round(top + fh / 2, 4)]
 
 
-def _ask_raw(key: str, imgs: list[tuple[str, bytes]], prompt: str, timeout: int = 60) -> str:
+def _ask_raw(key, imgs: list[tuple[str, bytes]], prompt: str, timeout: int = 60) -> str:
+    """key:百炼 Key 字符串,或 aiconf.AI(自己的模型,认得图才会给到这里)。"""
     import requests
-    if not key:
+    from .aiconf import as_ai, clean, tokens
+    ai = as_ai(key, MODEL)
+    if not ai.key:
         raise RuntimeError("要 AI 看封面,先在「设置」里填阿里百炼 Key")
     content = []
     for k, (tag, b) in enumerate(imgs):
@@ -174,20 +177,21 @@ def _ask_raw(key: str, imgs: list[tuple[str, bytes]], prompt: str, timeout: int 
             content.append({"type": "text", "text": f"第 {k + 1} 张:{tag}"})
         content.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(b).decode("ascii")}})
     content.append({"type": "text", "text": prompt})
-    body = {"model": MODEL, "temperature": 0, "max_tokens": 300, "enable_thinking": False,
+    body = {"model": ai.model, "temperature": 0, "max_tokens": tokens(ai, 300), **ai.extra(),
             "messages": [{"role": "user", "content": content}]}
     try:
-        r = requests.post(URL, json=body, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        r = requests.post(ai.url(), json=body, headers={"Authorization": f"Bearer {ai.key}", "Content-Type": "application/json"},
                           timeout=timeout)
-    except requests.RequestException:
-        raise RuntimeError("连不上阿里百炼(网络?)")
+    except (requests.RequestException, ValueError):      # ValueError:Key 里有中文
+        raise RuntimeError(f"连不上{ai.who}(网络?)")
     try:
-        return r.json()["choices"][0]["message"]["content"]
+        return clean(r.json()["choices"][0]["message"]["content"])
     except Exception:
-        raise RuntimeError(f"AI 没回话:HTTP {r.status_code}")
+        from .aierr import why
+        raise RuntimeError(why(r, ai.who) or f"{ai.who}没回话:HTTP {r.status_code}")
 
 
-def ask(imgs: list[tuple[str, bytes]], prompt: str, key: str) -> str:
+def ask(imgs: list[tuple[str, bytes]], prompt: str, key) -> str:
     """把图给千问看,返回它回的原话。出错抛 RuntimeError。"""
     return _ask_raw(key, imgs, prompt)
 
@@ -200,7 +204,7 @@ def _movable(v, tag: str, r: float) -> bool:
     return not (getattr(v, which) or {}).get("faces")
 
 
-def review(v, key: str, asker=None) -> dict:
+def review(v, key, asker=None) -> dict:
     """看一条(先查记过的)。返回 {"ok", "why", "ai": {"plan": {比例: 框中心}, "vplan": {…}}, "moved": [比例], "text": [比例]}。
     出错抛 RuntimeError。asker(图, 问的话) → 原话:测试里换掉,绝不真问 AI。"""
     got = cached(v)

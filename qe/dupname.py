@@ -24,24 +24,29 @@ def _norm(s: str) -> str:
     return re.sub(r"[\s\W_]+", "", str(s or "")).lower()
 
 
-def ask_ai(body: str, avoid: list[str], key: str, model: str = "qwen-plus", timeout: int = 60) -> str:
-    """问 AI 一个意思相近的说法(只给正文,不给话题)。出错抛 RuntimeError。"""
+def ask_ai(body: str, avoid: list[str], key, model: str = "qwen-plus", timeout: int = 60) -> str:
+    """问 AI 一个意思相近的说法(只给正文,不给话题)。出错抛 RuntimeError。key:百炼 Key 或 aiconf.AI(自己的模型)。"""
     import requests
-    if not key:
+    from .aiconf import as_ai, clean, tokens
+    ai = as_ai(key, model)
+    if not ai.key:
         raise RuntimeError("要 AI 改标题,先在「设置」里填阿里百炼 Key")
     av = ("不要用:\n" + "\n".join(avoid[:20])) if avoid else ""
     msg = PROMPT.format(body=body, avoid=av)
     try:
-        r = requests.post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-                          json={"model": model, "messages": [{"role": "user", "content": msg}], "temperature": 0.7,
-                                "max_tokens": 200, "enable_thinking": False},
-                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, timeout=timeout)
-        return str(r.json()["choices"][0]["message"]["content"])
+        r = requests.post(ai.url(), json={"model": ai.model, "messages": [{"role": "user", "content": msg}], "temperature": 0.7,
+                                          "max_tokens": tokens(ai, 200), **ai.extra()},
+                          headers={"Authorization": f"Bearer {ai.key}", "Content-Type": "application/json"}, timeout=timeout)
     except Exception:
-        raise RuntimeError("AI 没回话(网络 / Key?)")
+        raise RuntimeError(f"连不上{ai.who}(网络?)")
+    try:
+        return clean(r.json()["choices"][0]["message"]["content"])
+    except Exception:
+        from .aierr import why
+        raise RuntimeError(why(r, ai.who) or f"{ai.who}没回话(HTTP {r.status_code})")
 
 
-def new_title(title: str, taken, key: str, asker=None, tries: int = 3) -> str:
+def new_title(title: str, taken, key, asker=None, tries: int = 3) -> str:
     """给一条重名的视频想个新标题(正文让 AI 换说法,结尾话题原样接上)。taken(新标题) → 这个号用过没有。
     想不出来(AI 回的不像样 / 一直重名)返回 ""。"""
     p = topic.split_topics(title)

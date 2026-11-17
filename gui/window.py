@@ -18,6 +18,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDi
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from qe import blackcover
+from qe import checkline
+from qe import cropcheck
+from qe import outrocheck
 from qe import cover as C
 from qe import sharp
 from qe import folders as F
@@ -66,6 +69,7 @@ class AiCoverWorker(QThread):
         super().__init__(parent)
         self.videos, self.adj, self.key, self.trust, self.skip, self.asker = videos, adj, key, trust, skip, asker
         self.stop = False
+        self.dead = False                 # 阿里百炼欠费 / Key 不对:剩下的不问了
         self.errors: list[str] = []
         self.n_bad = 0
         self.n_moved = 0
@@ -82,10 +86,14 @@ class AiCoverWorker(QThread):
             if self.stop:
                 return
             v = self.videos[i]
+            if self.dead:
+                return
             try:
                 res = aicover.review(v, self.key, asker=self.asker)
             except Exception as e:
                 self.errors.append(str(e))
+                from qe import aierr
+                self.dead = self.dead or aierr.hard(e)   # 欠费 / Key 不对:别的不再问(问也是一样)
                 return
             v.ai = res
             aicover.apply(v, res)
@@ -247,6 +255,52 @@ class VertWorker(QThread):
             list(ex.map(one, self.rows))
 
 
+class OutroWorker(QThread):
+    """后台把查到求关注结尾的视频剪掉最后几秒(教育 / 影视页),2 条一起做,原片挪进「结尾原片」。"""
+    one = Signal(int, str, float, str)        # (行, 新位置, 剪掉几秒, 出错说明)
+
+    def __init__(self, videos, plan_cut: list[tuple[int, float]], parent=None):
+        super().__init__(parent)
+        self.videos, self.plan = videos, plan_cut
+        self.stop = False
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from qe import outrocheck, sharp, vertical, wmstore
+        ff = vertical.ffmpeg_path()
+
+        def one(pair):
+            if self.stop:
+                return
+            i, start_sec = pair
+            v = self.videos[i]
+            old_path = v.path
+            old_outro = dict(getattr(v, "outro", None) or {})
+            old_sharp = sharp.STORE.get(old_path)
+            old_crop = wmstore.CROP.get(old_path)
+            try:
+                new, _orig, gone = outrocheck.cut(old_path, start_sec, ff, stop=lambda: self.stop)
+            except Exception as e:
+                self.one.emit(i, "", 0.0, str(e))
+                return
+            v.path = new
+            hits = old_outro.get("hits") or [{"start": start_sec, "cut": gone}]
+            v.outro = wmstore.OUTRO.put(new, {"hits": hits, "shot": old_outro.get("shot") or ""}, ok=True, blurred=True)
+            if old_sharp and not sharp.flagged(old_sharp):
+                sharp.STORE.move(old_path, new)
+                v.sharp = sharp.STORE.get(new)
+            else:
+                v.sharp = None
+            if old_crop and not wmstore.blocks(old_crop):
+                wmstore.CROP.move(old_path, new)
+                v.crop = wmstore.CROP.get(new)
+            elif old_crop:
+                v.crop = None
+            self.one.emit(i, new, gone, "")
+        with ThreadPoolExecutor(2) as ex:
+            list(ex.map(one, self.plan))
+
+
 WAIT_NOTE = "上传中(这批一起传,传完再一条条弄封面)"
 READY = "摆好等发布"          # 记录里的「摆好」:在罐头里摆好了,还没点发布(审查 17:原来「摆好没发 / 没发 / 还没发」三个词混着用)
 PICK_DAY = "先在左上角「要发哪天的」里选一天"       # 审查 13:刚打开是空白,不知道先干什么
@@ -340,6 +394,9 @@ class MainWindow(QMainWindow):
         self.ai_worker: AiCoverWorker | None = None
         self.black_worker = None
         self.sharp_worker = None
+        self.outro_worker = None
+        self._recheck_paths: set[str] = set()   # 人点了「重新检查」、还没查到的
+        self._ck_cfg = None
         self._black_timer = None
         self._unattended = False          # 定时发布正在自己发(没人看着)
         self._sched_skip: set[str] = set()  # 定时发布这一轮跳过的(没摆好 / 文件没了):不再拿来摆
@@ -419,8 +476,19 @@ class MainWindow(QMainWindow):
         self.lab_sum = QLabel(PICK_DAY)
         self.lab_sum.setObjectName("hint")
         rv.addWidget(self.lab_sum)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["标题(= 文件名)", "号", "员工", "封面", "状态"])
+        # 清晰度 / 字幕被裁查到哪了 + 手动再查一次(用户 2026-11-07:我要知道他有没有过这道工序,也要能自己让它再查)
+        ck = QHBoxLayout()
+        self.lab_check = QLabel("")
+        self.lab_check.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        ck.addWidget(self.lab_check, 1)
+        self.b_recheck = QPushButton("重新检查")
+        self.b_recheck.setToolTip("不管查没查过,再查一遍清晰度和字幕被裁(字幕被裁只查影视号)。跟着选中走,没选管全部。你点过「没问题」的还算数。")
+        self.b_recheck.clicked.connect(lambda: self.recheck())
+        self.b_recheck.hide()
+        ck.addWidget(self.b_recheck)
+        rv.addLayout(ck)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["标题(= 文件名)", "号", "员工", "封面", "状态", "检查"])
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(62)
         self.table.setItemDelegateForColumn(0, EduTableDelegate(self.table))   # 封面小图 + 标题 + 号 · 员工
@@ -432,10 +500,12 @@ class MainWindow(QMainWindow):
         self.table.cellDoubleClicked.connect(lambda r, _c: self.preview_cover(r))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_menu)
+        self.table.itemSelectionChanged.connect(self._check_line)
+        self.table.itemSelectionChanged.connect(self._crop_button)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        for i, wd in ((1, 104), (2, 70), (3, 200), (4, 120)):
+        for i, wd in ((1, 104), (2, 70), (3, 200), (4, 120), (5, 245)):
             self.table.setColumnWidth(i, wd)
         self.table.setColumnHidden(1, True)           # 号 / 员工写在标题下面那行小字里了(列还在)
         self.table.setColumnHidden(2, True)
@@ -451,7 +521,7 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.lab_more)
         sp.addWidget(right)
         sp.setSizes([330, 900])
-        self.tree.setColumnWidth(1, 110)
+        self.tree.setColumnWidth(1, 170)                  # 「发了 21/24 · 2 没封面」放得下
         sp.setStretchFactor(0, 1)
         sp.setStretchFactor(1, 3)
 
@@ -538,6 +608,10 @@ class MainWindow(QMainWindow):
         self._scope_timer.setSingleShot(True)
         self._scope_timer.setInterval(200)
         self._scope_timer.timeout.connect(self._update_scope)
+        self._check_timer = QTimer(self)              # 一条一条刷的时候攒一下再算
+        self._check_timer.setSingleShot(True)
+        self._check_timer.setInterval(300)
+        self._check_timer.timeout.connect(self._check_line)
         # 大按钮那一排:定时离主按钮远一点(和 16 个号页一样,免得点错)
         bar = self.hero.acts
         bar.addWidget(self.b_sched)
@@ -558,7 +632,15 @@ class MainWindow(QMainWindow):
         self.b_dupname.setToolTip("重名的(发过同名 / 同一天有几条同名):AI 照原标题改一个意思相近的新标题,先给你看,点「改」才改。\n"
                                   "确实是重复的视频:点一下那条,按键盘 Delete 删掉(挪进「重复删除」文件夹)。")
         self.b_dupname.clicked.connect(self.edu_dupname)
-        for b in (self.b_vert, self.b_wm, self.b_blur, self.b_dupname, self.b_review, self.b_allok):
+        self.b_crop = QPushButton("打回字幕被裁的")
+        self.b_crop.setToolTip("影视号字幕被裁的:视频连封面挪进素材盘的「打回视频\\账号名」文件夹,你再跟同事说重新处理")
+        self.b_crop.clicked.connect(self.crop_back)
+        self.b_crop.hide()
+        self.b_outro = QPushButton("剪掉结尾")
+        self.b_outro.setToolTip("结尾有求关注 / 别人账号 / 二维码的:先给你看截帧和剪切时间,确认后把那几秒剪掉;原片挪进旁边的「结尾原片」")
+        self.b_outro.clicked.connect(self.cut_outro)
+        self.b_outro.hide()
+        for b in (self.b_vert, self.b_wm, self.b_blur, self.b_dupname, self.b_crop, self.b_outro, self.b_review, self.b_allok):
             tools.addWidget(b)
             if b is self.b_review:
                 tools.addWidget(help_dot("标黄"))
@@ -761,7 +843,7 @@ class MainWindow(QMainWindow):
             return
         from gui.black_dialog import BlackWorker
         day = self._black_day()
-        w = BlackWorker(day, self)
+        w = BlackWorker(day, self, st=self.st)
         w.finished.connect(lambda w=w, d=day: self._black_got(d, w.items, w.errs))
         self.black_worker = w
         w.start()
@@ -772,20 +854,23 @@ class MainWindow(QMainWindow):
         blackcover.save(day, items)
         self._black_cards(items)
         if items:
-            self.say(f"查了平台封面:今天有 {len(items)} 条黑封面,去后台改")
+            n_cov = sum(1 for x in items if x.get("cover_file"))
+            extra = f",已截好 {n_cov} 张清晰封面" if n_cov else ""
+            self.say(f"查了平台封面:今天有 {blackcover.summary_text(items)}{extra},双击去创作罐头改")
         if errs:
             self.say(f"⚠ 查黑封面:{len(errs)} 个号没查成({errs[0]})")
 
     def _black_cards(self, items: list):
         """亮红 / 收起(今天页、游戏 / 动漫页各一张)。"""
+        txt = f"今天有 {blackcover.summary_text(items)},去后台改" if items else ""
         for c in (self.today.card_black, self.api_tab.card_black):
-            c.set(f"今天有 {len(items)} 条黑封面,去后台改", "bad")
+            c.set(txt, "bad")
             c.setVisible(bool(items))
 
     def show_black(self, day: str = ""):
         from gui.black_dialog import BlackDialog
         day = day or self._black_day()
-        BlackDialog(day, self, items=blackcover.load(day) or None, on_scan=self._black_got).exec()
+        BlackDialog(day, self, items=blackcover.load(day) or None, on_scan=self._black_got, st=self.st).exec()
 
     def play_splash(self):
         """开场:「Hi,欢迎使用本工作台」→ 淡出,露出「今天」页(用户 2026-10-18)。设置里能关。"""
@@ -870,7 +955,8 @@ class MainWindow(QMainWindow):
                     vs_all = self._scan[d]
                     for emp, _n in F.groups(vs_all):
                         vids = [x for x in vs_all if x.employee == emp]
-                        it = QTreeWidgetItem([emp, self._emp_text(vids)])
+                        it = QTreeWidgetItem([emp, ""])
+                        self._emp_set(it, vids)
                         it.setToolTip(0, f"{emp}({os.path.basename(d)})" +
                                       ("\n视频直接放在号文件夹里,没按人分" if emp == F.NO_EMP else ""))
                         it.setData(0, Qt.ItemDataRole.UserRole, F.emp_dir(d, emp))
@@ -920,17 +1006,35 @@ class MainWindow(QMainWindow):
     def _skip_why(p: str) -> str:
         name = os.path.basename(p).strip()
         if name in F.ORIG_DIRS:
-            return f"「{name}」里是处理前的原片(转竖屏 / 糊水印 / 剪广告以前的),处理好的那份已经在外面了,不再发。"
+            return f"「{name}」里是处理前的原片(转竖屏 / 糊水印 / 剪广告 / 剪结尾以前的),处理好的那份已经在外面了,不再发。"
         return ("文件夹名带「已发 / 不能用 / 不要 / 重复 / 作废 / 脏话」,软件当成不发的。\n"
                 "里面的其实要发:让员工把名字里这些字去掉,再点「刷新」。")
 
     def _emp_text(self, vids) -> str:
-        """员工那行第二列:几条、发了几条、几条没无字封面、几条不发(同名 / 发过 / 坏的)。"""
+        """员工那行第二列:几条、发了几条、发过同名几条、几条没无字封面、几条不发(同名 / 坏的)。
+        「发过同名」单写(用户 2026-11-07:发了的 50 条被挪到别的日期文件夹,算进「不发」,看着像只发了一半)。"""
         sent = sum(1 for x in vids if self.rec.status_of(x.path) == "已发")
         nocov = sum(1 for x in vids if not x.png)
-        skip = sum(1 for x in vids if x.skip and not self.rec.status_of(x.path))
-        return f"{len(vids)} 条" + (f",发了 {sent}" if sent else "") + (f",{nocov} 条没无字封面" if nocov else "") + \
-            (f",{skip} 条不发(同名 / 发过 / 坏的)" if skip else "")
+        left = [x for x in vids if x.skip and not self.rec.status_of(x.path)]
+        same = sum(1 for x in left if x.skip == "发过同名")
+        skip = len(left) - same
+        return f"{len(vids)} 条" + (f",发了 {sent}" if sent else "") + (f",发过同名 {same}" if same else "") + \
+            (f",{nocov} 条没无字封面" if nocov else "") + (f",{skip} 条不发(同名 / 坏的)" if skip else "")
+
+    def _emp_short(self, vids) -> str:
+        """员工那行的小标签(用户 2026-11-10:原来一长串「32 条,发了 32,1 条没无字封面」被截成「…」看不见):
+        「发了 21/24」+ 有事的短写(2 没封面 · 1 不发 · 2 发过同名);整句放鼠标悬停(_emp_text)。"""
+        sent = sum(1 for x in vids if self.rec.status_of(x.path) == "已发")
+        nocov = sum(1 for x in vids if not x.png)
+        left = [x for x in vids if x.skip and not self.rec.status_of(x.path)]
+        same = sum(1 for x in left if x.skip == "发过同名")
+        skip = len(left) - same
+        extra = [t for t in (f"{nocov} 没封面" if nocov else "", f"{skip} 不发" if skip else "", f"{same} 发过同名" if same else "") if t]
+        return (f"发了 {sent}/{len(vids)}" if sent else f"{len(vids)} 条") + "".join(" · " + t for t in extra)
+
+    def _emp_set(self, it, vids):
+        it.setText(1, self._emp_short(vids))
+        it.setToolTip(1, self._emp_text(vids))
 
     def _mark_skips(self, vs):
         """不摆的写上原因(Video.skip):① 同一个号里同名的只留一条(已经发了 / 摆了的那条优先);
@@ -981,7 +1085,7 @@ class MainWindow(QMainWindow):
                     it = top.child(k)
                     d, emp = it.data(0, Qt.ItemDataRole.UserRole + 2), it.data(0, Qt.ItemDataRole.UserRole + 3)
                     if d in scan:
-                        it.setText(1, self._emp_text([x for x in scan[d] if x.employee == emp]))
+                        self._emp_set(it, [x for x in scan[d] if x.employee == emp])
         finally:
             self.tree.blockSignals(False)
 
@@ -1028,8 +1132,9 @@ class MainWindow(QMainWindow):
 
     def _load_videos(self):
         date = self.c_date.currentData() or ""
-        for wk in (getattr(self, "wm_worker", None), getattr(self, "blur_worker", None), getattr(self, "dim_worker", None)):
-            if wk and wk.isRunning():                   # 列表要换了:查水印 / 糊水印 / 读尺寸停下(行号会对不上)
+        for wk in (getattr(self, "wm_worker", None), getattr(self, "blur_worker", None),
+                   getattr(self, "dim_worker", None), getattr(self, "outro_worker", None)):
+            if wk and wk.isRunning():                   # 列表要换了:查水印 / 糊水印 / 读尺寸 / 剪结尾停下(行号会对不上)
                 wk.stop = True
                 wk.wait(60000)
         self.videos = []
@@ -1042,6 +1147,9 @@ class MainWindow(QMainWindow):
         from qe import wmstore
         for v in self.videos:                          # 查过水印的(记在硬盘上)
             v.wm = wmstore.get(v.path)
+            v.crop = wmstore.CROP.get(v.path)
+            v.outro = wmstore.OUTRO.get(v.path)
+            v.sharp = sharp.STORE.get(v.path)          # 查过清晰度的直接挂上,刷新不再排队重查(用户 2026-11-09)
         self.table.setRowCount(len(self.videos))
         for i, v in enumerate(self.videos):
             self._fill_row(i)
@@ -1075,25 +1183,179 @@ class MainWindow(QMainWindow):
 
     def _sharp_start(self):
         """后台查还没查过的清晰度,只提醒不拦。换了员工勾选就停,下一轮接着查。"""
-        if not self.SHARP_CHECK or not self.st.get("sharp_check", True) or (self.cover_worker and self.cover_worker.stop):
+        if not self.SHARP_CHECK or (self.cover_worker and self.cover_worker.stop):
             return
         if self.sharp_worker and self.sharp_worker.isRunning():
             return
-        rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path) and getattr(v, "sharp", None) is None]
+        want = bool(self.st.get("sharp_check", True))
+        from qe import aiconf
+        ai = aiconf.vision(self.st)                   # 自己的模型认得图才用它
+        key = ai if self.st.get("crop_check", True) and ai.key else ""
+        outro_key = ai if self.st.get("outro_check", True) and ai.key else ""
+        rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path) and
+                (v.path in self._recheck_paths or (want and getattr(v, "sharp", None) is None)
+                 or (key and self._crop_todo(v)) or (outro_key and self._outro_todo(v)))]
         if not rows:
             return
         from gui.sharp_worker import SharpWorker
-        w = SharpWorker(self.videos, rows, self)
-        w.one.connect(lambda i, w=w: self._fill_row(i) if w.videos is self.videos else None)
+        w = SharpWorker(self.videos, rows, self, want_sharp=want, crop_key=key, need_crop=self._crop_todo, asker=self.CROP_ASKER,
+                        force=self._recheck_paths, can_crop=self._crop_can,
+                        outro_key=outro_key, need_outro=self._outro_todo, outro_asker=self.OUTRO_ASKER)
+        w.one.connect(lambda i, w=w: self._sharp_row(w, i))
         w.finished.connect(lambda w=w: self._sharp_done(w))
         self.sharp_worker = w
         w.start()
+        self._check_refresh()
+
+    def _sharp_row(self, w, i: int):
+        if w.videos is self.videos:
+            self._fill_row(i)
+            self._crop_button()
+            self._outro_button()
+            self._check_timer.start()
 
     def _sharp_done(self, w):
         if w.stop:
             self._sharp_start()
-        elif w.n_bad:
+            self._check_refresh()
+            return
+        if self.sharp_worker is w:                       # 人刚点了重新检查、又起了新的一轮:别把它要查的划掉
+            self._recheck_paths.clear()
+        self._check_refresh()
+        if w.n_bad:
             self.say(f"查了清晰度:{w.n_bad} 条疑似模糊,不拦发布,看一下状态那一格")
+        if w.n_crop:
+            self.say(f"查到 {w.n_crop} 条字幕被裁:这些先不摆,点上面的「打回」")
+        if w.n_outro:
+            self.say(f"查到 {w.n_outro} 条结尾求关注:这些先不摆,点上面的「剪掉结尾」")
+        if w.errors:
+            self.say(f"⚠ 查字幕被裁:{len(w.errors)} 条没查成({w.errors[0]}),下次再查")
+        if w.outro_errors:
+            self.say(f"⚠ 查结尾求关注:{len(w.outro_errors)} 条没查成({w.outro_errors[0]}),下次再查")
+
+    # ---------------- 字幕被裁:打回同事重找(用户 2026-11-07,影视号;教育是真人口播,先不查)----------------
+    CROP_ASKER = None                                # 测试里换掉(绝不真问 AI)
+    OUTRO_ASKER = None                               # 测试里换掉(绝不真问 AI)
+    OUTRO_DIALOG = None                              # 测试里可替换对话框
+
+    def _crop_can(self, v) -> bool:
+        return v.account in F.film_accounts(self.st)
+
+    def _crop_todo(self, v) -> bool:
+        return self._crop_can(v) and getattr(v, "crop", None) is None
+
+    @staticmethod
+    def _outro_todo(v) -> bool:
+        return getattr(v, "outro", None) is None
+
+    # ---------------- 「检查」那一格、进度、重新检查(用户 2026-11-07)----------------
+    def _check_cfg(self, fresh: bool = False) -> tuple[bool, bool, bool, bool]:
+        """(清晰度开着, 字幕被裁开着, 结尾求关注开着, 有 Key)。ai_key 可能要读文件,不每行都读。"""
+        if fresh or self._ck_cfg is None:
+            from qe import aiconf
+            self._ck_cfg = (bool(self.st.get("sharp_check", True)), bool(self.st.get("crop_check", True)),
+                            bool(self.st.get("outro_check", True)), bool(aiconf.vision(self.st).key))
+        return self._ck_cfg
+
+    def _check_pair(self, v) -> tuple:
+        sharp_on, crop_on, outro_on, has_key = self._check_cfg()
+        return checkline.pair(v, self.sharp_worker, getattr(v, "crop", None), bool(self.rec.status_of(v.path)),
+                              self._crop_can(v), sharp_on, crop_on, has_key,
+                              outro=getattr(v, "outro", None), outro_on=outro_on)
+
+    def _check_refresh(self):
+        """一下子变了很多条(开始查 / 查完):只刷「检查」那一格和进度。"""
+        self._check_cfg(fresh=True)
+        for r, v in enumerate(self.videos):
+            it = self.table.item(r, 5)
+            if it is not None:
+                p = self._check_pair(v)
+                it.setText(checkline.cell(p))
+                it.setToolTip(checkline.tip(p))
+        self._check_line()
+
+    def _check_line(self):
+        self.lab_check.setText(checkline.progress([self._check_pair(v) for v in self.videos if not self.rec.status_of(v.path)]))
+        n = len(self._recheck_rows())
+        self.b_recheck.setText(f"重新检查 {n} 条")
+        self.b_recheck.setVisible(bool(n))
+
+    def _recheck_rows(self) -> list[int]:
+        sel = {ix.row() for ix in self.table.selectedIndexes()}
+        return [r for r, v in enumerate(self.videos) if (r in sel or not sel) and not self.rec.status_of(v.path)]
+
+    def recheck(self):
+        """人点的:不管查没查过,再查一遍(跟着选中走,没选管全部)。你点过「没问题」的还算数。"""
+        rows = self._recheck_rows()
+        if not rows or self.batch_id or (self.worker and self.worker.isRunning()):
+            return
+        want, crop_on, outro_on, has_key = self._check_cfg(fresh=True)
+        crop = crop_on and has_key and any(self._crop_can(self.videos[r]) for r in rows)
+        outro = outro_on and has_key
+        if not want and not crop and not outro:
+            QMessageBox.information(self, "重新检查", "这些视频要查的项目都没开(或者没填阿里百炼 Key),去「设置」里打开。")
+            return
+        if len(rows) > 30 and (crop or outro) and not self._ask("重新检查", f"重新查这 {len(rows)} 条?\n\n字幕被裁 / 结尾求关注要问 AI,条数多会花点时间和额度。"
+                                                                "后台查,不耽误你干别的。", "重新检查", "先不"):
+            return
+        for r in rows:
+            v = self.videos[r]
+            v.sharp_err = v.crop_err = v.outro_err = False
+            self._recheck_paths.add(v.path)
+        self.say(f"重新检查 {len(rows)} 条,进度看列表上面那一行")
+        if self.sharp_worker and self.sharp_worker.isRunning():
+            self.sharp_worker.stop = True                 # 手上这一轮停下来,接着从人点的这些查(_sharp_done 会接上)
+        else:
+            self._sharp_start()
+        self._check_refresh()
+
+    def _crop_rows(self, rows=None) -> list[int]:
+        from qe import wmstore
+        pool = range(len(self.videos)) if rows is None else rows
+        return [r for r in pool if r < len(self.videos) and not self.rec.status_of(self.videos[r].path)
+                and wmstore.blocks(getattr(self.videos[r], "crop", None))]
+
+    def _crop_button(self):
+        total = self._crop_rows()
+        sel = self._crop_rows({ix.row() for ix in self.table.selectedIndexes()})
+        self.b_crop.setVisible(bool(total))
+        self.b_crop.setText(f"打回字幕被裁的 {len(sel) or len(total)} 条")
+
+    def crop_back(self):
+        """选中的 / 没选就全部:视频连封面挪进 打回视频\\账号名,名单放进剪贴板(用户自己去跟同事说)。"""
+        if self.batch_id or (self.worker and self.worker.isRunning()):
+            return
+        rows = sorted(self._crop_rows({ix.row() for ix in self.table.selectedIndexes()}) or self._crop_rows())
+        if not rows:
+            return
+        vs = [self.videos[r] for r in rows]
+        names = "\n".join(f" · {v.title[:30]}" for v in vs[:6]) + ("\n …" if len(vs) > 6 else "")
+        if not self._confirm("打回", f"打回这 {len(vs)} 条(连同名封面)?\n\n{names}\n\n挪进素材盘的「打回视频\\账号名」文件夹,不会发、不删。"
+                             "AI 可能看错,不确定的先点开看一眼。", "打回"):
+            return
+        done = []
+        for v in vs:
+            try:
+                cropcheck.send_back(v.path, cropcheck.back_dir(self.st["material_root"], v.account))
+                done.append((v.account, v.title))
+            except OSError as e:
+                self.say(f"「{v.title[:24]}」挪不动:{e.strerror or e}")
+        if done:
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.clipboard().setText(cropcheck.names_text(done))
+        self.say(f"打回了 {len(done)} 条,在「{cropcheck.FOLDER}」文件夹里,名单也复制好了")
+        self._load_tree()
+
+    def set_crop_ok(self, ok: bool):
+        from qe import wmstore
+        for r in sorted({ix.row() for ix in self.table.selectedIndexes()}):
+            v = self.videos[r]
+            if (getattr(v, "crop", None) or {}).get("hits"):
+                wmstore.CROP.set_ok(v.path, ok)
+                v.crop = wmstore.CROP.get(v.path)
+                self._fill_row(r)
+        self._crop_button()
+        self._update_scope()
 
     def set_sharp_ok(self):
         for r in sorted({ix.row() for ix in self.table.selectedIndexes()}):
@@ -1103,6 +1365,90 @@ class MainWindow(QMainWindow):
                 v.sharp = sharp.STORE.get(v.path)
                 self._fill_row(r)
 
+    def _outro_rows(self, rows=None) -> list[int]:
+        from qe import wmstore
+        pool = range(len(self.videos)) if rows is None else rows
+        return [r for r in pool if r < len(self.videos) and not self.rec.status_of(self.videos[r].path)
+                and wmstore.blocks(getattr(self.videos[r], "outro", None))]
+
+    def _outro_button(self):
+        total = self._outro_rows()
+        sel = self._outro_rows({ix.row() for ix in self.table.selectedIndexes()})
+        self.b_outro.setVisible(bool(total))
+        if not (self.outro_worker and self.outro_worker.isRunning()):
+            self.b_outro.setText(f"剪掉结尾 {len(sel) or len(total)} 条")
+
+    def set_outro_ok(self, ok: bool, rows=None):
+        from qe import wmstore
+        rows = sorted(rows if rows is not None else {ix.row() for ix in self.table.selectedIndexes()})
+        changed = []
+        for r in rows:
+            if 0 <= r < len(self.videos):
+                v = self.videos[r]
+                if (getattr(v, "outro", None) or {}).get("hits"):
+                    wmstore.OUTRO.set_ok(v.path, ok)
+                    v.outro = wmstore.OUTRO.get(v.path)
+                    self._fill_row(r)
+                    changed.append(r)
+        if changed:
+            self.say(f"{len(changed)} 条标成" + ("「结尾没问题,能摆」" if ok else "「结尾要求关注,先不摆」"))
+        self._outro_button()
+        self._update_scope()
+
+    def cut_outro(self):
+        from qe import vertical
+        busy = [w for w in (self.wm_worker, self.blur_worker, self.vert_worker, self.outro_worker, self.worker) if w and w.isRunning()]
+        if busy:
+            QMessageBox.information(self, "剪掉结尾", "还在查水印 / 摆 / 糊 / 转 / 剪结尾,等它做完。")
+            return
+        rows = sorted(self._outro_rows({ix.row() for ix in self.table.selectedIndexes()}) or self._outro_rows())
+        if not rows:
+            return
+        ff = vertical.ffmpeg_path()
+        items = []
+        for r in rows:
+            v = self.videos[r]
+            oh = outrocheck.hit_info(getattr(v, "outro", None)) or {}
+            dur = float(oh.get("dur") or 0)
+            if not dur and ff:
+                dur = float(vertical.probe(v.path, ff).get("dur") or 0)
+            start = float(oh.get("start") or max(0.5, dur - 2.5))
+            items.append({"row": r, "title": v.title, "account": v.account, "path": v.path, "start": start, "dur": dur,
+                          "kind": oh.get("kind") or "求关注", "reason": oh.get("reason") or "",
+                          "shot": (getattr(v, "outro", None) or {}).get("shot") or ""})
+        if self.OUTRO_DIALOG is not None:
+            plan_cut = self.OUTRO_DIALOG(items, self)
+        else:
+            from gui.outro_dialog import OutroDialog
+            dlg = OutroDialog(items, self, on_ok=lambda r: self.set_outro_ok(True, rows=[r]))
+            plan_cut = dlg.chosen() if dlg.exec() == dlg.DialogCode.Accepted else []
+        if not plan_cut:
+            return
+        if self.sharp_worker and self.sharp_worker.isRunning():
+            self.sharp_worker.stop = True
+        self.outro_worker = OutroWorker(self.videos, plan_cut, self)
+        self._outro_left = len(plan_cut)
+        self.outro_worker.one.connect(self._outro_one)
+        self.outro_worker.finished.connect(self._outro_done)
+        self.b_outro.setEnabled(False)
+        self.say(f"剪掉求关注结尾:{len(plan_cut)} 条(2 条一起做)")
+        self.outro_worker.start()
+
+    def _outro_one(self, i: int, _new: str, gone: float, err: str):
+        self._outro_left -= 1
+        self.b_outro.setText(f"剪结尾中(还剩 {self._outro_left})")
+        v = self.videos[i]
+        self.say(f"「{v.title}」剪结尾失败:{err}" if err else f"「{v.title}」剪掉了 {gone} 秒求关注结尾")
+        self._fill_row(i)
+
+    def _outro_done(self):
+        self.b_outro.setEnabled(True)
+        self._outro_button()
+        self._update_scope()
+        self._check_refresh()
+        self.say(f"剪结尾做完了(原片在各自文件夹的「{outrocheck.ORIG_DIR}」里)")
+        self._sharp_start()
+
     AI_ASKER = None                                  # 测试里换掉(绝不真问 AI)
     AI_COVER = True                                  # 测试里关掉(这台电脑上有真的百炼 Key)
 
@@ -1110,8 +1456,9 @@ class MainWindow(QMainWindow):
         """软件裁完第一轮,AI 看第二轮(设置里「AI 看封面」开着、有百炼 Key 才看)。"""
         if not self.AI_COVER or not self.st.get("ai_cover", True) or (self.cover_worker and self.cover_worker.stop):
             return
-        key = self.st.ai_key()
-        if not key and self.AI_ASKER is None:
+        from qe import aiconf
+        key = aiconf.vision(self.st)                  # 自己的模型认得图才用它
+        if not key.key and self.AI_ASKER is None:
             return
         if self.ai_worker and self.ai_worker.isRunning():
             return
@@ -1125,6 +1472,11 @@ class MainWindow(QMainWindow):
 
     def _ai_covers_done(self, w):
         if w.stop:
+            return
+        if w.dead:                                     # 欠费 / Key 不对:说清楚,别写成「看完了」
+            self.say(f"⚠ AI 看封面停下了:{w.errors[0]}。这次封面就用软件第一轮的框,没让 AI 看")
+            self._update_scope()
+            self._refresh_buttons()
             return
         err = f";{len(w.errors)} 条没看成({w.errors[0]})" if w.errors else ""
         mv = f";{w.n_moved} 条 AI 自己挪了框" if w.n_moved else ""
@@ -1159,8 +1511,12 @@ class MainWindow(QMainWindow):
         dims = getattr(v, "dims", None)
         stxt = f"{shp} {dims[0]}×{dims[1]},要转竖屏" if shp and dims else ""
         fuzzy = "" if stt or note or skip or wmb or stxt else sharp.text(getattr(v, "sharp", None))
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or stxt or fuzzy or "还没发")]):
+        pair = self._check_pair(v)
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or stxt or fuzzy or "还没发"),
+                               checkline.cell(pair)]):
             it = QTableWidgetItem(t)
+            if c == 5:
+                it.setToolTip(checkline.tip(pair))
             if c == 0:
                 from gui.widgets import THUMB
                 it.setData(THUMB, v.cover or v.png or v.vcover or v.jpg)      # 封面小图(草图 ②)
@@ -1177,6 +1533,16 @@ class MainWindow(QMainWindow):
                 from PySide6.QtCore import QUrl
                 it.setToolTip(f"<b>{checks.wm_text(v.wm)}</b>" + (f"<br><img src='{QUrl.fromLocalFile(shot).toString()}' width='300'>"
                               if shot and os.path.isfile(shot) else "") + "<br>不是水印:右键「没水印,能摆」")
+            elif c == 4 and tad == outrocheck.TEXT and wmstore.blocks(getattr(v, "outro", None)):
+                oh = outrocheck.hit_info(v.outro) or {}
+                shot = (v.outro or {}).get("shot") or ""
+                from PySide6.QtCore import QUrl
+                it.setToolTip(f"<b>{outrocheck.TEXT}({oh.get('kind') or '求关注'})</b> "
+                              f"从 {outrocheck.fmt_time(oh.get('start', 0))} 剪到最后(约 {oh.get('cut', 0):.1f} 秒)" +
+                              (f"<br>{oh.get('reason')}" if oh.get("reason") else "") +
+                              (f"<br><img src='{QUrl.fromLocalFile(shot).toString()}' width='300'>"
+                               if shot and os.path.isfile(shot) else "") +
+                              "<br>点上面「剪掉结尾」剪完就能摆;误报右键「结尾没问题,能摆」")
             if stt == "已发":
                 it.setBackground(GREEN)
             elif stt == "摆好":
@@ -1193,6 +1559,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, c, it)
         if hasattr(self, "_scope_timer"):
             self._scope_timer.start()
+        if hasattr(self, "_check_timer"):
+            self._check_timer.start()
 
     def _update_sum(self):
         n = len(self.videos)
@@ -1213,13 +1581,15 @@ class MainWindow(QMainWindow):
         out = [("没无字封面", [v for v in left if (v.cover_kind or v.cover_why) and not v.cover and not v.skip]),
                ("同名 / 发过 / 坏文件", [v for v in left if v.skip]),
                ("有水印", [v for v in left if not v.skip and wmstore.blocks(v.wm)]),
-               ("标题有广告词 / 日期不对", [v for v in left if not v.skip and self._title_block(v)])]
+               ("标题有广告词 / 日期不对 / 被裁 / 结尾求关注", [v for v in left if not v.skip and self._title_block(v)])]
         return [(k, vs) for k, vs in out if vs]
 
     def _update_scope(self):
         """审查 18:主按钮上面写清楚「这次摆 N 条 / 跳过 N 条(为什么)」。"""
         if not hasattr(self, "lab_scope"):
             return
+        self._crop_button()
+        self._outro_button()
         if not self.c_date.currentData():
             text, tip = PICK_DAY, ""
         elif not self.videos:
@@ -1300,6 +1670,11 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("预览 / 调封面…", lambda: self.preview_cover(row))
         m.addAction("标成已发(我手动发了)", self.mark_manual)
+        n_sent = len(self._sent_sel())
+        if n_sent:
+            m.addAction(f"不算已发(按错了,其实没发)— {n_sent} 条", self.unmark_sent).setEnabled(not (self.worker and self.worker.isRunning()))
+        n_sel = len({ix.row() for ix in self.table.selectedIndexes()})
+        m.addAction(f"去企鹅号查选中的 {n_sel} 条(有没有发上去)", self.check_on_qq)
         from qe import titleclean
         v0 = self.videos[row] if row < len(self.videos) else None
         if v0 is not None and titleclean.ad_words(v0.title) and not self.rec.status_of(v0.path):
@@ -1329,6 +1704,23 @@ class MainWindow(QMainWindow):
                 m.addAction("没水印 / 不用管,能摆", lambda: self.set_wm_ok(True))
         if any(sharp.flagged(getattr(self.videos[r], "sharp", None)) for r in {ix.row() for ix in self.table.selectedIndexes()}):
             m.addAction("清晰度没问题", self.set_sharp_ok)
+        crops = [getattr(self.videos[r], "crop", None) or {} for r in {ix.row() for ix in self.table.selectedIndexes()}]
+        if any(c.get("hits") and not c.get("ok") for c in crops):
+            m.addAction("没被裁,能摆", lambda: self.set_crop_ok(True))
+        elif any(c.get("hits") for c in crops):
+            m.addAction("其实字幕被裁了(先不摆)", lambda: self.set_crop_ok(False))
+        outros = [getattr(self.videos[r], "outro", None) or {} for r in {ix.row() for ix in self.table.selectedIndexes()}]
+        if any(o.get("hits") for o in outros):
+            m.addSeparator()
+            o0 = next((o for o in outros if o.get("shot")), {})
+            if o0.get("shot"):
+                m.addAction("看结尾截图", lambda p=o0["shot"]: os.startfile(p) if os.path.isfile(p) else None)
+            if all(o.get("blurred") for o in outros if o.get("hits")):
+                m.addAction("求关注结尾已经剪掉了(原片在「结尾原片」里)").setEnabled(False)
+            elif any(o.get("hits") and not o.get("ok") for o in outros):
+                m.addAction("结尾没问题,能摆", lambda: self.set_outro_ok(True))
+            elif any(o.get("hits") for o in outros):
+                m.addAction("其实结尾要求关注(先不摆)", lambda: self.set_outro_ok(False))
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     # ---------- 查水印 ----------
@@ -1451,9 +1843,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _title_block(v) -> str:
-        """标题的问题让这条先不摆:有广告词(人没说剪好了)/ 写的日期不是今天昨天(用户 2026-11-03,人没放行)。"""
-        from qe import titleclean, titledate
-        return titleclean.ad_problem(v.account, v.title) or titledate.problem(v.account, v.title)
+        """这条先不摆:标题有广告词(人没说剪好了)/ 写的日期不是今天昨天(用户 2026-11-03,人没放行)/ 字幕被裁(11-07,打回重找)/ 结尾求关注(11-16,剪掉能摆)。"""
+        from qe import titleclean, titledate, wmstore
+        return titleclean.ad_problem(v.account, v.title) or titledate.problem(v.account, v.title) or \
+            (cropcheck.TEXT if wmstore.blocks(getattr(v, "crop", None)) else "") or \
+            (outrocheck.TEXT if wmstore.blocks(getattr(v, "outro", None)) else "")
 
     def set_title_date_ok(self, ok: bool):
         """标题日期认错了 / 就要发 → 能摆(选中的一起标)。"""
@@ -1484,9 +1878,10 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(self, "处理重名", "没有重名的视频" + ("(选中的里面)" if sel else "") + "。")
             return
-        key = self.st.ai_key()
-        if not key and self.DUP_ASKER is None:
-            QMessageBox.warning(self, "处理重名", "要 AI 改标题,先在「设置」里填阿里百炼 Key。")
+        from qe import aiconf
+        key = aiconf.text(self.st)                    # 填了「自己的模型」就问它
+        if not key.key and self.DUP_ASKER is None:
+            QMessageBox.warning(self, "处理重名", "要 AI 改标题,先在「设置」里填阿里百炼 Key(或者「自己的模型」)。")
             return
         used = {(r["account"], F.norm_name(r["title"]) or r["title"]) for r in self.rec.rows() if r["status"] == "已发"}
         used |= {F.dup_key(v) for v in self.videos}
@@ -1529,6 +1924,9 @@ class MainWindow(QMainWindow):
             except OSError as e:
                 self.say(f"「{v.title[:24]}」改名失败:{e.strerror or e}")
                 continue
+            from qe import wmstore
+            for st_wm in (wmstore.WM, wmstore.CROP, wmstore.OUTRO, sharp.STORE):
+                st_wm.move(v.path, moves[0][1])
             stem = os.path.splitext(os.path.basename(moves[0][1]))[0]
             for c in (v.png, v.jpg, v.vpng):                # 封面按名字配在别的文件夹里的:也改成新名字
                 if c and os.path.isfile(c) and os.path.splitext(os.path.basename(c))[0].strip() == old_stem.strip():
@@ -1680,6 +2078,65 @@ class MainWindow(QMainWindow):
         self._update_sum()
         self._update_tree_counts()
 
+    def _sent_sel(self) -> list:
+        """选中的里面记成「已发」的视频。"""
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
+        return [self.videos[r] for r in rows if r < len(self.videos) and self.rec.status_of(self.videos[r].path) == "已发"]
+
+    def unmark_sent(self):
+        """右键「不算已发」(用户 2026-11-09:「我按错了 没发没发…居然还不能弄回来」):选中的已发改回还没发。
+        只改软件里的记录,不挪文件、不碰平台;因为发够条数「留到明天」的,现在不够了就放回来能摆。"""
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "不算已发", "正在摆,摆完再改。")
+            return
+        vids = self._sent_sel()
+        if not vids:
+            QMessageBox.information(self, "不算已发", "先在列表里选中按错了的那几条(绿的「已发」)。")
+            return
+        if not self._ask("不算已发", f"这 {len(vids)} 条其实没发?\n\n" + "\n".join(f"· {v.title[:30]}" for v in vids[:8]) +
+                         ("\n…" if len(vids) > 8 else "") + "\n\n改回「还没发」:之后还会摆它们,每天的已发数也跟着减。"
+                         "只改软件里的记录,不动文件、不碰企鹅号。", "改回还没发", "先不", default_no=True):
+            return
+        n = sum(1 for v in vids if self.rec.undo_sent(v.path))
+        back = self._after_status_change({v.account for v in vids})
+        self.say(f"改回还没发:{n} 条(按错了标成已发的)" + (f";留到明天的 {back} 条放回来了" if back else ""))
+
+    def _after_status_change(self, accs: set) -> int:
+        """改过已发 / 没发以后:因为发够条数「留到明天」的,现在不够了就放回来能摆;整页刷新。返回放回来几条。"""
+        back = 0
+        for v in self.videos:
+            if v.account in accs and self.row_note.get(v.path) == "留到明天" and self._edu_left(v.account) != 0:
+                self.row_note.pop(v.path, None)
+                if (v.skip or "").startswith("这天发够规定条数了"):
+                    v.skip = ""
+                back += 1
+        for i in range(len(self.videos)):
+            self._fill_row(i)
+        self._update_sum()
+        self._update_tree_counts()
+        return back
+
+    def check_on_qq(self, rows: list[int] | None = None):
+        """右键「去企鹅号查选中的」(用户 2026-11-09):只读企鹅号后台,按标题对;对不上的在小窗里人自己勾了再改。"""
+        from qe import titleclean
+        from gui.vcheck_dialog import VCheckDialog
+        rows = rows if rows is not None else sorted({ix.row() for ix in self.table.selectedIndexes()})
+        vids = [self.videos[r] for r in rows if r < len(self.videos)]
+        if not vids:
+            QMessageBox.information(self, "去企鹅号查", "先在列表里选中要查的视频。")
+            return
+        items, today = [], bj_now().strftime("%Y-%m-%d")
+        for k, v in enumerate(vids):
+            row = self.rec.sent_row(v.path)
+            alt = titleclean.clean(v.title)
+            items.append({"i": k, "title": v.title, "alts": [alt] if alt else [], "account": v.account,
+                          "sent_day": (str(row.get("published_at") or "")[:10] or today) if row else ""})
+        d = VCheckDialog(self.rec, vids, items, today, self)
+        d.exec()
+        if d.changed:
+            back = self._after_status_change({v.account for v in vids})
+            self.say("去企鹅号查完改了记录" + (f";留到明天的 {back} 条放回来了" if back else ""))
+
     def preview_cover(self, row: int | None = None):
         """封面预览:看软件选的、拖框改。"""
         if self.cover_worker and self.cover_worker.isRunning():
@@ -1724,6 +2181,7 @@ class MainWindow(QMainWindow):
         # 审查 16:摆的时候 / 摆好等确认时底栏只留要点的,「查水印 / 模糊水印 / 封面都看过了」先藏起来
         for b in (self.b_wm, self.b_blur, self.b_allok, self.b_review):
             b.setVisible(not running and not waiting)
+        self.b_recheck.setEnabled(not running and not self.batch_id)
         self.b_go.setEnabled(not running and not self.batch_id)
         self.b_stop.setEnabled(running)
         self.b_sent.setEnabled(not running and bool(self.batch_id))
@@ -1923,8 +2381,8 @@ class MainWindow(QMainWindow):
         from qe import titleclean
         tad = [v for v in self.videos if not self.rec.status_of(v.path) and not v.skip and self._title_block(v)]
         if tad:
-            tail += (f"\n\n有 {len(tad)} 条标题有广告词 / 日期不对没摆,比如「{tad[0].title[:24]}」;"
-                     "剪好了 / 日期没问题就右键「…能摆」。")
+            tail += (f"\n\n有 {len(tad)} 条先不摆({self._title_block(tad[0])}),比如「{tad[0].title[:24]}」;"
+                     "处理好或右键「…能摆」后再摆。")
         if nocover:
             return (f"能摆的都摆完了,但还有 {len(nocover)} 条没有无字封面(png),没摆,比如「{nocover[0].title[:24]}」。\n\n"
                     "让员工补上 png 以后点「刷新」再摆。" + tail)
@@ -1946,6 +2404,7 @@ class MainWindow(QMainWindow):
                 return
         busy = ("还在查水印,查完再摆(或者点「停查水印」)。" if self.wm_worker and self.wm_worker.isRunning() else
                 "还在糊水印,糊完再摆。" if getattr(self, "blur_worker", None) and self.blur_worker.isRunning() else
+                "还在剪结尾,剪完再摆。" if getattr(self, "outro_worker", None) and self.outro_worker.isRunning() else
                 "封面还在认人,等几秒再点。" if self.cover_worker and self.cover_worker.isRunning() else
                 "AI 还在看封面(第二轮),等一会儿再点。" if self.ai_worker and self.ai_worker.isRunning() else "")
         if busy:
@@ -2002,6 +2461,9 @@ class MainWindow(QMainWindow):
             msg += f"\n\n另有 {len(skip)} 条不发(同号同名 / 坏文件 / 发过同名的),比如「{skip[0].title[:24]}」:{skip[0].skip}。"
         if warn:
             msg += f"\n\n其中 {len(warn)} 条封面标黄,建议先点「预览封面」看一眼。"
+        todo_chk = checkline.unchecked_text([self._check_pair(v) for v in vids]) if self.SHARP_CHECK else ""
+        if todo_chk:
+            msg += "\n\n" + todo_chk
         auto = self.k_auto.isChecked()
         msg += ("\n\n摆好后软件自己点「全部发布」,接着摆下一批(有标黄 / 没摆好的会停下来叫你)。" if auto else
                 "\n\n软件只摆好,不点发布。") + "摆的时候别在罐头里切到别的号。开始吗?"
@@ -2837,6 +3299,12 @@ class MainWindow(QMainWindow):
         k_sharp = QCheckBox("发布前查清晰度:疑似低清放大、很糊的标出来(只提醒,不拦发布)")
         k_sharp.setChecked(bool(self.st.get("sharp_check", True)))
         f.addRow("", k_sharp)
+        k_crop = QCheckBox("发布前查字幕被裁:满屏的视频 AI 看 7 帧,被裁的先不发,打回让同事重新处理")
+        k_crop.setChecked(bool(self.st.get("crop_check", True)))
+        f.addRow("", k_crop)
+        k_outro = QCheckBox("发布前查结尾求关注:看最后几秒有没有别人头像 / 求关注 / 抖音号 / 二维码,查到了可以剪掉再发")
+        k_outro.setChecked(bool(self.st.get("outro_check", True)))
+        f.addRow("", k_outro)
         f.addRow("", k_trust)
         outer.addWidget(g1)
 
@@ -2870,6 +3338,13 @@ class MainWindow(QMainWindow):
         c_cov.setCurrentIndex(max(0, c_cov.findData(self.st.get("api_cover", "原样"))))
         f2.addRow("封面(视频旁边的同名图)", c_cov)
         f2.addRow("", note("传封面要开着创作罐头(用它登录着的企鹅号传图);没有同名图的、传不上的,平台自己截一帧"))
+        k_bad_cov = QCheckBox("查到黑 / 模糊封面后,自动去原视频截一张清晰封面放到下面文件夹(关掉就自己找)")
+        k_bad_cov.setChecked(bool(self.st.get("bad_cover_auto", True)))
+        w_bad_dir, e_bad_dir = path_row(self.st.get("bad_cover_dir") or DEFAULTS["bad_cover_dir"])
+        w_bad_dir.setEnabled(k_bad_cov.isChecked())
+        k_bad_cov.toggled.connect(w_bad_dir.setEnabled)
+        f2.addRow("坏封面补救", k_bad_cov)
+        f2.addRow("封面保存到", w_bad_dir)
         f2.addRow("几个号一起发", sp_thr)
         f2.addRow("同一个号一次传几条", sp_per)
         from PySide6.QtWidgets import QCheckBox as _QCB
@@ -2931,6 +3406,62 @@ class MainWindow(QMainWindow):
         e_key.setPlaceholderText("空着就用百家号发布助手里填的" + ("(找到了)" if self.st.ai_key() else "(没找到)"))
         f3.addRow("阿里百炼 Key", e_key)
         f3.addRow("", note("教育:大头照的 2.35:1 封面 AI 扩图;接口:「整理话题」里挂好几个话题的让 AI 挑一个"))
+        # 自己的模型(用户 2026-11-09:百炼欠费,试试自己部署的;地址 / 模型 / Key 自己填)
+        from qe import aiconf
+        e_ourl = QLineEdit(self.st.get("own_ai_url", ""))
+        e_ourl.setPlaceholderText("比如 http://127.0.0.1:8788/v1(空着就全用阿里百炼)")
+        e_omodel = QLineEdit(self.st.get("own_ai_model", ""))
+        e_omodel.setPlaceholderText("比如 deepseek-v4.1-flash")
+        e_okey = QLineEdit(self.st.get("own_ai_key", ""))
+        e_okey.setEchoMode(QLineEdit.EchoMode.Password)
+        f3.addRow("自己的模型 地址", e_ourl)
+        f3.addRow("模型", e_omodel)
+        f3.addRow("Key", e_okey)
+        vis = [str(self.st.get("own_ai_vision") or "")]     # 认得图的是哪个「地址|模型」(点「试一下」认对了才记)
+        b_try = QPushButton("试一下")
+        lab_try = QLabel("")
+        lab_try.setWordWrap(True)
+
+        def try_text():
+            o = aiconf.own(self.st) if self.st.get("own_ai_url") else None
+            if not o:
+                return "三项都填了才用它:处理重名、串游戏判断、挑话题改问它;认得图的话看封面、字幕被裁、结尾求关注也问它"
+            return ("上次试过:认得图,文字和看图的活都问它" if vis[0] == aiconf.sig(o.base, o.model)
+                    else "文字的活问它;看图的活还问阿里百炼(点「试一下」看它认不认图)")
+        lab_try.setText(try_text())
+
+        def do_try():
+            ai = aiconf.AI(e_ourl.text().strip(), e_okey.text().strip(), e_omodel.text().strip(), True)
+            if not (ai.base and ai.model and ai.key):
+                lab_try.setText("地址、模型、Key 三项都填了才能试")
+                return
+            import threading
+            from PySide6.QtCore import QTimer
+            got: dict = {}
+            b_try.setEnabled(False)
+            lab_try.setText("正在问它一句话、给它看一张图…(最多一分钟)")
+            def run():
+                try:
+                    got["r"] = aiconf.probe(ai)
+                except Exception as e:                   # 什么错都要回话,不能一直转圈
+                    got["r"] = {"text": (False, str(e)[:80]), "image": (False, "没试")}
+            threading.Thread(target=run, daemon=True).start()
+
+            def poll():
+                if "r" not in got:
+                    QTimer.singleShot(300, poll)
+                    return
+                r = got["r"]
+                b_try.setEnabled(True)
+                vis[0] = aiconf.sig(ai.base, ai.model) if r["image"][0] else ""
+                use = ("文字和看图的活都问它" if r["text"][0] and r["image"][0] else
+                       "文字的活问它,看图的活还问阿里百炼" if r["text"][0] else "现在用不了,先照上面的原因改好(三项填着,文字的活就会问它、会报错)")
+                lab_try.setText(f"文字:{'能用' if r['text'][0] else '不行'},{r['text'][1]}\n"
+                                f"看图:{r['image'][1]}\n→ {use}")
+            poll()
+        b_try.clicked.connect(do_try)
+        f3.addRow("", b_try)
+        f3.addRow("", lab_try)
         outer.addWidget(g3)
         labs = [fl.itemAt(r, QFormLayout.ItemRole.LabelRole).widget() for fl in (f, f2, f4, f3) for r in range(fl.rowCount())
                 if fl.itemAt(r, QFormLayout.ItemRole.LabelRole) and fl.itemAt(r, QFormLayout.ItemRole.LabelRole).widget()]
@@ -2957,12 +3488,16 @@ class MainWindow(QMainWindow):
                        archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
                        batch_size=sp.value(), ai_key=e_key.text().strip(),
                        ai_cover=k_aic.isChecked(), ai_cover_trust=k_trust.isChecked(), sharp_check=k_sharp.isChecked(),
+                       crop_check=k_crop.isChecked(), outro_check=k_outro.isChecked(),
+                       bad_cover_auto=k_bad_cov.isChecked(),
+                       bad_cover_dir=e_bad_dir.text().strip() or DEFAULTS["bad_cover_dir"],
                        api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(),
                        game_words={ln.split("=", 1)[0].strip(): [x.strip() for x in ln.split("=", 1)[1].replace(",", "、").replace("，", "、").split("、") if x.strip()]
                                    for ln in e_games.toPlainText().splitlines() if "=" in ln and ln.split("=", 1)[0].strip()}, api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
                        api_archive=api_get() or self.st.get("api_archive", ""),
                        api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or TH.DEFAULT,
-                       splash=k_splash.isChecked())
+                       splash=k_splash.isChecked(), own_ai_url=e_ourl.text().strip(), own_ai_model=e_omodel.text().strip(),
+                       own_ai_key=e_okey.text().strip(), own_ai_vision=vis[0])
         C.AI_KEY = self.st.ai_key()
         self.st.save()
         from PySide6.QtWidgets import QApplication
@@ -2984,7 +3519,7 @@ class MainWindow(QMainWindow):
             e.ignore()
             return
         for wk in (self.wm_worker, self.blur_worker, getattr(self, "dim_worker", None), self.vert_worker, self.sharp_worker,
-                   getattr(self.api_tab, "sharp_worker", None), self.black_worker):
+                   getattr(self, "outro_worker", None), getattr(self.api_tab, "sharp_worker", None), self.black_worker):
             if wk and wk.isRunning():
                 wk.stop = True
                 wk.wait(60000)
@@ -3006,20 +3541,22 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
             QApplication.processEvents()              # 让摆好的那几条记进记录
             dlg.close()
-        j = getattr(getattr(self, "api_tab", None), "job", None)
-        if j and j.isRunning():
+        rs = self.api_tab.running_jobs() if getattr(self, "api_tab", None) and hasattr(self.api_tab, "running_jobs") else (
+            [self.api_tab.job] if getattr(getattr(self, "api_tab", None), "job", None) and self.api_tab.job.isRunning() else [])
+        if rs:
             if QMessageBox.question(self, "企鹅号发布助手", "接口那边还在做(发布 / 转竖屏 / 改话题),要停下来关掉吗?") \
                     != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
-            j.stop()
+            for j in rs:
+                j.stop()
             from PySide6.QtWidgets import QApplication, QProgressDialog
             dlg = QProgressDialog("正在停:手上这条做完就关(上传大文件可能要一会儿)…", None, 0, 0, self)
             dlg.setWindowTitle("请稍等")
             dlg.setMinimumDuration(0)
             dlg.setValue(0)
             dlg.show()
-            while not j.wait(200):
+            while any(not j.wait(200) for j in rs):
                 QApplication.processEvents()
             dlg.close()
         super().closeEvent(e)

@@ -97,6 +97,8 @@ class Store:
 
 WM = Store("水印检查.json")
 ADS = Store("广告检查.json")
+CROP = Store("字幕被裁.json")
+OUTRO = Store("结尾检查.json")
 get, put, set_ok, move = WM.get, WM.put, WM.set_ok, WM.move
 
 

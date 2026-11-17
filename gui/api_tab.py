@@ -19,12 +19,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from qe import apiacc, apisrc, checks, plan, sharp, titleclean, topic, vertical, wmstore
+from qe import apiacc, apisrc, checkline, checks, cropcheck, outrocheck, plan, sharp, titleclean, topic, vertical, wmstore
 from qe.config import bj_now, bj_str, data_dir
 from qe.records import pkey
 from html import escape as html_escape
 
-COLS = ["号 / 标题(= 文件名)", "画面", "要处理的", "状态"]
+COLS = ["号 / 标题(= 文件名)", "画面", "要处理的", "状态", "检查"]
 YELLOW, RED, GREEN, ORANGE = QColor("#fff3c4"), QColor("#ffd6d6"), QColor("#d9f2d9"), QColor("#ffd9a8")
 GREY = QColor("#999999")
 ROW = Qt.ItemDataRole.UserRole            # 视频那一行:存它在 self.videos 里的下标;号那一行:存 -1
@@ -65,6 +65,13 @@ def friendly(e) -> tuple[str, str]:
     if "标题" in s and ("长" in s or "字" in s):
         return "没发成:标题不合格", f"平台说标题不行({s})—— 右键「改标题」改短一点再发"
     # 11-03:X 盘(网络盘)断了,和平精英上分君 13 条全是「OSError: [Errno 22] Invalid argument」—— 读视频文件读不了
+    # 11-09:QQ飞车漂移课堂一条「FileNotFoundError」,素材盘好好的 —— 软件读完列表以后,视频被人改短了名字(原来的名字超过 64 字),
+    # 软件还拿老名字去读。文件夹还在、就这个文件没了 = 改名 / 挪走了,不是素材盘断了
+    if isinstance(e, FileNotFoundError) and not _is_net_error(e):
+        d = os.path.dirname(str(getattr(e, "filename", "") or ""))
+        if d and os.path.isdir(d):
+            return "没发成:视频找不到了(改名 / 挪走了?)", ("这条视频的文件名变了或者被挪走了(软件读完列表以后有人改了名?)—— "
+                                                       "点「刷新」重新读一遍,再点「再发一次没发成的」")
     if isinstance(e, OSError) and not _is_net_error(e):
         return "没发成:视频读不了(素材盘断了?)", ("读不了视频文件,多半是素材盘(X 盘这种网络盘)断了 —— 在「此电脑」里双击打开素材盘,"
                                                "能打开了再点「再发一次没发成的」;盘好好的就双击视频看能不能播")
@@ -80,14 +87,38 @@ def _is_net_error(e) -> bool:
         return False
 
 
+# 全页重编码工位池(转竖屏 / 模糊水印 / 剪广告 / 剪结尾共用):防止多个号同时跑把电脑拉死
+ENCODE_SEM = threading.Semaphore(3)
+
+
+def _take_encode_slot(emit, obj, stopped) -> bool:
+    """拿一个编码工位;3 个工位全忙时先把这行写成「排队等电脑空位…」再等。停了返回 False。"""
+    if ENCODE_SEM.acquire(blocking=False):
+        return True
+    emit(obj, "排队等电脑空位…")
+    while not stopped():
+        if ENCODE_SEM.acquire(timeout=0.25):
+            return True
+    return False
+
+
 class Job(QThread):
-    """在后台跑 fn(emit, stopped);emit(行号, 状态文字) 刷新那一行,emit(-1, 文字) 写日志,emit(-2, 文字) 写进度。"""
-    row = Signal(int, str)
+    """在后台跑 fn(emit, stopped);emit(obj, 状态文字) 刷新那一行(obj 可为 Video 或行号),emit(-1, 文字) 写日志,emit(-2, 文字) 写进度。"""
+    row = Signal(object, str)
     done = Signal(str)
 
-    def __init__(self, fn, parent=None):
+    def __init__(self, fn, parent=None, kind: str = "", accounts=None, folders=None, title: str = "",
+                 quiet: bool = False, gen: int = 0):
         super().__init__(parent)
         self.fn = fn
+        self.kind = kind
+        self.accounts = set(accounts or ())
+        self.folders = set(folders or ())
+        self.title = title
+        self.quiet = quiet
+        self.gen = gen
+        self.on_done = None
+        self.settled = False
         self._stop = threading.Event()
 
     def stop(self):
@@ -182,6 +213,10 @@ class ApiTab(QWidget):
         self.open_accounts: set[str] = set()      # 展开着的号(换日期 / 刷新后还展开着)
         self.cache: dict[str, tuple] = {}         # 检查结果:pkey(路径) → ((大小, 修改时间), checks);刷新 / 撤销后不用重新检查
         self.job: Job | None = None
+        self.jobs: list[Job] = []
+        self._gen: int = 0                        # 整表重读(load)代数:部分重刷不加代数
+        self._id_row: dict[int, int] = {}         # id(Video) → 当前行号(支持别的号选文件夹重刷不影响正在跑的号)
+        self._quiet = False
         self.ledger = topic.Ledger(data_dir() / "话题改名台账.json")
         self._auto = ""                           # 定时发布:"" / "等检查"(到点了,等自动检查做完)/ "发"(正在发)
         self._blocked: dict[str, int] = {}        # 这天可能整批放错了的号(像别的游戏的条数),人确认前整批不发
@@ -362,6 +397,37 @@ class ApiTab(QWidget):
         self.card_black = ProbCard("warn", "", [self.b_black])
         self.card_black.hide()
         hv.addWidget(self.card_black)
+        # 字幕被裁(用户 2026-11-07:检测出来,打回去让同事重找);平时藏着
+        self.b_crop = QPushButton("打回")
+        self.b_crop.setToolTip("视频连封面挪进素材盘的「打回视频\\账号名」文件夹,你再跟同事说重新处理")
+        self.b_crop.clicked.connect(lambda: self.crop_back())
+        self.card_crop = ProbCard("warn", "", [self.b_crop])
+        self.card_crop.hide()
+        hv.addWidget(self.card_crop)
+        # 结尾求关注 / 别人账号 / 二维码(用户 2026-11-16:剪前给人看、剪完照样发,原片留底);平时藏着
+        self.b_outro = QPushButton("剪掉结尾")
+        self.b_outro.setToolTip("先给你看截帧和剪切时间,确认后把求关注那几秒剪掉;原片挪进旁边的「结尾原片」")
+        self.b_outro.clicked.connect(lambda: self.cut_outro())
+        self.card_outro = ProbCard("warn", "", [self.b_outro])
+        self.card_outro.hide()
+        hv.addWidget(self.card_outro)
+        # 清晰度 / 字幕被裁 / 结尾求关注查到哪了 + 手动再查一次(用户 2026-11-07:我要知道他有没有过这道工序,也要能自己让它再查)
+        ck = QHBoxLayout()
+        self.lab_check = QLabel("")
+        self.lab_check.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        ck.addWidget(self.lab_check, 1)
+        self.b_recheck = QPushButton("重新检查")
+        self.b_recheck.setToolTip("不管查没查过,再查一遍清晰度、字幕被裁和结尾求关注。跟着选中走,没选管全部。你点过「没问题」的还算数。")
+        self.b_recheck.clicked.connect(lambda: self.recheck())
+        self.b_recheck.hide()
+        ck.addWidget(self.b_recheck)
+        hv.addLayout(ck)
+        self._recheck_paths: set[str] = set()            # 人点了「重新检查」、还没查到的
+        self._ck_cfg = None
+        self._check_timer = QTimer(self)                 # 一条一条刷的时候攒一下再算
+        self._check_timer.setSingleShot(True)
+        self._check_timer.setInterval(300)
+        self._check_timer.timeout.connect(self._check_line)
 
         self.b_detail = QPushButton("")
         self.b_detail.setObjectName("toggle")
@@ -438,7 +504,7 @@ class ApiTab(QWidget):
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setStretchLastSection(False)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        for i, wd in ((1, 96), (2, 250), (3, 230)):
+        for i, wd in ((1, 96), (2, 250), (3, 230), (4, 260)):
             self.tree.setColumnWidth(i, wd)
         pl.addWidget(self.tree)
         dv.addWidget(panel, 1)
@@ -480,7 +546,7 @@ class ApiTab(QWidget):
         for key, owner, fn in (("F5", self, self.reload_dates),
                                ("Ctrl+F", self, lambda: (self.set_detail(True), self.e_find.setFocus(), self.e_find.selectAll())),
                                ("Escape", self.tree, self.tree.clearSelection),
-                               ("Delete", self.tree, lambda: None if self.busy() else self.delete_dups()),   # 用户 2026-11-03
+                               ("Delete", self.tree, self.delete_dups),   # 用户 2026-11-03
                                ("F2", self.tree, self._edit_current)):
             sc = QShortcut(QKeySequence(key), owner)
             sc.activated.connect(fn)
@@ -550,8 +616,8 @@ class ApiTab(QWidget):
     def _pub_show(self):
         p = self._pub
         cur = ""
-        i = p.get("cur")
-        if i is not None and 0 <= i < len(self.videos):
+        i = self._row_of(p.get("cur"))
+        if i is not None:
             v = self.videos[i]
             title = v.title if len(v.title) <= 16 else v.title[:16] + "…"
             cur = f"正在发 <b>{html_escape(v.account)}</b> · 《{html_escape(title)}》 {p.get('pct', '')}"
@@ -635,7 +701,7 @@ class ApiTab(QWidget):
                     plan.move_noclobber(f, dst)
                 n += 1
                 if emit:
-                    emit(i, f"挪到明天({tmr})")
+                    emit(v, f"挪到明天({tmr})")
             except OSError as e:
                 (emit or (lambda *_a: None))(-1, f"「{v.title}」挪不到明天的文件夹:{e}")
         if n:
@@ -656,6 +722,9 @@ class ApiTab(QWidget):
     def unsend_rows(self, rows: list[int]):
         """已发的改回没发(用户 2026-10-24):视频挪进今天的文件夹、记录改成没发成;之后刷新再发。"""
         from qe import verify
+        rows = self._idle_rows(rows, "改回没发")
+        if not rows:
+            return
         recs = [(i, self.rec.sent_row(self.videos[i].path)) for i in rows]
         recs = [(i, r) for i, r in recs if r]
         if not recs:
@@ -665,6 +734,7 @@ class ApiTab(QWidget):
                    "\n".join(f"· {self.videos[i].title[:30]}" for i, _r in recs[:8]) + ("\n…" if len(recs) > 8 else "") +
                    "\n\n视频连封面挪进今天的文件夹、记录改成没发成,之后能再发(不会自己发)。", "改回没发", "先不", default_no=True):
             return
+        nicks = {self.videos[i].account for i, _r in recs}
         notes, room = [], 0
         for _i, r in recs:
             m, got = unsend_to_today(self.st, self.rec, r)   # 挪进今天的文件夹(和核对的「拎回来」一样;额度在里面加)
@@ -675,18 +745,18 @@ class ApiTab(QWidget):
                  (f";补发的 {room} 条今天另外加了额度" if room else ""))
         if notes:
             QMessageBox.information(self, "改回没发", "\n".join(notes))
-        self.load()
+        self._refresh_accounts(nicks)
 
     def verify_one(self, nick: str):
         """去企鹅号核对这一个号今天的(只读);没发上的能拎回来重发。"""
         from gui.verify_dialog import VerifyDialog
         VerifyDialog(self.rec, plan.today(), self, nicks=[nick], st=self.st).exec()
-        self.load()
+        self._refresh_accounts({nick})
 
     def add_extra_today(self, nick: str, n: int | None = None) -> int:
         """今天临时多发几条(用户 2026-10-23):今天这个号上限加 n(明天照旧);发够以后挪到明天文件夹里的,挪 n 条回今天的文件夹。
         返回挪回来几条。n 不给就问。"""
-        if self.busy() and not getattr(self, "_quiet", False):
+        if self.busy(nick):
             return 0
         if n is None:
             q = plan.quota_on(self.st, nick)
@@ -698,7 +768,7 @@ class ApiTab(QWidget):
         moved = self._pull_back(nick, n)
         self.say(f"「{nick}」今天临时多发 {total} 条(今天一共 {plan.quota_on(self.st, nick)} 条)" +
                  (f";从明天的文件夹挪回 {moved} 条" if moved else ""))
-        self.load()
+        self._refresh_accounts({nick})
         return moved
 
     def _pull_back(self, nick: str, n: int) -> int:
@@ -777,7 +847,8 @@ class ApiTab(QWidget):
                                   ("全部展开", lambda: self.expand_all(True), True, ""),
                                   ("全部收起", lambda: self.expand_all(False), True, ""),
                                   (self.b_settopic.text(), self.b_settopic.click, self.b_settopic.isEnabled(), self.b_settopic.toolTip()),
-                                  ("批量替换标题里的字…", lambda: self.replace_titles(), bool(self.items) and not self.busy(),
+                                  ("批量替换标题里的字…", lambda: self.replace_titles(),
+                                   bool(self.items) and any(not self.busy(v.account) for v in self.videos),
                                    "比如标题里都有「快手热门」:一次换掉 / 删掉(先给你看会改成什么样,改完能撤销)"),
                                   (self.b_undo.text(), self.b_undo.click, self.b_undo.isEnabled(), self.b_undo.toolTip())):
             act = mm.addAction(text, fn)
@@ -811,13 +882,19 @@ class ApiTab(QWidget):
         quota = self._quota_sub()
         if not self.day():
             big, sub, tone = "先选要发哪天的", "在上面「要发哪天的」里挑一天", ""
-        elif self.busy() and self._pub and not self._pub["end"]:
+        elif self._is_publishing() and self._pub and not self._pub["end"]:
             p = self._pub
             big, sub, tone = f"正在发布 · {min(p['done'] + 1, p['total'])} / {p['total']}", self._fun, ""
-        elif self.busy() and not getattr(self, "_quiet", False):
+        elif self._is_publishing():
             prog = self.lab_scope.text()
-            big = "正在发布…" if prog.startswith("正在发") else (getattr(self, "_job_title", "") or "正在处理…")
-            sub, tone = prog, ""
+            big, sub, tone = "正在发布…", prog, ""
+        elif any(not j.quiet for j in self.running_jobs()):
+            act = [j for j in self.running_jobs() if not j.quiet]
+            busy_n = sum(len(j.accounts) for j in act)
+            first_t = (act[-1].title or "正在处理").rstrip("…")
+            big = f"{first_t}…" if len(act) == 1 else f"{len(act)} 项后台任务运行中…"
+            sub = f"正在处理 {busy_n} 个号，其它空闲的号照常能选文件夹、改标题、检查或单独发"
+            tone = ""
         elif not n and not gone and not apiacc.nicks():
             big, sub, tone = "还没有号", "去左下角「设置」→「从旧软件搬账号…」把号搬过来", ""
         elif not n and not gone:
@@ -850,7 +927,7 @@ class ApiTab(QWidget):
             sub = "处理好就能发(用下面的卡片)"
         else:
             big, sub, tone = "没有能发的", "", ""
-        sel = self.selected_rows() if self.day() and not self.busy() else []
+        sel = self.selected_rows() if self.day() and not self._is_publishing() else []
         if sel:
             sub = f"现在选中了 {len(sel)} 条 —— 旁边的按钮只管这 {len(sel)} 条(按 Esc 或点「× 取消选中」回到全部)" + ("\n" + sub if sub else "")
         if self._blocked and not self.busy():
@@ -860,7 +937,7 @@ class ApiTab(QWidget):
             tone = tone or "warn"
         if cats.get("o") and not self.busy():
             sub += ("\n" if sub else "") + f"其中 {cats['o']} 条标题里有别的平台的名字,要你自己改(列表里右键「改标题」)"
-        if quota and self.day() and not (self.busy() and not getattr(self, "_quiet", False)) and sub != self._fun \
+        if quota and self.day() and not (self.busy() and not self._quiet_only()) and sub != self._fun \
                 and not big.startswith(("今天都发够了", "这天 ")):
             sub = (sub + " · " if sub else "") + quota
         self.hero.set(big, sub, tone)
@@ -895,27 +972,107 @@ class ApiTab(QWidget):
         """点「要处理」卡片 = 只看有问题的;点「能发」= 取消过滤看全部。"""
         self.k_bad.setChecked(key == "bad")
 
-    def busy(self) -> bool:
-        return bool(self.job and self.job.isRunning())
+    def running_jobs(self) -> list[Job]:
+        return [j for j in getattr(self, "jobs", []) if j and (j.isRunning() or not j.settled)]
 
-    def _busy(self, on: bool):
+    def _is_publishing(self) -> bool:
+        return any(j.kind == "pub" for j in self.running_jobs())
+
+    def _quiet_only(self) -> bool:
+        r = self.running_jobs()
+        return bool(r) and all(j.quiet for j in r)
+
+    def _acc_folders(self, nicks) -> set[str]:
+        ns = set(nicks or ())
+        if not ns:
+            return set()
+        out = {pkey(os.path.dirname(v.path)) for v in self.videos if v.account in ns and v.path}
+        pk = self.picked(self.day())
+        for n in ns:
+            if pk.get(n):
+                out.add(pkey(pk[n]))
+        return out
+
+    def busy(self, nick: str = "") -> bool:
+        r = self.running_jobs()
+        if not nick:
+            return bool(r)
+        fs = self._acc_folders({nick})
+        return any((not j.quiet) and (nick in j.accounts or bool(fs & j.folders)) for j in r)
+
+    def busy_accounts(self) -> dict[str, str]:
+        out = {}
+        for j in self.running_jobs():
+            if not j.quiet:
+                for n in j.accounts:
+                    out[n] = j.title or "处理中…"
+        return out
+
+    def _row_of(self, obj) -> int | None:
+        if isinstance(obj, int):
+            return obj if 0 <= obj < len(self.videos) else None
+        i = self._id_row.get(id(obj))
+        if i is not None and 0 <= i < len(self.videos) and self.videos[i] is obj:
+            return i
+        for k, v in enumerate(self.videos):
+            if v is obj:
+                self._id_row[id(obj)] = k
+                return k
+        return None
+
+    def _idle_rows(self, rows: list[int], what: str = "操作") -> list[int]:
+        """过滤掉正在忙的号:如果全是忙号就弹窗提醒;部分忙就在日志说明、只管空闲的(防止串行)。"""
+        idle = [i for i in rows if not self.busy(self.videos[i].account)]
+        if len(idle) == len(rows):
+            return idle
+        bus = sorted({self.videos[i].account for i in rows if self.busy(self.videos[i].account)})
+        if not idle:
+            QMessageBox.information(self, what, f"「{'、'.join(bus[:3])}」正在后台干活,等它做完(或点「停」)再做。")
+            return []
+        self.say(f"{what}:跳过正在忙的「{'、'.join(bus[:3])}{'等' if len(bus) > 3 else ''}」,先处理其它 {len(idle)} 条")
+        return idle
+
+    def _stop_quiet(self):
+        qs = [j for j in self.running_jobs() if j.quiet]
+        for j in qs:
+            j.stop()
+        for j in qs:
+            j.wait()
+            j.settled = True
+            if j in self.jobs:
+                self.jobs.remove(j)
+
+    def _busy_ui(self):
+        self.jobs = self.running_jobs()
+        self._quiet = self._quiet_only()
+        pub_on = self._is_publishing()
+        active = [j for j in self.jobs if not j.quiet]
+        any_active = bool(active)
         has = bool(self.items)
-        quiet = on and getattr(self, "_quiet", False)   # 只是后台自动检查:换日期 / 刷新 / 选文件夹照样能点
-        for b in (self.b_check, self.b_vert, self.b_blur, self.b_topic, self.b_settopic, self.b_pub):
-            b.setEnabled(not on and has)
-        for b in (self.b_undo, self.b_clear):
-            b.setEnabled(not on)
-        for b in (self.c_date, self.b_pick, self.b_reload):
-            b.setEnabled(not on or quiet)
-        self.b_stop.setEnabled(on)
-        self.b_stop.setVisible(on and not quiet)        # 「停」只在干活的时候出来(大红按钮)
-        self.b_pub.setVisible(not (on and not quiet))   # 干活的时候灰掉的「现在发布」先藏起来,只留「停」
-        if on and not quiet:
+        has_idle = any(not self.busy(v.account) for v in self.videos) if has else False
+        nicks = apiacc.nicks()
+        has_idle_pick = any(not self.busy(n) for n in nicks) if nicks else (not pub_on)
+        for b in (self.b_check, self.b_vert, self.b_blur, self.b_topic, self.b_settopic, self.b_recheck,
+                  self.b_crop, self.b_outro):
+            b.setEnabled(has and has_idle)
+        self.b_pub.setEnabled((not pub_on) and has and has_idle)
+        self.b_undo.setEnabled((not pub_on) or has_idle)
+        self.b_clear.setEnabled(True)
+        for b in (self.c_date, self.b_reload):
+            b.setEnabled(not any_active)
+        self.b_pick.setEnabled(has_idle_pick)
+        self.b_stop.setEnabled(bool(self.jobs))
+        self.b_stop.setVisible(any_active)
+        self.b_stop.setText("停" if pub_on or len(active) <= 1 else f"停全部({len(active)})")
+        self.b_pub.setVisible(not pub_on)
+        if pub_on:
             self.b_unsel.hide()
-        if not on:
-            self._update_scope()
+        self._update_scope()
         if hasattr(self, "hero"):
             self._update_sum()
+
+    def _busy(self, _on: bool = False):
+        self._busy_ui()
 
     def filtering(self) -> bool:
         return (self.k_bad.isChecked() or bool(self.e_find.text().strip()) or getattr(self, "_segk", "all") != "all"
@@ -995,8 +1152,9 @@ class ApiTab(QWidget):
             self._fill_group(nick)
 
     def _update_scope(self):
-        if self.busy():
-            return
+        pub_on = self._is_publishing()
+        self._crop_card()
+        self._outro_card()
         undo = self.ledger.last()
         self.b_undo.setToolTip("把上一次改话题 / 批量改话题 / 改标题改回去" +
                                (f"\n上一次:{topic.Ledger.label(undo)}" if undo else "\n(现在没有能撤销的)"))
@@ -1007,40 +1165,47 @@ class ApiTab(QWidget):
             return
         sel = self.selected_rows()
         rows = self.target_rows()
-        self.lab_scope.setProperty("sel", bool(sel))
-        self.lab_scope.style().unpolish(self.lab_scope)
-        self.lab_scope.style().polish(self.lab_scope)
-        if sel:
-            accs = sorted({self.videos[i].account for i in sel})
-            who = accs[0] if len(accs) == 1 else f"{len(accs)} 个号"
-            self.lab_scope.setText(f"只管选中的:{who} {len(sel)} 条(按钮都只管这些;Esc 取消选择)")
-        elif self.filtering():
-            self.lab_scope.setText(f"过滤中:只管看得见的 {len(rows)} 条(要管全部:点上面「全部」/ 清空搜索)")
-        else:
-            self.lab_scope.setText(f"没选:管全部 {len(rows)} 条" if rows else "这天没有视频")
+        idle_rows = [i for i in rows if not self.busy(self.videos[i].account)]
+        if not pub_on:
+            self.lab_scope.setProperty("sel", bool(sel))
+            self.lab_scope.style().unpolish(self.lab_scope)
+            self.lab_scope.style().polish(self.lab_scope)
+            if sel:
+                accs = sorted({self.videos[i].account for i in sel})
+                who = accs[0] if len(accs) == 1 else f"{len(accs)} 个号"
+                self.lab_scope.setText(f"只管选中的:{who} {len(sel)} 条(按钮都只管这些;Esc 取消选择)")
+            elif self.filtering():
+                self.lab_scope.setText(f"过滤中:只管看得见的 {len(rows)} 条(要管全部:点上面「全部」/ 清空搜索)")
+            else:
+                self.lab_scope.setText(f"没选:管全部 {len(rows)} 条" if rows else "这天没有视频")
         self.b_clear.setVisible(bool(sel))
-        n, _over = self._quota_cap([i for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED)])
+        n, _over = self._quota_cap([i for i in idle_rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED)])
         # 重试:号的密钥坏了的不算(再点也必然失败,体验报告)
-        retry = sum(1 for i in rows if self._can_send(i) and self.state.get(i, "").startswith(FAILED)
+        retry = sum(1 for i in idle_rows if self._can_send(i) and self.state.get(i, "").startswith(FAILED)
                     and "密钥" not in self.state.get(i, ""))
-        if sel:                                          # 选中了:大按钮写「只发选中的」、换颜色(原来悄悄变成只管 1 条,试用的人都被坑)
-            self.b_pub.setText(f"只发选中的 {n} 条" + (f" + 重发 {retry} 条" if retry else "") if n else
-                               (f"选中的重发 {retry} 条" if retry else "选中的没有能发的"))
-        elif self.filtering() and not n and not retry:
-            self.b_pub.setText("点「全部」再发")
-        else:
-            self.b_pub.setText(f"现在发布 {n} 条" + (f" + 再发一次没发成的 {retry} 条" if retry else "") if n else
-                               (f"再发一次没发成的 {retry} 条" if retry else "今天都发够了" if _over else "没有能发的"))
-        self.b_pub.setEnabled(bool(n or retry) and not self.busy())
-        from gui.widgets import repolish
-        repolish(self.b_pub, sel=bool(sel))
-        self.b_pub.setMinimumWidth(min(240, self.b_pub.sizeHint().width()))   # 收起时字被切(「在发布 393」);太长的照旧能缩
-        self.b_unsel.setText("× 取消选中")
-        self.b_unsel.setVisible(bool(sel) and not self.b_pub.isHidden())
+        all_busy = bool(rows) and not idle_rows
+        if not pub_on:
+            if all_busy:
+                self.b_pub.setText("选中的号正在忙…")
+            elif sel:                                        # 选中了:大按钮写「只发选中的」、换颜色(原来悄悄变成只管 1 条,试用的人都被坑)
+                self.b_pub.setText(f"只发选中的 {n} 条" + (f" + 重发 {retry} 条" if retry else "") if n else
+                                   (f"选中的重发 {retry} 条" if retry else "选中的没有能发的"))
+            elif self.filtering() and not n and not retry:
+                self.b_pub.setText("点「全部」再发")
+            else:
+                self.b_pub.setText(f"现在发布 {n} 条" + (f" + 再发一次没发成的 {retry} 条" if retry else "") if n else
+                                   (f"再发一次没发成的 {retry} 条" if retry else "今天都发够了" if _over else "没有能发的"))
+            self.b_pub.setEnabled(bool(n or retry) and not all_busy)
+            from gui.widgets import repolish
+            repolish(self.b_pub, sel=bool(sel))
+            self.b_pub.setMinimumWidth(min(240, self.b_pub.sizeHint().width()))   # 收起时字被切(「在发布 393」);太长的照旧能缩
+            self.b_unsel.setText("× 取消选中")
+            self.b_unsel.setVisible(bool(sel) and not self.b_pub.isHidden())
         for b, base in ((self.b_vert, "转标准竖屏"), (self.b_topic, "整理标题")):
             b.setText(f"{base}(选中 {len(sel)} 条)" if sel else base)
+        self._check_line()
         self.b_settopic.setText("批量改话题…" if sel else "批量改话题…(先选)")
-        if getattr(self, "_hero_args", None):
+        if getattr(self, "_hero_args", None) and not pub_on:
             self._hero_update(*self._hero_args)
 
     def roots(self) -> list[str]:
@@ -1052,10 +1217,10 @@ class ApiTab(QWidget):
 
     # ---------------- 读素材 ----------------
     def reload_dates(self):
-        if self.busy() and getattr(self, "_quiet", False):
-            self.job.stop()
-            self.job.wait()
-        if self.busy():
+        if self._quiet_only():
+            self._stop_quiet()
+            self._busy_ui()
+        if any(not j.quiet for j in self.running_jobs()):
             return
         from gui.widgets import fill_dates, newest_first
         ds = apisrc.dates(self.roots(), self.known())
@@ -1142,7 +1307,7 @@ class ApiTab(QWidget):
     def _attach_wm(v):
         """查过水印 / 口播广告的(记在硬盘上,关了再开也在)挂到 checks 上;文件变了 / 没查过就没有。"""
         if v.checks is not None:
-            for k, store in (("wm", wmstore.WM), ("ads", wmstore.ADS)):
+            for k, store in (("wm", wmstore.WM), ("ads", wmstore.ADS), ("crop", wmstore.CROP), ("outro", wmstore.OUTRO)):
                 w = store.get(v.path)
                 if w is not None:
                     v.checks[k] = w
@@ -1159,12 +1324,12 @@ class ApiTab(QWidget):
         if not self.busy() and hasattr(self, "pub_strip"):   # 换日期 / 刷新:上一轮的发布进度收起来
             self.hero._extra_w.hide()
             self._pub = None
-        if self.busy() and getattr(self, "_quiet", False):   # 只是后台自动检查:停掉它,重读
-            self.job.stop()
-            self.job.wait()
-            self._busy(False)
-        if self.busy():                              # 后台按行号刷状态,这时重读列表会刷到别的视频上
+        if self._quiet_only():                               # 只是后台自动检查:停掉它,重读
+            self._stop_quiet()
+            self._busy_ui()
+        if any(not j.quiet for j in self.running_jobs()):    # 有号在干活:不能整张重读,只能局部刷新别的号
             return
+        self._gen += 1
         d = self.day()
         if d and self.st.get("api_last_date") != d:
             self.st["api_last_date"] = d
@@ -1178,6 +1343,9 @@ class ApiTab(QWidget):
             s = self.rec.status_of(v.path)
             if s:
                 self.state[i] = s
+            # 用户 2026-11-09「刷新后程序会把检查好了的再次自动检查一次…检查过的就不要再检查」:
+            # 查过清晰度的(记在硬盘上、文件没变)直接挂上,不进后台那一轮(原来每条都排队「查中」再去硬盘读一遍)
+            v.sharp = sharp.STORE.get(v.path)
             hit = self.cache.get(pkey(v.path))
             if hit and hit[0] == self._sig(v.path):      # 检过的、文件没变:不用重新检查(标题可能改过,话题 / 平台名重算)
                 v.checks = dict(hit[1])
@@ -1225,7 +1393,80 @@ class ApiTab(QWidget):
             if todo:
                 self.run_check(todo, quiet=True)          # 新出现的自动检查(审查:原来每次刷新都要重新点「检查」)
 
+    def _refresh_accounts(self, nicks: set[str]):
+        """有别的号在后台干活时只重扫这几个空闲号;全空闲时照旧整表重读(兼容原行为)。"""
+        if not any(not j.quiet for j in self.running_jobs()):
+            self.load()
+            return
+        self._reload_accounts(set(nicks))
+
+    def _reload_accounts(self, nicks: set[str]):
+        """局部重扫 nicks 这些空闲号:保留其它号在内存里的 Video 对象与运行中状态,完全不打扰正在转竖屏/干活的号。"""
+        d = self.day()
+        if not d or not nicks:
+            return
+        self._sharp_stop()
+        words = self.st.get("api_platform_words") or None
+        sel_ids = {id(self.videos[i]) for i in self.selected_rows()}
+        kept = [(v, self.state.get(i, ""), self.why.get(i, ""))
+                for i, v in enumerate(self.videos) if v.account not in nicks]
+        fresh_raw = [v for v in apisrc.videos(self.roots(), d, self.known(), self.picked(d)) if v.account in nicks]
+        fresh_items = []
+        for v in fresh_raw:
+            s = self.rec.status_of(v.path)
+            v.sharp = sharp.STORE.get(v.path)
+            hit = self.cache.get(pkey(v.path))
+            if hit and hit[0] == self._sig(v.path):
+                v.checks = dict(hit[1])
+                v.checks["tags"] = topic.split_topics(v.title)["tags"]
+                v.checks["platform"] = checks.platform_hits(v.title, words)
+                self._attach_wm(v)
+            fresh_items.append((v, s or "", ""))
+        by_acc: dict[str, list[tuple]] = {}
+        order: list[str] = []
+        for nick in [v.account for v, _, _ in kept] + sorted(nicks):
+            if nick not in by_acc:
+                by_acc[nick] = []
+                order.append(nick)
+        for v, s, w in kept:
+            by_acc[v.account].append((v, s, w))
+        for item in fresh_items:
+            by_acc[item[0].account].append(item)
+        new_vs, new_st, new_why = [], {}, {}
+        todo = []
+        fresh_ids = {id(v) for v, _, _ in fresh_items}
+        for nick in order:
+            for v, s, w in by_acc[nick]:
+                idx = len(new_vs)
+                new_vs.append(v)
+                if s:
+                    new_st[idx] = s
+                if w:
+                    new_why[idx] = w
+                if id(v) in fresh_ids and not v.checks and not s.startswith("已发"):
+                    todo.append(idx)
+        self.videos, self.state, self.why = new_vs, new_st, new_why
+        self._load_sent_keys()
+        self._refresh_dups()
+        self.today_sent = self.rec.sent_on(plan.today())
+        self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
+        here = {pkey(v.path) for v in self.videos}
+        seen = set()
+        self.archived = {}
+        for r in self.rec.rows(d):
+            if r["employee"] == "接口" and r["status"] == "已发" and pkey(r["path"]) not in here and pkey(r["path"]) not in seen:
+                seen.add(pkey(r["path"]))
+                self.archived[r["account"]] = self.archived.get(r["account"], 0) + 1
+        self._build_tree()
+        for i, v in enumerate(self.videos):
+            if id(v) in sel_ids and i in self.items:
+                self.items[i].setSelected(True)
+        self._sharp_start()
+        if todo:
+            self.run_check(todo, quiet=True)
+
     def _build_tree(self):
+        self._id_row = {id(v): i for i, v in enumerate(self.videos)}
         self.tree.blockSignals(True)
         self.tree.clear()
         self.items, self.groups = {}, {}
@@ -1337,7 +1578,7 @@ class ApiTab(QWidget):
         i = it.data(0, ROW)
         if not (isinstance(i, int) and i >= 0):
             return
-        if self.state.get(i) == "结果不明" and not self.busy():   # 双击「不确定发没发」的:直接问(体验报告)
+        if self.state.get(i) == "结果不明" and not self.busy(self.videos[i].account):   # 双击「不确定发没发」的:直接问(体验报告)
             v = self.videos[i]
             hint = self._unsure_hint.get(pkey(v.path))
             box = QMessageBox(QMessageBox.Icon.Question, "这条发出去了吗?",
@@ -1359,7 +1600,7 @@ class ApiTab(QWidget):
     def _edit_current(self):
         it = self.tree.currentItem()
         i = it.data(0, ROW) if it else -1
-        if isinstance(i, int) and i >= 0 and not self.busy():
+        if isinstance(i, int) and i >= 0 and not self.busy(self.videos[i].account):
             self.edit_title(i)
 
     def _status_text(self, i: int) -> tuple[str, list]:
@@ -1399,19 +1640,35 @@ class ApiTab(QWidget):
         fuzzy = sharp.text(getattr(v, "sharp", None)) if c and not self._sent(i) else ""
         if fuzzy:
             note = (note + "、" if note else "") + fuzzy
-        for col, t in enumerate([v.title, res, note, st]):
+        pair = self._check_pair(i)
+        for col, t in enumerate([v.title, res, note, st, checkline.cell(pair)]):
             it.setText(col, t)
-            it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else t)
+            it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else checkline.tip(pair) if col == 4 else t)
         ad = c.get("ads") or {}
         if ad.get("hits") and not (c.get("wm") or {}).get("hits"):     # 鼠标放上去看是哪几句
             it.setToolTip(2, "查到的口播广告" + ("(已经剪掉了)" if ad.get("blurred") else "(你标过:不是广告)" if ad.get("ok") else "") +
                           ":\n" + "\n".join(f"{int(x['start']) // 60}:{int(x['start']) % 60:02d}  {x['text']}" for x in ad["hits"][:8]))
         wm = c.get("wm") or {}
+        outro = c.get("outro") or {}
         if wm.get("hits") and wm.get("shot") and os.path.isfile(wm["shot"]):   # 鼠标放上去看查到水印的那一帧(红框)
             from PySide6.QtCore import QUrl
             src = QUrl.fromLocalFile(wm["shot"]).toString()
             it.setToolTip(2, f"<b>{checks.wm_text(wm)}</b>" + ("(已经糊掉了)" if wm.get("blurred") else "(你标过:不用管)" if wm.get("ok") else "") +
                           f"<br><img src='{src}' width='300'><br>不是水印:右键「没水印 / 不用管,这条能发」")
+        elif outro.get("hits"):
+            oh = outrocheck.hit_info(outro) or {}
+            st_s = outrocheck.fmt_time(oh.get("start", 0))
+            tail_txt = ("(已经剪掉了)" if outro.get("blurred") else "(你标过:没问题)" if outro.get("ok")
+                        else f"从 {st_s} 剪到最后(约 {oh.get('cut', 0):.1f} 秒)")
+            tip_html = (f"<b>{outrocheck.TEXT}({html_escape(str(oh.get('kind') or '求关注'))})</b> {html_escape(tail_txt)}"
+                        + (f"<br>{html_escape(str(oh.get('reason')))} " if oh.get("reason") else ""))
+            shot = outro.get("shot") or ""
+            if shot and os.path.isfile(shot):
+                from PySide6.QtCore import QUrl
+                tip_html += f"<br><img src='{QUrl.fromLocalFile(shot).toString()}' width='300'>"
+            if not outro.get("blurred") and not outro.get("ok"):
+                tip_html += "<br>误报:右键「结尾没问题,这条能发」"
+            it.setToolTip(2, tip_html)
         bg = GREEN if st.startswith("已发") else ORANGE if st == "结果不明" else RED if st.startswith(FAILED) \
             else YELLOW if probs else None
         for col in range(len(COLS)):
@@ -1434,7 +1691,8 @@ class ApiTab(QWidget):
         unsure = sum(1 for i in rows if self.state.get(i, "") == "结果不明")
         ok = sum(1 for i in rows if self._can_send(i) and not self.state.get(i, "").startswith(FAILED))
         pk = "(手选文件夹)" if nick in self.picked(self.day()) else ""
-        g.setText(0, f"{nick}  {n} 条{pk}" + (" · 发完了" if self._done(nick) else ""))
+        b_lbl = self.busy_accounts().get(nick, "")
+        g.setText(0, f"{nick}  {n} 条{pk}" + (f" · {b_lbl}" if b_lbl else (" · 发完了" if self._done(nick) else "")))
         g.setText(1, "")
         parts = []
         if not checked:
@@ -1452,6 +1710,8 @@ class ApiTab(QWidget):
         q = self._quota_text(nick)
         g.setText(3, " · ".join(x for x in (base, q) if x))
         g.setToolTip(3, "「今天 X / Y」= 今天(按发出去的时间)已经发了 X 条,规定每天 Y 条")
+        g.setText(4, checkline.group_text([self._check_pair(i) for i in rows if not self._sent(i)]))
+        g.setToolTip(4, g.text(4))
         g.setToolTip(0, self.picked(self.day()).get(nick, "") or nick)
         col = GREEN if n and sent == n else ORANGE if unsure else YELLOW if bad or fail else None
         for c in range(len(COLS)):
@@ -1617,24 +1877,27 @@ class ApiTab(QWidget):
         self.st.save()
 
     def pick_folder(self, nick: str = ""):
-        if self.busy() and getattr(self, "_quiet", False):
-            self.job.stop()
-            self.job.wait()
-        if self.busy():
-            QMessageBox.information(self, "给号选文件夹", "后台还在做事(发布 / 转竖屏 / 改话题 / 检查),做完或点「停」以后再换文件夹。")
+        if self._quiet_only():
+            self._stop_quiet()
+        if nick and self.busy(nick):
+            QMessageBox.information(self, "给号选文件夹", f"「{nick}」正在后台干活,做完或点「停」以后再换文件夹。")
             return
         d = self.day()
         if not d:
             QMessageBox.information(self, "给号选文件夹", "先在左上角选是哪天的。")
             return
         if not nick:
-            names = apiacc.nicks()
+            names = [n for n in apiacc.nicks() if not self.busy(n)]
             if not names:
-                QMessageBox.information(self, "给号选文件夹", "还没搬账号。")
+                all_n = apiacc.nicks()
+                QMessageBox.information(self, "给号选文件夹", "这几个号都在后台干活呢,等做完或点「停」再换。" if all_n else "还没搬账号。")
                 return
             nick, ok = QInputDialog.getItem(self, "给号选文件夹", f"{d} 给哪个号选文件夹?", names, 0, False)
             if not ok:
                 return
+        if self.busy(nick):
+            QMessageBox.information(self, "给号选文件夹", f"「{nick}」正在后台干活,做完或点「停」以后再换文件夹。")
+            return
         start = self.picked(d).get(nick) or apisrc.account_folders(self.roots(), {nick}).get(nick) or (self.roots() or [""])[0]
         f = QFileDialog.getExistingDirectory(self, f"{nick}:{d} 要发的视频在哪个文件夹", start)
         if not f:
@@ -1647,7 +1910,7 @@ class ApiTab(QWidget):
         self._set_pick(d, nick, f)
         n = len(apisrc._videos_in(f, nick, d))
         self.say(f"{d}「{nick}」只发这个文件夹里的 {n} 条:{os.path.basename(f)}")
-        self.load()
+        self._refresh_accounts({nick})
 
     def _bad_pick(self, d: str, nick: str, f: str) -> str:
         """这个文件夹不能给这个号:返回原因;能用返回 ""。"""
@@ -1667,32 +1930,36 @@ class ApiTab(QWidget):
         return ""
 
     def unpick(self, nick: str):
-        if self.busy() and getattr(self, "_quiet", False):
-            self.job.stop()
-            self.job.wait()
-        if self.busy():
+        if self._quiet_only():
+            self._stop_quiet()
+        if self.busy(nick):
             return
         d = self.day()
         self._set_pick(d, nick, "")
         self.say(f"{d}「{nick}」不用手选的文件夹了,回到自动找")
-        self.load()
+        self._refresh_accounts({nick})
 
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
         m = QMenu(self)
-        busy = self.busy()
+        pub_busy = self._is_publishing()
         if it is not None:
             if not it.isSelected():
                 self.tree.clearSelection()
                 it.setSelected(True)
             i = it.data(0, ROW)
             nick = it.data(0, NICK) if i == -1 else self.videos[i].account
+            acc_busy = self.busy(nick)
             sel = self.selected_rows()
+            sel_ok = not sel or any(not self.busy(self.videos[r].account) for r in sel)
             mine = self.rows_of(nick)
+            if acc_busy and not pub_busy:
+                m.addAction(f"⏹ 停掉「{nick}」正在干的活", lambda: self.stop(nick))
+                m.addSeparator()
             if i != -1 and self.state.get(i) == "结果不明" and len(sel) == 1:
                 # 不确定发没发的:只给这几项(体验报告:原来埋在 21 项菜单中间)
-                m.addAction("我去后台看了:发出去了", lambda: self.resolve_unsure(i, True)).setEnabled(not busy)
-                m.addAction("我去后台看了:没发出去(可以再发)", lambda: self.resolve_unsure(i, False)).setEnabled(not busy)
+                m.addAction("我去后台看了:发出去了", lambda: self.resolve_unsure(i, True)).setEnabled(not acc_busy)
+                m.addAction("我去后台看了:没发出去(可以再发)", lambda: self.resolve_unsure(i, False)).setEnabled(not acc_busy)
                 m.addSeparator()
                 m.addAction("复制标题(去后台搜)", lambda: self._copy(self.videos[i].title))
                 m.exec(self.tree.viewport().mapToGlobal(pos))
@@ -1700,7 +1967,7 @@ class ApiTab(QWidget):
             # 老手试用 2026-10-21:原来 21 项、一屏放不下,常用的埋在下面 → 常用的放上面,不常用的收进子菜单,发布放最底下
             n_s = len(sel)
             if i != -1 and self.state.get(i, "").startswith("已发") or (i != -1 and self.rec.sent_row(self.videos[i].path)):
-                m.addAction("改回没发(拎回来重发)…", lambda: self.unsend_rows(sel or [i])).setEnabled(not busy)
+                m.addAction("改回没发(拎回来重发)…", lambda: self.unsend_rows(sel or [i])).setEnabled(sel_ok)
                 m.addSeparator()
             if i != -1:
                 from qe import apicover
@@ -1708,12 +1975,12 @@ class ApiTab(QWidget):
                     m.addAction("看封面(员工放的)", lambda: self._open_file(apicover.find(self.videos[i].path)))
                 else:
                     m.addAction("看封面 / 换一帧…(没放封面,软件自动挑的)", lambda: self.auto_cover_dialog(i))
-                m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not busy and not self._sent(i))
+                m.addAction("改标题…(F2)", lambda: self.edit_title(i)).setEnabled(not acc_busy and not self._sent(i))
                 m.addAction("复制标题", lambda: self._copy(self.videos[i].title))
                 m.addAction("打开所在文件夹", lambda: self.reveal(i))
             if sel:
-                m.addAction(f"转标准竖屏(选中 {n_s} 条)", lambda: self.run_vertical(sel)).setEnabled(not busy)
-                m.addAction(f"整理标题(选中 {n_s} 条)", lambda: self.run_topic(sel)).setEnabled(not busy)
+                m.addAction(f"转标准竖屏(选中 {n_s} 条)", lambda: self.run_vertical(sel)).setEnabled(sel_ok)
+                m.addAction(f"整理标题(选中 {n_s} 条)", lambda: self.run_topic(sel)).setEnabled(sel_ok)
             from qe import gamecheck
             if i != -1 and not self._sent(i) and gamecheck.account_game(nick):
                 g0 = gamecheck.by_words(nick, self.videos[i].title)[0] or gamecheck.ai_hint(nick, self.videos[i].title)
@@ -1724,10 +1991,10 @@ class ApiTab(QWidget):
                         m.addSeparator()
                         d = os.path.basename(os.path.dirname(self.videos[i].path))
                         m.addAction(f"AI 觉得像《{hint}》:真放错了就挪到「{home[0]}」的 {d}",
-                                    lambda: self.move_to_game(i)).setEnabled(not busy)
+                                    lambda: self.move_to_game(i)).setEnabled(not acc_busy)
                 if gamecheck.store().ok(nick, self.videos[i].title):
                     m.addSeparator()
-                    m.addAction("其实不是这个号的游戏(先不发)", lambda: self.set_game_ok(i, False)).setEnabled(not busy)
+                    m.addAction("其实不是这个号的游戏(先不发)", lambda: self.set_game_ok(i, False)).setEnabled(not acc_busy)
                 elif gamecheck.alien(nick, self.videos[i].title):
                     # 新员工试用 2026-10-21:原来只有「能发」一条路,真放错了没地方点。放错了排第一个
                     m.addSeparator()
@@ -1735,41 +2002,41 @@ class ApiTab(QWidget):
                     home = self._game_home(g0)
                     if home:
                         d = os.path.basename(os.path.dirname(self.videos[i].path))
-                        m.addAction(f"放错了:挪到「{home[0]}」的 {d}", lambda: self.move_to_game(i)).setEnabled(not busy)
-                    m.addAction("先不发,留在这", lambda: self.set_game_ok(i, False)).setEnabled(not busy)
-                    m.addAction("看过了,是这个号的,能发", lambda: self.confirm_game_ok(i)).setEnabled(not busy)
+                        m.addAction(f"放错了:挪到「{home[0]}」的 {d}", lambda: self.move_to_game(i)).setEnabled(not acc_busy)
+                    m.addAction("先不发,留在这", lambda: self.set_game_ok(i, False)).setEnabled(not acc_busy)
+                    m.addAction("看过了,是这个号的,能发", lambda: self.confirm_game_ok(i)).setEnabled(not acc_busy)
             if gamecheck.account_game(nick):
                 day = self.day()
                 if self._blocked.get(nick):
                     m.addSeparator()
-                    m.addAction(f"「{nick}」这批确认没放错,能发", lambda: self.set_batch_ok(nick, True)).setEnabled(not busy)
+                    m.addAction(f"「{nick}」这批确认没放错,能发", lambda: self.set_batch_ok(nick, True)).setEnabled(not acc_busy)
                 elif gamecheck.store().batch_ok(nick, day):
                     m.addSeparator()
-                    m.addAction(f"「{nick}」取消「确认没放错」(这批先不发)", lambda: self.set_batch_ok(nick, False)).setEnabled(not busy)
+                    m.addAction(f"「{nick}」取消「确认没放错」(这批先不发)", lambda: self.set_batch_ok(nick, False)).setEnabled(not acc_busy)
             if i != -1 and not self._sent(i) and titleclean.ad_words(self.videos[i].title):
                 m.addSeparator()
                 if titleclean.store().ok(self.videos[i].account, self.videos[i].title):
-                    m.addAction("标题广告:其实还没剪(先不发)", lambda: self.set_title_ad_ok(i, False)).setEnabled(not busy)
+                    m.addAction("标题广告:其实还没剪(先不发)", lambda: self.set_title_ad_ok(i, False)).setEnabled(not acc_busy)
                 else:
-                    m.addAction("标题有广告词:视频里的广告剪好了 / 不是广告,能发", lambda: self.set_title_ad_ok(i, True)).setEnabled(not busy)
+                    m.addAction("标题有广告词:视频里的广告剪好了 / 不是广告,能发", lambda: self.set_title_ad_ok(i, True)).setEnabled(not acc_busy)
             if i != -1 and not self._sent(i):
                 from qe import titledate
                 v0 = self.videos[i]
                 if titledate.store().ok(v0.account, v0.title):
                     m.addSeparator()
-                    m.addAction("标题日期:其实过期了(先不发)", lambda: self.set_title_date_ok(i, False)).setEnabled(not busy)
+                    m.addAction("标题日期:其实过期了(先不发)", lambda: self.set_title_date_ok(i, False)).setEnabled(not acc_busy)
                 elif titledate.bad_dates(v0.title):
                     m.addSeparator()
-                    m.addAction("标题日期没问题(不是日期 / 就要发),能发", lambda: self.set_title_date_ok(i, True)).setEnabled(not busy)
+                    m.addAction("标题日期没问题(不是日期 / 就要发),能发", lambda: self.set_title_date_ok(i, True)).setEnabled(not acc_busy)
             ad = (self.videos[i].checks or {}).get("ads") if i != -1 else None
             if ad and ad.get("hits") and not self._sent(i):
                 m.addSeparator()
                 if ad.get("blurred"):
                     m.addAction("口播广告已经剪掉了(原片在「广告原片」里)").setEnabled(False)
                 elif ad.get("ok"):
-                    m.addAction("其实是广告(先不发)", lambda: self.set_ad_ok(i, False)).setEnabled(not busy)
+                    m.addAction("其实是广告(先不发)", lambda: self.set_ad_ok(i, False)).setEnabled(not acc_busy)
                 else:
-                    m.addAction("不是广告,这条能发", lambda: self.set_ad_ok(i, True)).setEnabled(not busy)
+                    m.addAction("不是广告,这条能发", lambda: self.set_ad_ok(i, True)).setEnabled(not acc_busy)
             wm = (self.videos[i].checks or {}).get("wm") if i != -1 else None
             if wm and wm.get("hits") and not self._sent(i):
                 m.addSeparator()
@@ -1778,46 +2045,64 @@ class ApiTab(QWidget):
                 if wm.get("blurred"):
                     m.addAction("水印已经糊掉了(原片在「水印原片」里)").setEnabled(False)
                 elif wm.get("ok"):
-                    m.addAction("其实有水印(先不发)", lambda: self.set_wm_ok(i, False)).setEnabled(not busy)
+                    m.addAction("其实有水印(先不发)", lambda: self.set_wm_ok(i, False)).setEnabled(not acc_busy)
                 else:
-                    m.addAction("没水印 / 不用管,这条能发", lambda: self.set_wm_ok(i, True)).setEnabled(not busy)
+                    m.addAction("没水印 / 不用管,这条能发", lambda: self.set_wm_ok(i, True)).setEnabled(not acc_busy)
             if i != -1 and sharp.flagged(getattr(self.videos[i], "sharp", None)):
                 m.addSeparator()
                 m.addAction("清晰度没问题", lambda: self.set_sharp_ok(i))
+            crop = (self.videos[i].checks or {}).get("crop") if i != -1 else None
+            if crop and crop.get("hits") and not self._sent(i):
+                m.addSeparator()
+                if crop.get("ok"):
+                    m.addAction("其实字幕被裁了(先不发)", lambda: self.set_crop_ok(i, False)).setEnabled(not acc_busy)
+                else:
+                    m.addAction("没被裁,这条能发", lambda: self.set_crop_ok(i, True)).setEnabled(not acc_busy)
+            outro = (self.videos[i].checks or {}).get("outro") if i != -1 else None
+            if outro and outro.get("hits") and not self._sent(i):
+                m.addSeparator()
+                if outro.get("shot"):
+                    m.addAction("看结尾截图", lambda: self._open_file(outro["shot"]))
+                if outro.get("blurred"):
+                    m.addAction("求关注结尾已经剪掉了(原片在「结尾原片」里)").setEnabled(False)
+                elif outro.get("ok"):
+                    m.addAction("其实结尾要求关注(先不发)", lambda: self.set_outro_ok(i, False)).setEnabled(not acc_busy)
+                else:
+                    m.addAction("结尾没问题,这条能发", lambda: self.set_outro_ok(i, True)).setEnabled(not acc_busy)
             m.addSeparator()
             if sel:
                 mc = m.addMenu("检查")
-                mc.addAction(f"检查选中的 {n_s} 条", lambda: self.run_check(sel)).setEnabled(not busy)
-                mc.addAction(f"高级检查选中的 {n_s} 条(再查水印)", lambda: self.run_check(sel, deep=True)).setEnabled(not busy)
-                mc.addAction(f"查口播广告(选中 {n_s} 条)", lambda: self.run_ads(sel)).setEnabled(not busy)
+                mc.addAction(f"检查选中的 {n_s} 条", lambda: self.run_check(sel)).setEnabled(sel_ok)
+                mc.addAction(f"高级检查选中的 {n_s} 条(再查水印)", lambda: self.run_check(sel, deep=True)).setEnabled(sel_ok)
+                mc.addAction(f"查口播广告(选中 {n_s} 条)", lambda: self.run_ads(sel)).setEnabled(sel_ok)
                 mw = m.addMenu("水印 / 口播广告")
-                mw.addAction(f"模糊水印(选中 {n_s} 条)", lambda: self.run_blur(sel)).setEnabled(not busy)
-                mw.addAction(f"剪掉口播广告(选中 {n_s} 条)", lambda: self.run_cut(sel)).setEnabled(not busy)
+                mw.addAction(f"模糊水印(选中 {n_s} 条)", lambda: self.run_blur(sel)).setEnabled(sel_ok)
+                mw.addAction(f"剪掉口播广告(选中 {n_s} 条)", lambda: self.run_cut(sel)).setEnabled(sel_ok)
                 mt = m.addMenu("标题 / 话题")
-                mt.addAction(f"只整理写法、不用 AI(选中 {n_s} 条)", lambda: self.tidy_titles(sel)).setEnabled(not busy)
-                mt.addAction(f"批量改话题(选中 {n_s} 条)…", lambda: self.set_topic(sel)).setEnabled(not busy)
-                mt.addAction(f"批量替换标题里的字(选中 {n_s} 条)…", lambda: self.replace_titles(sel)).setEnabled(not busy)
+                mt.addAction(f"只整理写法、不用 AI(选中 {n_s} 条)", lambda: self.tidy_titles(sel)).setEnabled(sel_ok)
+                mt.addAction(f"批量改话题(选中 {n_s} 条)…", lambda: self.set_topic(sel)).setEnabled(sel_ok)
+                mt.addAction(f"批量替换标题里的字(选中 {n_s} 条)…", lambda: self.replace_titles(sel)).setEnabled(sel_ok)
             ma = m.addMenu(f"「{nick}」这个号")
-            ma.addAction(f"只检查「{nick}」的 {len(mine)} 条", lambda: self.run_check(mine)).setEnabled(not busy)
-            ma.addAction(f"去企鹅号核对「{nick}」今天发了几条…", lambda: self.verify_one(nick))
-            ma.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick)).setEnabled(not busy)
+            ma.addAction(f"只检查「{nick}」的 {len(mine)} 条", lambda: self.run_check(mine)).setEnabled(not acc_busy)
+            ma.addAction(f"去企鹅号核对「{nick}」今天发了几条…", lambda: self.verify_one(nick)).setEnabled(not acc_busy)
+            ma.addAction(f"给「{nick}」换个文件夹…", lambda: self.pick_folder(nick)).setEnabled(not acc_busy)
             if nick in self.picked(self.day()):
-                ma.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick)).setEnabled(not busy)
+                ma.addAction(f"「{nick}」不用手选的文件夹了(自动找)", lambda: self.unpick(nick)).setEnabled(not acc_busy)
             if plan.quota_of(self.st, nick):
                 ma.addAction(f"今天临时多发几条…(今天规定 {plan.quota_on(self.st, nick)} 条)",
-                             lambda: self.add_extra_today(nick)).setEnabled(not busy)
+                             lambda: self.add_extra_today(nick)).setEnabled(not acc_busy)
             ma.addSeparator()
-            ma.addAction(f"只发「{nick}」的…", lambda: self.run_publish(mine)).setEnabled(not busy)
+            ma.addAction(f"只发「{nick}」的…", lambda: self.run_publish(mine)).setEnabled((not pub_busy) and (not acc_busy))
             mo = m.addMenu("其它")
-            mo.addAction("给别的号选文件夹…", lambda: self.pick_folder()).setEnabled(not busy)
+            mo.addAction("给别的号选文件夹…", lambda: self.pick_folder()).setEnabled(self.b_pick.isEnabled())
             mo.addAction("全部展开", lambda: self.expand_all(True))
             mo.addAction("全部收起", lambda: self.expand_all(False))
             if sel:
                 m.addSeparator()
-                m.addAction(f"发布选中的 {n_s} 条…", lambda: self.run_publish(sel)).setEnabled(not busy)
+                m.addAction(f"发布选中的 {n_s} 条…", lambda: self.run_publish(sel)).setEnabled((not pub_busy) and sel_ok)
             m.exec(self.tree.viewport().mapToGlobal(pos))
             return
-        m.addAction("给别的号选文件夹…", lambda: self.pick_folder()).setEnabled(not busy)
+        m.addAction("给别的号选文件夹…", lambda: self.pick_folder()).setEnabled(self.b_pick.isEnabled())
         m.addAction("全部展开", lambda: self.expand_all(True))
         m.addAction("全部收起", lambda: self.expand_all(False))
         m.exec(self.tree.viewport().mapToGlobal(pos))
@@ -1945,27 +2230,176 @@ class ApiTab(QWidget):
             w.stop = True
 
     def _sharp_start(self):
-        """别的活干完了,后台查还没查过的。一直在读网络盘,所以一开始干别的就停(_start),干完接着查。"""
-        if not self.SHARP_CHECK or not self.st.get("sharp_check", True) or self.busy():
+        """空闲的号在后台顺便查清晰度 / 字幕 / 结尾;正忙的号(发布 / 转竖屏 / 改标题…)跳过,干完再接着查。"""
+        if not self.SHARP_CHECK or self._is_publishing():
             return
         w = getattr(self, "sharp_worker", None)
         if w and w.isRunning():
             return
-        rows = [i for i, v in enumerate(self.videos) if v.checks and not self._sent(i) and getattr(v, "sharp", None) is None]
+        want = bool(self.st.get("sharp_check", True))
+        from qe import aiconf
+        ai = aiconf.vision(self.st)                   # 自己的模型认得图才用它
+        key = ai if self.st.get("crop_check", True) and ai.key else ""
+        outro_key = ai if self.st.get("outro_check", True) and ai.key else ""
+        rows = [i for i, v in enumerate(self.videos) if not self.busy(v.account) and not self._sent(i)
+                and (v.path in self._recheck_paths or (v.checks and
+                     ((want and getattr(v, "sharp", None) is None) or (key and self._crop_todo(v)) or (outro_key and self._outro_todo(v)))))]
         if not rows:
             return
         from gui.sharp_worker import SharpWorker
-        w = SharpWorker(self.videos, rows, self)
-        w.one.connect(lambda i, w=w: self._fill(i) if w.videos is self.videos and i in self.items else None)
+        w = SharpWorker(self.videos, rows, self, want_sharp=want, crop_key=key, need_crop=self._crop_todo, asker=self.CROP_ASKER,
+                        force=self._recheck_paths, outro_key=outro_key, need_outro=self._outro_todo, outro_asker=self.OUTRO_ASKER,
+                        skip=lambda v: self.busy(v.account))
+        w.one.connect(lambda i, w=w: self._sharp_row(w, i))
         w.finished.connect(lambda w=w: self._sharp_done(w))
         self.sharp_worker = w
         w.start()
+        self._check_refresh()
+
+    def _sharp_row(self, w, i: int):
+        if w.videos is self.videos and i in self.items:
+            self._fill(i)
+            self._crop_card()
+            self._outro_card()
+            self._check_timer.start()
 
     def _sharp_done(self, w):
         if w.stop:
             self._sharp_start()
-        elif w.n_bad:
+            self._check_refresh()
+            return
+        if self.sharp_worker is w:                       # 人刚点了重新检查、又起了新的一轮:别把它要查的划掉
+            self._recheck_paths.clear()
+        self._check_refresh()
+        if w.n_bad:
             self.say(f"查了清晰度:{w.n_bad} 条疑似模糊,不拦发布,看一下备注那一格")
+        if w.n_crop:
+            self.say(f"查到 {w.n_crop} 条字幕被裁:这些先不发,点上面的「打回」")
+        if w.n_outro:
+            self.say(f"查到 {w.n_outro} 条结尾求关注:这些先不发,点上面的「剪掉结尾」")
+        if w.errors:
+            self.say(f"⚠ 查字幕被裁:{len(w.errors)} 条没查成({w.errors[0]}),下次再查")
+        if w.outro_errors:
+            self.say(f"⚠ 查结尾求关注:{len(w.outro_errors)} 条没查成({w.outro_errors[0]}),下次再查")
+        self._update_scope()
+
+    # ---------------- 「检查」那一格、进度、重新检查(用户 2026-11-07)----------------
+    def _check_cfg(self, fresh: bool = False) -> tuple[bool, bool, bool, bool]:
+        """(清晰度开着, 字幕被裁开着, 结尾求关注开着, 有 Key)。ai_key 可能要读文件,不每行都读。"""
+        if fresh or self._ck_cfg is None:
+            from qe import aiconf
+            self._ck_cfg = (bool(self.st.get("sharp_check", True)), bool(self.st.get("crop_check", True)),
+                            bool(self.st.get("outro_check", True)), bool(aiconf.vision(self.st).key))
+        return self._ck_cfg
+
+    def _check_pair(self, i: int) -> tuple:
+        v = self.videos[i]
+        c = v.checks or {}
+        crop = c.get("crop") or getattr(v, "crop", None)
+        outro = c.get("outro") or getattr(v, "outro", None)
+        sharp_on, crop_on, outro_on, has_key = self._check_cfg()
+        return checkline.pair(v, getattr(self, "sharp_worker", None), crop, self._sent(i), True,
+                              sharp_on, crop_on, has_key, outro=outro, outro_on=outro_on)
+
+    def _check_refresh(self):
+        """一下子变了很多条(开始查 / 查完):只刷「检查」那一格和进度。"""
+        self._check_cfg(fresh=True)
+        for i, it in self.items.items():
+            p = self._check_pair(i)
+            it.setText(4, checkline.cell(p))
+            it.setToolTip(4, checkline.tip(p))
+        for nick, g in self.groups.items():
+            rows = [g.child(k).data(0, ROW) for k in range(g.childCount())]
+            g.setText(4, checkline.group_text([self._check_pair(i) for i in rows if not self._sent(i)]))
+            g.setToolTip(4, g.text(4))
+        self._check_line()
+
+    def _check_line(self):
+        rows = [i for i in range(len(self.videos)) if not self._sent(i)]
+        self.lab_check.setText(checkline.progress([self._check_pair(i) for i in rows]))
+        n = len(self._recheck_rows())
+        self.b_recheck.setText(f"重新检查 {n} 条")
+        self.b_recheck.setVisible(bool(n))
+
+    def _recheck_rows(self) -> list[int]:
+        return [i for i in self.target_rows() if not self._sent(i)]
+
+    def recheck(self):
+        """人点的:不管查没查过,再查一遍(跟着选中走,没选管全部空闲的)。你点过「没问题」的还算数。"""
+        rows = self._idle_rows(self._recheck_rows(), "重新检查")
+        if not rows:
+            return
+        want, crop_on, outro_on, has_key = self._check_cfg(fresh=True)
+        crop = crop_on and has_key
+        outro = outro_on and has_key
+        if not want and not crop and not outro:
+            QMessageBox.information(self, "重新检查", "清晰度、字幕被裁和结尾求关注都没开(或者没填阿里百炼 Key),去「设置」里打开。")
+            return
+        if len(rows) > 30 and (crop or outro) and not ask(self, "重新检查", f"重新查这 {len(rows)} 条?\n\n字幕被裁 / 结尾求关注要问 AI,条数多会花点时间和额度。"
+                                                          "后台查,不耽误你干别的。", "重新检查", "先不"):
+            return
+        for i in rows:
+            v = self.videos[i]
+            v.sharp_err = v.crop_err = v.outro_err = False
+            self._recheck_paths.add(v.path)
+        self.say(f"重新检查 {len(rows)} 条,进度看上面那一行")
+        w = getattr(self, "sharp_worker", None)
+        if w and w.isRunning():
+            w.stop = True                                 # 手上这一轮停下来,接着从人点的这些查(_sharp_done 会接上)
+        else:
+            self._sharp_start()
+        self._check_refresh()
+
+    # ---------------- 字幕被裁:打回同事重找(用户 2026-11-07)----------------
+    CROP_ASKER = None                                 # 测试里换掉(绝不真问 AI)
+
+    @staticmethod
+    def _crop_todo(v) -> bool:
+        return "crop" not in (v.checks or {})
+
+    def _crop_rows(self, rows=None) -> list[int]:
+        pool = range(len(self.videos)) if rows is None else rows
+        return [i for i in pool if not self._sent(i) and wmstore.blocks((self.videos[i].checks or {}).get("crop"))]
+
+    def _crop_card(self):
+        total = self._crop_rows()
+        self.card_crop.setVisible(bool(total))
+        if total:
+            n = len(self._crop_rows(self.target_rows())) or len(total)
+            self.card_crop.set(f"{len(total)} 条字幕被裁,先不发,打回让同事重新处理", "bad")
+            self.b_crop.setText(f"打回 {n} 条")
+
+    def crop_back(self):
+        """选中的 / 没选就全部:视频连封面挪进 打回视频\\账号名,名单放进剪贴板(用户自己去跟同事说)。"""
+        rows = self._crop_rows(self.target_rows()) or self._crop_rows()
+        rows = self._idle_rows(rows, "打回")
+        if not rows:
+            return
+        vs = [self.videos[i] for i in rows]
+        names = "\n".join(f" · {v.title[:30]}" for v in vs[:6]) + ("\n …" if len(vs) > 6 else "")
+        if not ask(self, "打回", f"打回这 {len(vs)} 条(连同名封面)?\n\n{names}\n\n挪进素材盘的「打回视频\\账号名」文件夹,不会发、不删。"
+                                 "AI 可能看错,不确定的先点开看一眼。", "打回", "先不", default_no=True):
+            return
+        done, nicks = [], {v.account for v in vs}
+        for v in vs:
+            try:
+                cropcheck.send_back(v.path, cropcheck.back_dir(self.st["material_root"], v.account))
+                done.append((v.account, v.title))
+            except OSError as e:
+                self.say(f"「{v.title[:24]}」挪不动:{e.strerror or e}")
+        if done:
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.clipboard().setText(cropcheck.names_text(done))
+        self.say(f"打回了 {len(done)} 条,在「{cropcheck.FOLDER}」文件夹里,名单也复制好了")
+        self._refresh_accounts(nicks)
+
+    def set_crop_ok(self, i: int, ok: bool):
+        v = self.videos[i]
+        wmstore.CROP.set_ok(v.path, ok)
+        self._attach_wm(v)
+        self._remember_check(v)
+        self._fill(i)
+        self._update_scope()
 
     def set_sharp_ok(self, i: int):
         v = self.videos[i]
@@ -1973,39 +2407,163 @@ class ApiTab(QWidget):
         v.sharp = sharp.STORE.get(v.path)
         self._fill(i)
 
-    def _start(self, fn, title: str, quiet: bool = False):
-        if self.busy():
+    # ---------------- 结尾求关注 / 别人账号 / 二维码(用户 2026-11-16):剪前给你看,剪完照样发 ----------------
+    OUTRO_ASKER = None                                # 测试里换掉(绝不真问 AI)
+    OUTRO_DIALOG = None                               # 测试里可替换对话框
+
+    @staticmethod
+    def _outro_todo(v) -> bool:
+        return "outro" not in (v.checks or {})
+
+    def _outro_rows(self, rows=None) -> list[int]:
+        pool = range(len(self.videos)) if rows is None else rows
+        return [i for i in pool if not self._sent(i) and wmstore.blocks((self.videos[i].checks or {}).get("outro"))]
+
+    def _outro_card(self):
+        total = self._outro_rows()
+        self.card_outro.setVisible(bool(total))
+        if total:
+            n = len(self._outro_rows(self.target_rows())) or len(total)
+            self.card_outro.set(f"{len(total)} 条结尾有求关注 / 别人账号,先不发,剪掉就能发", "bad")
+            self.b_outro.setText(f"剪掉结尾 {n} 条")
+
+    def set_outro_ok(self, i: int, ok: bool, single: bool = False):
+        rows = [i] if single else ([r for r in (self.selected_rows() or [i])
+                                    if (self.videos[r].checks or {}).get("outro", {}).get("hits")] or [i])
+        for r in rows:
+            v = self.videos[r]
+            wmstore.OUTRO.set_ok(v.path, ok)
+            self._attach_wm(v)
+            self._remember_check(v)
+            self._fill(r)
+        self.say(f"{len(rows)} 条标成" + ("「结尾没问题,能发」" if ok else "「结尾要求关注,先不发」"))
+        self._update_scope()
+
+    def cut_outro(self, only: list[int] | None = None):
+        rows = self._outro_rows(self.target_rows(only)) or self._outro_rows()
+        rows = self._idle_rows(rows, "剪掉结尾")
+        if not rows:
+            return
+        items = []
+        for i in rows:
+            v = self.videos[i]
+            oh = outrocheck.hit_info((v.checks or {}).get("outro")) or {}
+            dur = float((v.checks or {}).get("dur") or oh.get("dur") or 0)
+            start = float(oh.get("start") or max(0.5, dur - 2.5))
+            items.append({"row": i, "title": v.title, "account": v.account, "path": v.path, "start": start, "dur": dur,
+                          "kind": oh.get("kind") or "求关注", "reason": oh.get("reason") or "",
+                          "shot": ((v.checks or {}).get("outro") or {}).get("shot") or ""})
+        if self.OUTRO_DIALOG is not None:
+            plan_cut = self.OUTRO_DIALOG(items, self)
+        else:
+            from gui.outro_dialog import OutroDialog
+            dlg = OutroDialog(items, self, on_ok=lambda r: self.set_outro_ok(r, True, single=True))
+            plan_cut = dlg.chosen() if dlg.exec() == dlg.DialogCode.Accepted else []
+        if not plan_cut:
+            return
+        plan_vs = [(self.videos[i], start_sec) for i, start_sec in plan_cut]
+        ff = vertical.ffmpeg_path()
+        words = self.st.get("api_platform_words") or None
+
+        def one(pair, emit, stopped):
+            v, start_sec = pair
+            old_path = v.path
+            old_outro = dict((v.checks or {}).get("outro") or {})
+            old_sharp = sharp.STORE.get(old_path)
+            old_crop = wmstore.CROP.get(old_path)
+            if not _take_encode_slot(emit, v, stopped):
+                return
+            emit(v, "剪结尾中…")
+            try:
+                new, _orig, gone = outrocheck.cut(old_path, start_sec, ff, stop=stopped)
+            except Exception as e:
+                if stopped() or str(e) == "停下了":
+                    emit(v, "停下了,没剪")
+                    return
+                emit(v, CLEAR)
+                emit(-1, f"「{v.title}」剪结尾失败:{e}")
+                return
+            finally:
+                ENCODE_SEM.release()
+            v.path = new
+            checks.check_one(v, words, ff)
+            hits = old_outro.get("hits") or [{"start": start_sec, "cut": gone}]
+            wmstore.OUTRO.put(new, {"hits": hits, "shot": old_outro.get("shot") or ""}, ok=True, blurred=True)
+            if old_sharp and not sharp.flagged(old_sharp):
+                sharp.STORE.move(old_path, new)
+            if old_crop and not wmstore.blocks(old_crop):
+                wmstore.CROP.move(old_path, new)
+            v.sharp = sharp.STORE.get(new)
+            self._attach_wm(v)
+            self._remember_check(v)
+            emit(v, CLEAR)
+            emit(-1, f"「{v.title}」剪掉了 {gone} 秒求关注结尾")
+
+        def fn(emit, stopped):
+            with ThreadPoolExecutor(2) as ex:
+                list(ex.map(lambda p: None if stopped() else one(p, emit, stopped), plan_vs))
+            return f"剪结尾做完了(原片在各自文件夹的「{outrocheck.ORIG_DIR}」里)"
+        accs = {v.account for v, _ in plan_vs}
+        self._start(fn, f"剪掉求关注结尾:{len(plan_vs)} 条", kind="outro", accounts=accs)
+
+    def _start(self, fn, title: str, quiet: bool = False, kind: str = "", accounts=None, on_done=None):
+        accs = set(accounts or ())
+        if kind == "pub" and self._is_publishing():
             return False
-        self._sharp_stop()
-        self._quiet = quiet
-        self._job_title = (title.split(":")[0].split("(")[0].split(":")[0].rstrip("…") + "…") if title else ""
-        self._busy(True)
+        if not quiet:
+            self._stop_quiet()
+            if accs and any(self.busy(a) for a in accs):
+                return False
+        else:
+            accs = {a for a in accs if not self.busy(a)}
+            if not accs:
+                return False
+        if not quiet:
+            self._sharp_stop()
+        short_t = (title.split(":")[0].split("(")[0].rstrip("…") + "…") if title else ""
+        self._job_title = short_t
         if title:
             self.say(title)
-        self.job = Job(fn, self)
-        self.job.row.connect(self._on_row)
-        self.job.done.connect(self._on_done)
-        self.job.start()
+        j = Job(fn, self, kind=kind, accounts=accs, folders=self._acc_folders(accs),
+                title=short_t, quiet=quiet, gen=self._gen)
+        j.row.connect(lambda o, t, j=j: self._on_row(j, o, t))
+        j.done.connect(lambda m, j=j: self._on_done(j, m))
+        self.jobs.append(j)
+        if kind == "pub" or not self._is_publishing():
+            self.job = j
+        j.start()
+        for n in accs:
+            self._fill_group(n)
+        self._busy_ui()
         return True
 
-    def _stale(self) -> bool:
-        """信号是不是从已经被换掉的旧任务来的(换日期时停掉的自动检查):是就不理,免得刷到新列表的别的行上。"""
-        s = self.sender()
-        return s is not None and s is not self.job
+    def _stale(self, job: Job | None = None) -> bool:
+        """信号是不是从换日期 / 整表重刷前的旧任务来的:是就不理,免得刷到新列表的别的行上。"""
+        j = job or self.sender()
+        return isinstance(j, Job) and j.gen != self._gen
 
-    def _on_row(self, i: int, t: str):
-        if self._stale():
+    def _on_row(self, job: Job, obj, t: str):
+        if self._stale(job):
             return
-        if i == PROGRESS:
-            self.lab_scope.setText(t)
-            self._pub_progress(t)
-            self._update_sum()
+        if isinstance(obj, int):
+            if obj == PROGRESS:
+                if job.kind == "pub" or not self._is_publishing():
+                    self.lab_scope.setText(t)
+                if job.kind == "pub":
+                    self._pub_progress(t)
+                self._update_sum()
+                return
+            if obj < 0:
+                self.say(t)
+                return
+        i = self._row_of(obj)
+        if i is None:
             return
-        if i < 0:
-            self.say(t)
+        if t.startswith("__WHY__:"):
+            self.why[i] = t[8:]
             return
-        if self._pub and not self._pub["end"] and t.startswith("上传"):
-            self._pub["cur"], self._pub["pct"] = i, t.split("%")[0].replace("上传", "").strip() + "%"
+        if job.kind == "pub" and self._pub and not self._pub["end"] and t.startswith("上传"):
+            self._pub["cur"], self._pub["pct"] = obj, t.split("%")[0].replace("上传", "").strip() + "%"
         if t == CLEAR:
             self.state.pop(i, None)
         elif t:
@@ -2019,40 +2577,59 @@ class ApiTab(QWidget):
         if i in self.items:
             self._fill(i)
 
-    def _on_done(self, msg: str):
-        if self._stale():
+    def _on_done(self, job: Job, msg: str):
+        job.settled = True
+        if job in self.jobs:
+            self.jobs.remove(job)
+        running = self.running_jobs()
+        if self.job is job and running:
+            self.job = running[-1]
+        if self._stale(job):
+            self._busy_ui()
             return
-        self._quiet = False
-        p = getattr(self, "_pub", None)
-        if p and p.get("ok") and not p.get("end") and not self._auto:
-            self._clear_notice()                         # 定时没发成以后,人自己点「现在发布」发成了:提醒清掉
-        self._pub_end(msg or "")
-        self._busy(False)
         if msg:
             self.say(msg)
-        if p and p.get("ok") and hasattr(self.window(), "schedule_black_scan"):
-            self.window().schedule_black_scan()           # 等平台处理好封面,再去查有没有黑的
-        if self._auto == "发":                            # 定时发布发完了 / 停下了
+        if job.kind == "topic":
+            self._refresh_dups()
+            for idx, _v in enumerate(self.videos):
+                if idx in self.items:
+                    self._fill(idx, group=False)
+        if job.kind == "pub":
+            p = getattr(self, "_pub", None)
+            if p and p.get("ok") and not p.get("end") and not self._auto:
+                self._clear_notice()                     # 定时没发成以后,人自己点「现在发布」发成了:提醒清掉
+            self._pub_end(msg or "")
+            if p and p.get("ok") and hasattr(self.window(), "schedule_black_scan"):
+                self.window().schedule_black_scan()       # 等平台处理好封面,再去查有没有黑的
+            if self._auto == "发":                        # 定时发布发完了 / 停下了
+                pop = getattr(self, "_popup", None)
+                bad = bool(pop and pop[2]) or "停下了没发" in (msg or "")
+                self._sched_end("⏰ 定时发布结束:" + (msg or ""), problem=bad)
+            if getattr(self, "_show_bad_after", False):
+                self._show_bad_after = False
+                self.k_bad.setChecked(True)               # 发完有失败的:直接只看有问题的
+            nocov, self._cov_after = getattr(self, "_cov_after", None), None
+            if nocov:                                     # 发的时候封面没传上(罐头中途掉线了):卡片亮红,下次发之前登好
+                self._cover_red(f"这次有 {len(nocov)} 条封面没传上(平台自己截的),罐头里的企鹅号多半掉线了", None)
             pop = getattr(self, "_popup", None)
-            bad = bool(pop and pop[2]) or "停下了没发" in (msg or "")
-            self._sched_end("⏰ 定时发布结束:" + (msg or ""), problem=bad)
-        if getattr(self, "_show_bad_after", False):
-            self._show_bad_after = False
-            self.k_bad.setChecked(True)                   # 发完有失败的:直接只看有问题的
-        nocov, self._cov_after = getattr(self, "_cov_after", None), None
-        if nocov:                                         # 发的时候封面没传上(罐头中途掉线了):卡片亮红,下次发之前登好
-            self._cover_red(f"这次有 {len(nocov)} 条封面没传上(平台自己截的),罐头里的企鹅号多半掉线了", None)
-        pop = getattr(self, "_popup", None)
-        self._popup = None
-        if pop:
-            QMessageBox.warning(self, pop[0], pop[1]) if pop[2] else QMessageBox.information(self, pop[0], pop[1])
-        self._clean_empty_dirs()                          # 发空了的文件夹删掉(发了的已经在归档里,列表上「已发」照旧看得见,不用重读)
-        self._sched_changed()
-        self._reorder()                                   # 发完的号沉底
+            self._popup = None
+            if pop:
+                QMessageBox.warning(self, pop[0], pop[1]) if pop[2] else QMessageBox.information(self, pop[0], pop[1])
+            self._clean_empty_dirs()                      # 发空了的文件夹删掉(发了的已经在归档里,列表上「已发」照旧看得见,不用重读)
+            self._sched_changed()
+            self._reorder()                               # 发完的号沉底
+            spilled_nicks = getattr(self, "_spilled_nicks", set())
+            self._spilled_nicks = set()
+            if getattr(self, "_reload_after", False):
+                self._reload_after = False
+                if any(not j.quiet for j in self.running_jobs()):
+                    self._reload_accounts(spilled_nicks or job.accounts)
+                else:
+                    self.load()
+        for n in job.accounts:
+            self._fill_group(n)
+        self._busy_ui()
         self._sharp_start()
-        if getattr(self, "_reload_after", False):          # 多的挪到明天了:重读列表(挪走的不在这天了)
-            self._reload_after = False
-            self.load()
 
     JUNK = ("thumbs.db", "desktop.ini", ".ds_store")
 
@@ -2101,19 +2678,26 @@ class ApiTab(QWidget):
             # 手选的文件夹删了:手选那条留着(这天这个号就没东西了),不回到自动找 —— 免得把别的日期文件夹(10.1)的视频列出来顺手发了
         return n
 
-    def stop(self):
-        if self.job and self.job.isRunning():
-            self.job.stop()
-            self.lab_scope.setText("正在停…等手上这条做完(上传大文件可能要一会儿)")
-            self.b_stop.setEnabled(False)
-            self.say("正在停…(手上这条做完就停)")
+    def stop(self, nick: str = ""):
+        rs = self.running_jobs()
+        hit = [j for j in rs if not nick or nick in j.accounts] if rs else []
+        for j in hit:
+            j.stop()
+        if hit:
+            if nick:
+                self.say(f"正在停「{nick}」…(手上这条做完就停)")
+            else:
+                self.lab_scope.setText("正在停…等手上这条做完(上传大文件可能要一会儿)")
+                self.b_stop.setEnabled(False)
+                self.say("正在停…(手上这条做完就停)")
 
     def run_check(self, only: list[int] | None = None, quiet: bool = False, deep: bool = False):
         """deep = 高级检查:普通检查 + 查水印。普通检查过的(文件没变)不再做一遍,只查水印;水印查过的也不再查。"""
-        rows = self.target_rows(only)
-        if not rows or self.busy():
+        raw_rows = self.target_rows(only)
+        rows = ([i for i in raw_rows if not self.busy(self.videos[i].account)] if quiet
+                else self._idle_rows(raw_rows, "高级检查" if deep else "检查"))
+        if not rows:
             return
-        vs = self.videos
         words = self.st.get("api_platform_words") or None
         ff = vertical.ffmpeg_path()
         if deep:
@@ -2121,82 +2705,87 @@ class ApiTab(QWidget):
             if not rows:
                 QMessageBox.information(self, "高级检查", "这些都发过了,不用查水印。")
                 return
+        vs = [self.videos[i] for i in rows]
+        sent_paths = {self.videos[i].path for i in rows if self._sent(i)}
 
         def fn(emit, stopped):
             done = [0]
             lock = threading.Lock()
 
-            def one(i):
+            def one(v):
                 if stopped():
                     return
-                if not (deep and vs[i].checks):          # 高级检查:普通检查过的就不再做一遍
-                    checks.check_one(vs[i], words, ff)
-                    self._attach_wm(vs[i])
-                    self._remember_check(vs[i])
-                    emit(i, "")
+                if not (deep and v.checks):               # 高级检查:普通检查过的就不再做一遍
+                    checks.check_one(v, words, ff)
+                    self._attach_wm(v)
+                    self._remember_check(v)
+                    emit(v, "")
                 with lock:
                     done[0] += 1
                     k = done[0]
-                if not deep and (k % 10 == 0 or k == len(rows)):
-                    emit(PROGRESS, f"检查中 {k}/{len(rows)}…")
+                if not deep and (k % 10 == 0 or k == len(vs)):
+                    emit(PROGRESS, f"检查中 {k}/{len(vs)}…")
             with ThreadPoolExecutor(4) as ex:            # 4 条一起读(网络盘上一条条读太慢)
-                list(ex.map(one, rows))
+                list(ex.map(one, vs))
             if stopped():
                 return "检查停下了"
             if not deep:
-                self._ai_games(rows, emit, stopped)       # 关键词看不出是哪个游戏的:问 AI(问过的记着)
+                self._ai_games_vs([v for v in vs if v.path not in sent_paths], emit, stopped)
             if deep:
-                self._scan_wm(rows, emit, stopped, ff)
+                self._scan_wm_vs(vs, emit, stopped, ff)
                 if stopped():
                     return "查水印停下了(查完的记着,下次接着查没查的)"
-            got = [vs[i] for i in rows]
-            land = sum(1 for v in got if checks.needs_vertical(v.checks))
-            plat = sum(1 for v in got if v.checks.get("platform"))
-            many = sum(1 for v in got if len(v.checks.get("tags") or []) > 1)
-            fmt = sum(1 for v in got if len(v.checks.get("tags") or []) <= 1 and topic.bad_format(v.title))
-            unread = sum(1 for v in got if v.checks.get("bad_read"))
-            ok = sum(1 for v in got if not checks.problems(v))
-            wm = sum(1 for v in got if checks.wm_blocks(v.checks.get("wm")))
+            land = sum(1 for v in vs if checks.needs_vertical(v.checks))
+            plat = sum(1 for v in vs if v.checks.get("platform"))
+            many = sum(1 for v in vs if len(v.checks.get("tags") or []) > 1)
+            fmt = sum(1 for v in vs if len(v.checks.get("tags") or []) <= 1 and topic.bad_format(v.title))
+            unread = sum(1 for v in vs if v.checks.get("bad_read"))
+            ok = sum(1 for v in vs if not checks.problems(v))
+            wm = sum(1 for v in vs if checks.wm_blocks(v.checks.get("wm")))
             from qe import gamecheck
-            alien = sum(1 for v in got if gamecheck.alien(v.account, v.title))
-            return (("高级检查完" if deep else "检查完") + f":{len(got)} 条,能发 {ok};横屏 / 偏方 {land} · 标题有别的平台 {plat}(要你自己改)· "
+            alien = sum(1 for v in vs if gamecheck.alien(v.account, v.title))
+            return (("高级检查完" if deep else "检查完") + f":{len(vs)} 条,能发 {ok};横屏 / 偏方 {land} · 标题有别的平台 {plat}(要你自己改)· "
                     f"多个话题 {many} · 话题写法 / 结尾空格 {fmt}" + (f" · 视频读不出来 {unread}" if unread else "") +
                     (f" · 有水印 {wm}(鼠标放在「要处理的」上看截图;不是水印就右键「没水印,能发」)" if deep else "") +
                     (f" · 标题像别的游戏 {alien}(是这个号的就右键「是这个号的,能发」)" if alien else "") +
-                    ("" if ok == len(got) or deep else "。标题乱码 / @ / 话题问题点「整理标题」一键改"))
+                    ("" if ok == len(vs) or deep else "。标题乱码 / @ / 话题问题点「整理标题」一键改"))
+        accs = {v.account for v in vs}
         self._start(fn, "" if quiet else (f"高级检查中…({self._who(rows)})" if deep else f"检查中…({self._who(rows)})"),
-                    quiet=quiet)
+                    quiet=quiet, kind="quiet" if quiet else ("deep" if deep else "check"), accounts=accs)
 
-    def _ai_games(self, rows: list[int], emit, stopped) -> int:
-        """关键词看不出是哪个游戏的标题(「哈哈哈」「G镇六个苟分点」),按号一批问 AI(百炼),答案记在 游戏判断.json。
-        没填 Key / 出错:只按关键词查,写一句日志。返回问了几条。"""
-        from qe import gamecheck
-        key = self.st.ai_key() if hasattr(self.st, "ai_key") else ""
-        if not key:
+    def _ai_games_vs(self, vs_list, emit, stopped) -> int:
+        from qe import aiconf, gamecheck
+        key = aiconf.text(self.st)                    # 填了「自己的模型」就问它
+        if not key.key:
             return 0
-        vs = self.videos
-        by: dict[str, list[int]] = {}
-        for i in rows:
-            if not self._sent(i) and gamecheck.need_ai(vs[i].account, vs[i].title):
-                by.setdefault(vs[i].account, []).append(i)
+        by: dict[str, list] = {}
+        for v in vs_list:
+            if gamecheck.need_ai(v.account, v.title):
+                by.setdefault(v.account, []).append(v)
         if by:
             emit(PROGRESS, f"问 AI 这些标题是哪个游戏的 · {sum(map(len, by.values()))} 条…")
         n = 0
-        for nick, idx in by.items():
-            for k in range(0, len(idx), 40):
+        for nick, part_all in by.items():
+            for k in range(0, len(part_all), 40):
                 if stopped():
                     return n
-                part = idx[k:k + 40]
+                part = part_all[k:k + 40]
                 try:
-                    got = gamecheck.ask_ai(gamecheck.account_game(nick), [vs[i].title for i in part], key)
+                    got = gamecheck.ask_ai(gamecheck.account_game(nick), [v.title for v in part], key)
                 except Exception as e:
                     emit(-1, f"AI 判断是哪个游戏没成({str(e)[:60]}),这次只按关键词查")
                     return n
                 gamecheck.store().set_ai(got)
                 n += len(got)
-                for i in part:
-                    emit(i, "")
+                for v in part:
+                    emit(v, "")
         return n
+
+    def _ai_games(self, rows: list[int], emit, stopped) -> int:
+        """关键词看不出是哪个游戏的标题(「哈哈哈」「G镇六个苟分点」),按号一批问 AI(百炼),答案记在 游戏判断.json。
+        没填 Key / 出错:只按关键词查,写一句日志。返回问了几条。"""
+        vs = [self.videos[i] for i in rows if not self._sent(i)]
+        return self._ai_games_vs(vs, emit, stopped)
 
     def _game_home(self, game: str) -> tuple[str, str] | None:
         """这个游戏的号和它的素材文件夹(「三角洲行动」→(三角洲密探君, …\三角洲行动--三角洲密探君));没有就 None。"""
@@ -2265,42 +2854,40 @@ class ApiTab(QWidget):
         self._fill_group(nick)
         self._update_scope()
 
-    def _scan_wm(self, rows: list[int], emit, stopped, ff: str):
+    def _scan_wm_vs(self, vs_list: list, emit, stopped, ff: str):
         """查水印(后台线程里):查过、文件没变的不再查;3 条一起查(解码 + 找 logo 吃 CPU)。"""
         from qe import watermark as WM
-        vs = self.videos
         todo = []
-        for i in rows:
-            w = wmstore.get(vs[i].path)
+        for v in vs_list:
+            w = wmstore.get(v.path)
             if w is not None:
-                vs[i].checks["wm"] = w
-                emit(i, "")
+                v.checks["wm"] = w
+                emit(v, "")
             else:
-                todo.append(i)
+                todo.append(v)
         if not todo:
             return
         done = [0]
         lock = threading.Lock()
         emit(PROGRESS, f"查水印 0/{len(todo)}…(一条几秒,点「停」随时停,查完的记着)")
 
-        def one(i):
+        def one(v):
             if stopped():
                 return
-            v = vs[i]
-            emit(i, "查水印中…")
+            emit(v, "查水印中…")
             try:
                 info = {"w": v.checks.get("w", 0), "h": v.checks.get("h", 0), "dur": v.checks.get("dur", 0)}
                 res = WM.detect(v.path, ff, info, stop=stopped)
             except Exception as e:                      # 查不了不拦着(和没查一样),日志里说一声
                 emit(-1, f"「{v.title}」查水印出错:{type(e).__name__} {e}")
-                emit(i, CLEAR)
+                emit(v, CLEAR)
                 return
             if stopped():
-                emit(i, CLEAR)
+                emit(v, CLEAR)
                 return
             v.checks["wm"] = wmstore.put(v.path, res)
             self._remember_check(v)
-            emit(i, CLEAR)
+            emit(v, CLEAR)
             with lock:
                 done[0] += 1
                 k = done[0]
@@ -2308,115 +2895,126 @@ class ApiTab(QWidget):
         with ThreadPoolExecutor(3) as ex:
             list(ex.map(one, todo))
 
+    def _scan_wm(self, rows: list[int], emit, stopped, ff: str):
+        self._scan_wm_vs([self.videos[i] for i in rows], emit, stopped, ff)
+
     def _who(self, rows: list[int]) -> str:
         accs = sorted({self.videos[i].account for i in rows})
         return f"{accs[0]} 的 {len(rows)} 条" if len(accs) == 1 else f"{len(accs)} 个号 {len(rows)} 条"
 
     def run_vertical(self, only: list[int] | None = None):
-        if self.busy():
-            return
-        rows = [i for i in self.target_rows(only) if checks.needs_vertical(self.videos[i].checks) and not self._sent(i)]
-        if not rows:
+        raw = [i for i in self.target_rows(only) if checks.needs_vertical(self.videos[i].checks) and not self._sent(i)]
+        if not raw:
             QMessageBox.information(self, "横屏转竖屏", "这些里没有横屏 / 偏方的(没检查过的先点「检查」)。")
+            return
+        rows = self._idle_rows(raw, "横屏转竖屏")
+        if not rows:
             return
         if not ask(self, "横屏转竖屏", f"{self._who(rows)}转成标准竖屏(1080×1920)?横屏、偏方(3:4 / 正方形)的都转。\n\n转好的用原来的名字放回去,原来的横屏视频直接删掉(转失败的不动)。", "转", "先不"):
             return
-        vs = self.videos
+        target_vs = [self.videos[i] for i in rows]
         ff = vertical.ffmpeg_path()
         words = self.st.get("api_platform_words") or None
 
-        def one(i, emit, stopped):
-            v = vs[i]
-            emit(i, "转竖屏中…")
+        def one(v, emit, stopped):
+            if not _take_encode_slot(emit, v, stopped):
+                return
+            emit(v, "转竖屏中…")
             try:
                 new, _orig = vertical.to_vertical(v.path, ff, stop=stopped, keep_orig=False)   # 用户 2026-10-20:原片不要了
             except Exception as e:
                 if stopped() or str(e) == "停下了":
-                    emit(i, "停下了,没转")
+                    emit(v, "停下了,没转")
                     return
-                emit(i, "转竖屏失败")
+                emit(v, "转竖屏失败")
                 emit(-1, f"「{v.title}」转竖屏失败:{e}")
                 return
+            finally:
+                ENCODE_SEM.release()
             v.path = new
             checks.check_one(v, words, ff)
             v.checks["converted"] = True
             self._remember_check(v)
-            emit(i, CLEAR)
+            emit(v, CLEAR)
 
         def fn(emit, stopped):
             t0, done, lock = time.time(), [0], threading.Lock()
-            emit(PROGRESS, f"转竖屏:已转 0 / {len(rows)} 条…")
+            emit(PROGRESS, f"转竖屏:已转 0 / {len(target_vs)} 条…")
 
-            def step(i):
+            def step(v):
                 if stopped():
                     return
-                one(i, emit, stopped)
+                one(v, emit, stopped)
                 with lock:
                     done[0] += 1
                     k = done[0]
-                left = (time.time() - t0) / k * (len(rows) - k)    # 老手试用:113 条转 7 分半,原来只写「转竖屏…」不知道还要多久
-                emit(PROGRESS, f"转竖屏:已转 {k} / {len(rows)} 条" +
-                     ("" if k == len(rows) else f" · 还要约 {max(1, round(left / 60))} 分钟" if left >= 60 else " · 马上好"))
-            with ThreadPoolExecutor(3) as ex:          # 3 条一起转最快(这台电脑试过)
-                list(ex.map(step, rows))
+                left = (time.time() - t0) / k * (len(target_vs) - k)    # 老手试用:113 条转 7 分半,原来只写「转竖屏…」不知道还要多久
+                emit(PROGRESS, f"转竖屏:已转 {k} / {len(target_vs)} 条" +
+                     ("" if k == len(target_vs) else f" · 还要约 {max(1, round(left / 60))} 分钟" if left >= 60 else " · 马上好"))
+            with ThreadPoolExecutor(3) as ex:          # 3 条一起转最快,重编码共用 ENCODE_SEM 最多 3 条
+                list(ex.map(step, target_vs))
             return "转竖屏做完了"
-        self._start(fn, f"转竖屏:{len(rows)} 条(3 条一起转)")
+        accs = {v.account for v in target_vs}
+        self._start(fn, f"转竖屏:{self._who(rows)}(最多同时 3 条)", kind="vert", accounts=accs)
 
     def run_blur(self, only: list[int] | None = None):
         """查到水印的糊掉(高级检查查出来的框、只糊出现的那几段)。原片挪进「水印原片」。"""
-        if self.busy():
-            return
         from qe import blur
-        rows = [i for i in self.target_rows(only) if checks.wm_blocks((self.videos[i].checks or {}).get("wm"))
-                and not self._sent(i) and blur.boxes_of(self.videos[i].checks["wm"])]
-        if not rows:
+        raw = [i for i in self.target_rows(only) if checks.wm_blocks((self.videos[i].checks or {}).get("wm"))
+               and not self._sent(i) and blur.boxes_of(self.videos[i].checks["wm"])]
+        if not raw:
             QMessageBox.information(self, "模糊水印", "这些里没有查到水印的(还没查的先点「检查 → 高级检查」)。")
+            return
+        rows = self._idle_rows(raw, "模糊水印")
+        if not rows:
             return
         if not ask(self, "模糊水印", f"{self._who(rows)}:把查到的水印糊掉(只糊水印出现的那几段)?\n\n"
                    "原片挪进同一个文件夹里的「水印原片」,不删。糊完鼠标放在那条上能看截图对不对。", "糊掉", "先不"):
             return
-        vs = self.videos
+        target_vs = [self.videos[i] for i in rows]
         ff = vertical.ffmpeg_path()
         words = self.st.get("api_platform_words") or None
 
-        def one(i, emit, stopped):
-            v = vs[i]
+        def one(v, emit, stopped):
             wm = dict(v.checks["wm"])
-            emit(i, "糊水印中…")
+            if not _take_encode_slot(emit, v, stopped):
+                return
+            emit(v, "糊水印中…")
             try:
                 new, _orig = blur.blur(v.path, blur.boxes_of(wm), ff, stop=stopped)
             except Exception as e:
                 if stopped() or str(e) == "停下了":
-                    emit(i, "停下了,没糊")
+                    emit(v, "停下了,没糊")
                     return
-                emit(i, CLEAR)
+                emit(v, CLEAR)
                 emit(-1, f"「{v.title}」模糊水印失败:{e}")
                 return
+            finally:
+                ENCODE_SEM.release()
             v.path = new
             checks.check_one(v, words, ff)
             v.checks["wm"] = wmstore.put(new, wm, ok=True, blurred=True)   # 糊过的不再拦
             self._remember_check(v)
-            emit(i, CLEAR)
+            emit(v, CLEAR)
             emit(-1, f"「{v.title}」糊掉了:{checks.wm_text(wm)}")
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(2) as ex:
-                list(ex.map(lambda i: None if stopped() else one(i, emit, stopped), rows))
+                list(ex.map(lambda v: None if stopped() else one(v, emit, stopped), target_vs))
             return "模糊水印做完了(原片在各自文件夹的「水印原片」里)"
-        self._start(fn, f"模糊水印:{len(rows)} 条")
+        accs = {v.account for v in target_vs}
+        self._start(fn, f"模糊水印:{len(target_vs)} 条", kind="blur", accounts=accs)
 
     def run_ads(self, only: list[int] | None = None):
         """查口播广告:转文字(本地模型,转过的不再转)→ 找广告词。查到的标「口播广告 N 处」不发。"""
-        if self.busy():
-            return
         from qe import asr
         if not asr.model_dir():
             QMessageBox.information(self, "查口播广告", "这台电脑上没有语音识别模型(ainame 的 sense-voice),查不了。")
             return
-        rows = [i for i in self.target_rows(only) if not self._sent(i)]
+        rows = self._idle_rows([i for i in self.target_rows(only) if not self._sent(i)], "查口播广告")
         if not rows:
             return
-        vs = self.videos
+        target_vs = [self.videos[i] for i in rows]
         ff = vertical.ffmpeg_path()
         words = self.st.get("api_platform_words") or None
         from qe import ads
@@ -2425,45 +3023,46 @@ class ApiTab(QWidget):
         def fn(emit, stopped):
             T = asr.shared(ff)
             n = [0]
-            for i in rows:
+            for v in target_vs:
                 if stopped():
                     return "查口播广告停下了(查完的记着)"
-                v = vs[i]
                 if not v.checks:
                     checks.check_one(v, words, ff)
                     self._attach_wm(v)
                 old = wmstore.ADS.get(v.path)
                 if old is None:
-                    emit(i, "听广告中…")
+                    emit(v, "听广告中…")
                     try:
                         sents = T.transcribe(v.path, stop=stopped)
                     except Exception as e:
-                        emit(i, CLEAR)
+                        emit(v, CLEAR)
                         emit(-1, f"「{v.title}」查口播广告出错:{e}")
                         continue
                     if stopped():
-                        emit(i, CLEAR)
+                        emit(v, CLEAR)
                         return "查口播广告停下了(查完的记着)"
                     old = wmstore.ADS.put(v.path, {"hits": ads.groups(sents, kw)})
                 v.checks["ads"] = old
                 self._remember_check(v)
-                emit(i, CLEAR)
+                emit(v, CLEAR)
                 n[0] += 1
-                emit(PROGRESS, f"查口播广告 {n[0]}/{len(rows)}…")
-            bad = sum(1 for i in rows if checks.wm_blocks(vs[i].checks.get("ads")))
-            return (f"查口播广告完了:{len(rows)} 条,有广告 {bad}(鼠标放在「要处理的」上看是哪几句;"
+                emit(PROGRESS, f"查口播广告 {n[0]}/{len(target_vs)}…")
+            bad = sum(1 for v in target_vs if checks.wm_blocks(v.checks.get("ads")))
+            return (f"查口播广告完了:{len(target_vs)} 条,有广告 {bad}(鼠标放在「要处理的」上看是哪几句;"
                     "要剪就点「去水印 / 广告 → 剪掉口播广告」,不是广告就右键「不是广告,能发」)")
-        self._start(fn, f"查口播广告:{self._who(rows)}(一条几秒,转过的不再转)")
+        accs = {v.account for v in target_vs}
+        self._start(fn, f"查口播广告:{self._who(rows)}(一条几秒,转过的不再转)", kind="ads", accounts=accs)
 
     def run_cut(self, only: list[int] | None = None):
         """把查到的口播广告那几句剪掉。原片挪进「广告原片」。"""
-        if self.busy():
-            return
         from qe import ads, cut
-        rows = [i for i in self.target_rows(only) if checks.wm_blocks((self.videos[i].checks or {}).get("ads"))
-                and not self._sent(i)]
-        if not rows:
+        raw = [i for i in self.target_rows(only) if checks.wm_blocks((self.videos[i].checks or {}).get("ads"))
+               and not self._sent(i)]
+        if not raw:
             QMessageBox.information(self, "剪掉口播广告", "这些里没有查到口播广告的(还没查的先点「检查 → 查口播广告」)。")
+            return
+        rows = self._idle_rows(raw, "剪掉口播广告")
+        if not rows:
             return
         lines = []
         for i in rows[:6]:
@@ -2473,35 +3072,39 @@ class ApiTab(QWidget):
         if not ask(self, "剪掉口播广告", f"{self._who(rows)}:把这些广告句剪掉(前后各多剪 0.3 秒)?\n\n" + "\n".join(lines) +
                    ("\n…" if len(rows) > 6 else "") + "\n\n原片挪进同一个文件夹里的「广告原片」,不删。", "剪掉", "先不"):
             return
-        vs = self.videos
+        target_vs = [self.videos[i] for i in rows]
         ff = vertical.ffmpeg_path()
         words = self.st.get("api_platform_words") or None
 
-        def one(i, emit, stopped):
-            v = vs[i]
+        def one(v, emit, stopped):
             hits = list(v.checks["ads"]["hits"])
-            emit(i, "剪广告中…")
+            if not _take_encode_slot(emit, v, stopped):
+                return
+            emit(v, "剪广告中…")
             try:
                 new, _orig, gone = cut.cut(v.path, hits, ff, stop=stopped)
             except Exception as e:
                 if stopped() or str(e) == "停下了":
-                    emit(i, "停下了,没剪")
+                    emit(v, "停下了,没剪")
                     return
-                emit(i, CLEAR)
+                emit(v, CLEAR)
                 emit(-1, f"「{v.title}」剪广告失败:{e}")
                 return
+            finally:
+                ENCODE_SEM.release()
             v.path = new
             checks.check_one(v, words, ff)
             v.checks["ads"] = wmstore.ADS.put(new, {"hits": hits}, ok=True, blurred=True)   # 剪过的不再拦
             self._remember_check(v)
-            emit(i, CLEAR)
+            emit(v, CLEAR)
             emit(-1, f"「{v.title}」剪掉了 {gone} 秒口播广告")
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(2) as ex:
-                list(ex.map(lambda i: None if stopped() else one(i, emit, stopped), rows))
+                list(ex.map(lambda v: None if stopped() else one(v, emit, stopped), target_vs))
             return "剪口播广告做完了(原片在各自文件夹的「广告原片」里)"
-        self._start(fn, f"剪掉口播广告:{len(rows)} 条")
+        accs = {v.account for v in target_vs}
+        self._start(fn, f"剪掉口播广告:{len(target_vs)} 条", kind="cut", accounts=accs)
 
     def set_title_ad_ok(self, i: int, ok: bool):
         """标题有广告词的(视频里八成有广告):人剪好了 / 看过不是广告 → 能发。选了好几条就一起标。"""
@@ -2556,8 +3159,10 @@ class ApiTab(QWidget):
             v.checks["tags"] = topic.split_topics(v.title)["tags"]
             v.checks["platform"] = checks.platform_hits(v.title, self.st.get("api_platform_words") or None)
         hit = self.cache.pop(pkey(old), None)
-        wmstore.move(old, v.path)                        # 查水印 / 口播广告的结果跟着新名字走
+        wmstore.move(old, v.path)                        # 查水印 / 口播广告 / 结尾的结果跟着新名字走
         wmstore.ADS.move(old, v.path)
+        wmstore.CROP.move(old, v.path)
+        wmstore.OUTRO.move(old, v.path)
         if hit:
             self._remember_check(v)
 
@@ -2596,13 +3201,17 @@ class ApiTab(QWidget):
         """处理重名(用户 2026-11-03):重名的(发过同名 / 同一天有几条同名)让 AI 照原标题改一个意思相近的
         (「记住意思必须相近,不能有其他风格」),先列「原 → 新」给人看,点「改」才改;同名封面跟着改,能撤销。"""
         from qe import dupname
-        rows = [i for i in self.target_rows() if i in self._dups and not self._sent(i)]
-        if not rows:
+        raw = [i for i in self.target_rows() if i in self._dups and not self._sent(i)]
+        if not raw:
             QMessageBox.information(self, "处理重名", "没有重名的视频" + ("(选中的里面)" if self.selected_rows() else "") + "。")
             return
-        key = self.st.ai_key()
-        if not key and self.DUP_ASKER is None:
-            QMessageBox.warning(self, "处理重名", "要 AI 改标题,先在「设置」里填阿里百炼 Key。")
+        rows = self._idle_rows(raw, "处理重名")
+        if not rows:
+            return
+        from qe import aiconf
+        key = aiconf.text(self.st)                    # 填了「自己的模型」就问它
+        if not key.key and self.DUP_ASKER is None:
+            QMessageBox.warning(self, "处理重名", "要 AI 改标题,先在「设置」里填阿里百炼 Key(或者「自己的模型」)。")
             return
         used = set(getattr(self, "_sent_keys", {})) | {self._dkey(v.account, v.title) for v in self.videos}
         lock = threading.Lock()
@@ -2653,17 +3262,20 @@ class ApiTab(QWidget):
         """按 Delete(用户 2026-11-03:「我看了后这个视频确实重复了,单击它按 delete 可以删除,文件夹里的也删掉」):
         选中的没发的视频连同名封面挪进旁边的「重复删除」文件夹(网络盘没有回收站,挪走不真删)。"""
         from qe import dupname
-        rows = [i for i in self.selected_rows() if not self._sent(i) and not self.rec.blocked(self.videos[i].path)]
-        if not rows:
+        raw = [i for i in self.selected_rows() if not self._sent(i) and not self.rec.blocked(self.videos[i].path)]
+        if not raw:
             if self.selected_rows():
                 QMessageBox.information(self, "删除", "选中的都已经发了(或结果不明),不能这样删。")
+            return
+        rows = self._idle_rows(raw, "删除")
+        if not rows:
             return
         names = "\n".join(f" · {self.videos[i].title[:30]}" for i in rows[:6]) + ("\n …" if len(rows) > 6 else "")
         if not ask(self, "删除", f"删掉这 {len(rows)} 条视频(连同名封面)?\n\n{names}\n\n"
                                  "挪进同一个文件夹下面的「重复删除」文件夹,软件不再读它们;删错了去那里拿回来。",
                    "删掉", "先不", default_no=True):
             return
-        n = 0
+        n, nicks = 0, {self.videos[i].account for i in rows}
         for i in rows:
             v = self.videos[i]
             try:
@@ -2672,13 +3284,16 @@ class ApiTab(QWidget):
             except OSError as e:
                 self.say(f"「{v.title[:24]}」删不掉:{e.strerror or e}")
         self.say(f"删了 {n} 条(挪进了「重复删除」文件夹)")
-        self.load()
+        self._refresh_accounts(nicks)
 
     def set_topic(self, rows: list[int] | None = None):
         rows = self.selected_rows() if rows is None else rows
-        rows = [i for i in rows if not self._sent(i)]
-        if not rows:
+        raw = [i for i in rows if not self._sent(i)]
+        if not raw:
             QMessageBox.information(self, "批量改话题", "先在列表里选要改的(点号那一行 = 这个号全部;按住 Ctrl 可以多选)。")
+            return
+        rows = self._idle_rows(raw, "批量改话题")
+        if not rows:
             return
         last = str(self.st.get("api_last_topic") or "")
         # 现成的选项:这些视频上已经挂着的话题(按出现次数),再加上次填的;也能直接打字(体验报告)
@@ -2707,26 +3322,38 @@ class ApiTab(QWidget):
         self.say(f"批量改话题:{n} 条改成 #{tag}")
 
     @staticmethod
+    def _tidy_one(old: str) -> str | None:
+        base = titleclean.clean(old) or old
+        out = topic.tidy(base) or base
+        return None if out == old else out
+
+    @staticmethod
     def _tidy_note(old: str) -> str:
-        new = topic.tidy(old)
+        new = ApiTab._tidy_one(old)
         return "去掉结尾空格" if new is not None and new == old.rstrip() else ""
 
     def tidy_titles(self, only: list[int] | None = None):
-        rows = [i for i in self.target_rows(only) if topic.bad_format(self.videos[i].title) and not self._sent(i)]
-        if not rows:
-            QMessageBox.information(self, "整理写法", "这些里没有话题写法不对 / 结尾多空格的。")
+        raw = [i for i in self.target_rows(only) if self._tidy_one(self.videos[i].title) is not None and not self._sent(i)]
+        if not raw:
+            QMessageBox.information(self, "整理写法", "这些里没有要删的杂字或话题写法问题。")
             return
-        ex = "\n".join(f"{self.videos[i].title!r}\n  → {topic.tidy(self.videos[i].title)!r}" for i in rows[:3])
-        if not ask(self, "整理写法", f"{self._who(rows)}话题写法不对 / 结尾多了空格,一键改好?(不用 AI)\n\n比如:\n{ex}\n\n"
+        rows = self._idle_rows(raw, "整理写法")
+        if not rows:
+            return
+        ex = "\n".join(f"{self.videos[i].title!r}\n  → {self._tidy_one(self.videos[i].title)!r}" for i in rows[:3])
+        if not ask(self, "整理写法", f"{self._who(rows)}删掉标题里的杂字 / 联系人 / 孤立 n、修好话题写法,一键改好?(不用 AI)\n\n比如:\n{ex}\n\n"
                                      "同名封面跟着改。改错了点「撤销上次改名」。", "改", "先不"):
             return
-        n = self._rename_rows(rows, topic.tidy, "整理写法", note=self._tidy_note)
+        n = self._rename_rows(rows, self._tidy_one, "整理写法", note=self._tidy_note)
         self.say(f"整理写法:改了 {n} 条")
 
     def edit_title(self, i: int):
         if not (0 <= i < len(self.videos)) or self._sent(i):
             return
         v = self.videos[i]
+        if self.busy(v.account):
+            QMessageBox.information(self, "改标题", f"「{v.account}」正在后台干活,做完或点「停」再改。")
+            return
         hits = (v.checks or {}).get("platform") or []
         t, ok = self._ask_title("标题(= 文件名)" + (f",里面有「{'、'.join(hits)}」" if hits else "") + ":", v.title)
         t = topic.sanitize(t) if ok else ""
@@ -2767,9 +3394,12 @@ class ApiTab(QWidget):
     def replace_titles(self, rows: list[int] | None = None):
         """批量替换标题里的字:「快手热门」换成别的 / 删掉。管选中的,没选管看得见的全部;先预览,改完能撤销(老手试用)。"""
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout
-        rows = [i for i in self.target_rows(rows) if not self._sent(i)]
-        if not rows:
+        raw = [i for i in self.target_rows(rows) if not self._sent(i)]
+        if not raw:
             QMessageBox.information(self, "批量替换", "没有能改的(发过的不改)。")
+            return
+        rows = self._idle_rows(raw, "批量替换")
+        if not rows:
             return
         d = QDialog(self)
         d.setWindowTitle("批量替换标题里的字")
@@ -2819,9 +3449,9 @@ class ApiTab(QWidget):
 
     def run_topic(self, only: list[int] | None = None):
         """整理标题:先删乱码尾巴 / @ 那段(titleclean,不用 AI);话题写法不对的按固定规矩改;挂了好几个话题的 AI 留一个。"""
-        if self.busy():
+        only = self._idle_rows(self.target_rows(only), "整理标题")
+        if not only:
             return
-        only = self.target_rows(only)
 
         def base(v):                                 # 先删乱码尾巴 / @ 那段(titleclean),再看话题
             return titleclean.clean(v.title) or v.title
@@ -2836,9 +3466,10 @@ class ApiTab(QWidget):
         n_ai = sum(1 for i in rows if multi(self.videos[i]))
         n_junk = sum(1 for i in rows if base(self.videos[i]) != self.videos[i].title)
         n_fmt = sum(1 for i in rows if not multi(self.videos[i]) and topic.bad_format(base(self.videos[i])))
-        key = self.st.ai_key() if hasattr(self.st, "ai_key") else ""
+        from qe import aiconf
+        key = aiconf.text(self.st, str(self.st.get("topic_model") or "qwen-plus"))   # 填了「自己的模型」就问它
         no_key = 0
-        if n_ai and not key:                         # 新员工试用:原来没 Key 就整个不改 → 不用 AI 的先改,只跳过要 AI 的
+        if n_ai and not key.key:                         # 新员工试用:原来没 Key 就整个不改 → 不用 AI 的先改,只跳过要 AI 的
             no_key, n_ai = n_ai, 0
             rows = [i for i in rows if not multi(self.videos[i])]
             if not rows:
@@ -2858,12 +3489,11 @@ class ApiTab(QWidget):
         if not ask(self, "整理标题", f"{self._who(only)}里面:\n" + "\n".join(lines) +
                    "\n\n改文件名,同名的封面图跟着改。改错了可以点「撤销上次改名」。", "整理", "先不"):
             return
-        vs = self.videos
+        target_vs = [self.videos[i] for i in rows]
         at = self._op("整理标题")
         lock = threading.Lock()
 
-        def one(i, emit, stopped):
-            v = vs[i]
+        def one(v, emit, stopped):
             if stopped():
                 return
             try:
@@ -2882,28 +3512,35 @@ class ApiTab(QWidget):
                 if not name and b0 != v.title:          # 只删了乱码 / @
                     name = b0
                 if not name:
-                    emit(i, "")
+                    emit(v, "")
                     return
                 note = self._tidy_note(v.title) if not multi(v) else ""
                 with lock:
                     moves = topic.rename_logged(v.path, name, self.ledger, at)
                 old = v.title
                 self._after_rename(v, moves)
-                emit(i, "")
+                emit(v, "")
                 emit(-1, f"整理标题:{old} → {v.title}" + (f"({note})" if note else ""))
             except Exception as e:
                 emit(-1, f"「{v.title}」整理标题失败:{e}")
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(4) as ex:
-                list(ex.map(lambda i: one(i, emit, stopped), rows))
+                list(ex.map(lambda v: one(v, emit, stopped), target_vs))
             return "整理标题做完了"
-        self._start(fn, f"整理标题:{len(rows)} 条" + (f"(其中 {n_ai} 条问 AI)" if n_ai else ""))
+        accs = {v.account for v in target_vs}
+        self._start(fn, f"整理标题:{len(target_vs)} 条" + (f"(其中 {n_ai} 条问 AI)" if n_ai else ""),
+                    kind="topic", accounts=accs)
 
     def undo_topic(self):
         b = self.ledger.last()
         if not b:
             QMessageBox.information(self, "撤销", "没有能撤销的改名。")
+            return
+        paths = {pkey(p) for g in topic.Ledger.groups_of(b) for p, _ in g}
+        touched = {v.account for v in self.videos if pkey(v.path) in paths}
+        if any(self.busy(a) for a in touched):
+            QMessageBox.information(self, "撤销", "上次改名涉及的号正在后台干活,等做完再撤销。")
             return
         n = len(topic.Ledger.groups_of(b))
         if not ask(self, "撤销", f"撤销「{topic.Ledger.label(b)}」:把那次改的 {n} 条视频(和跟着改的封面)改回原名?\n\n"
@@ -2912,7 +3549,7 @@ class ApiTab(QWidget):
         ok, bad, skipped = self.ledger.undo_last(skip=self.rec.blocked)
         self.say(f"撤销「{topic.Ledger.label(b)}」:改回 {ok} 个文件" + (f",{bad} 个改不回(文件不在了或原名被占)" if bad else "") +
                  (f";{skipped} 条已经发了(或结果不明),不改回去" if skipped else ""))
-        self.load()
+        self._refresh_accounts(touched)
 
     # ---------------- 封面传不传得上(罐头里企鹅号登没登着) ----------------
     def _cover_check(self) -> str:
@@ -2953,7 +3590,7 @@ class ApiTab(QWidget):
         auto = 定时发布到点了(人定时的时候已经确认过):不弹框,有问题的 / 没检查出来的跳过,能发的都发。"""
         no_cov, self._nocover_once = self._nocover_once, False     # 红卡片上点了「这次不要封面」:只管这一次
         d = self.day()
-        if not d or self.busy():
+        if not d or self._is_publishing():
             return
         if auto:
             QMessageBox = self._auto_box = _SayBox(self.say)   # noqa: N806 定时发布没人看着:要弹的框改成写日志
@@ -2961,7 +3598,10 @@ class ApiTab(QWidget):
             from PySide6.QtWidgets import QMessageBox
         picked = only is not None or bool(self.selected_rows())
         self._pub_dirs = {}                              # 这次发出去的视频原来在哪个文件夹 → 号(发完看空没空,空了删)
-        scope = self.target_rows(only)
+        raw_scope = self.target_rows(only)
+        if not raw_scope:
+            return
+        scope = [i for i in raw_scope if not self.busy(self.videos[i].account)] if auto else self._idle_rows(raw_scope, "发布")
         if not scope:
             return
         unchecked = [i for i in scope if not self.videos[i].checks and not self._sent(i)]
@@ -3028,7 +3668,7 @@ class ApiTab(QWidget):
                                     (f"\n\n它们还没发的 {moved} 条挪到了明天的文件夹({tmr})。" if moved else "") +
                                     "\n\n真要多发:去「设置」里打开「开闸:允许超过每天规定条数」。")
             if moved:
-                self.load()
+                self._refresh_accounts(set(full))
             return
         plan_n = sum(len(idx) if left_of[n] is None else min(len(idx), left_of[n]) for n, idx in by_acc.items())
         over = sum(len(idx) for idx in by_acc.values()) - plan_n
@@ -3037,6 +3677,10 @@ class ApiTab(QWidget):
                                                if left_of[n] is not None and len(idx) > left_of[n]) +
                        f",多的 {over} 条发够以后挪到明天的文件夹({tmr})。\n" if over else "") +
                       (f"今天已经发够的号这次不发:{'、'.join(full)}(它们没发的也挪到明天)。\n" if full else ""))
+        if self.SHARP_CHECK:
+            todo = checkline.unchecked_text([self._check_pair(i) for i in rows])
+            if todo:
+                quota_line += todo + "\n"
         par = max(1, _num(self.st.get("api_threads"), 1))
         per_acc = max(1, min(5, _num(self.st.get("api_per_acc"), 1)))   # 同一个号一次传几条(用户 2026-10-19,默认 1)
         gap = max(0.0, float(_num(self.st.get("api_interval"), 5)))
@@ -3088,7 +3732,7 @@ class ApiTab(QWidget):
                      head="现在马上发出去(不是定时),发了只能去后台删",
                      extra="改成定时…", on_extra=self.schedule_clicked, danger=True):
             return
-        vs = self.videos
+        by_acc_vs = {n: [self.videos[i] for i in idx] for n, idx in by_acc.items()}
         gate = {"last": 0.0}
         glock = threading.Lock()
         upsem = threading.Semaphore(6 if per_acc > 1 else 10 ** 6)       # 所有号加起来同时最多传 6 条(4 个号 × 5 条挤在一起反而慢)
@@ -3108,41 +3752,40 @@ class ApiTab(QWidget):
                     time.sleep(0.2)
             return not stopped()
 
-        def done_one(emit):
+        def done_one(emit, stopped):
             with glock:
                 gate["last"] = time.time()
             bump("done")
-            if self.job and self.job._stop.is_set():
+            if stopped():
                 return
             emit(PROGRESS, f"正在发 {min(stats['done'], plan_n)}/{plan_n} · 成功 {stats['ok']} · 没发成 {stats['fail']}" +
                  (f" · 结果不明 {stats['unsure']}" if stats["unsure"] else "") + "(点「停」:手上这条做完就停)")
 
-        def acc_job(nick, idx, emit, stopped):
+        def acc_job(nick, idx_vs, emit, stopped):
             from qe.omapi import ApiError, Client, Stopped, Unknown, redact
             a = accs[nick]
             try:
                 cl = Client(a["client_id"], apiacc.unseal(a["secret"]))
             except Exception as e:
-                for i in idx:
-                    emit(i, "没发成:账号密钥读不出来")
+                for v in idx_vs:
+                    emit(v, "没发成:账号密钥读不出来")
                 emit(-1, f"「{nick}」账号密钥读不出来(换了电脑 / Windows 用户?点「搬账号…」重新搬):{type(e).__name__}")
-                bump("fail", len(idx))
+                bump("fail", len(idx_vs))
                 return
             try:
                 cat = int(a.get("category"))
             except (TypeError, ValueError):
-                for i in idx:
-                    emit(i, "没发成:号的分类不对")
+                for v in idx_vs:
+                    emit(v, "没发成:号的分类不对")
                 emit(-1, f"「{nick}」的分类不对({a.get('category')!r}),先不发 —— 去「设置」里重新「从旧软件搬账号…」")
-                bump("fail", len(idx))
+                bump("fail", len(idx_vs))
                 return
-            def one(k, i, turn=True):
+            def one(k, v, turn=True):
                 """发一条:返回 "ok" / "next"(这条跳过或没发成,接着下一条)/ "stop"(停了)/ "fatal"(号的密钥坏了,这个号后面的别发)。"""
                 if stopped():
                     return "stop"
-                v = vs[i]
                 if self.rec.blocked(v.path):              # 防重发:已发 / 结果不明都不发
-                    emit(i, self.rec.status_of(v.path))
+                    emit(v, self.rec.status_of(v.path))
                     return "next"
                 if turn and not wait_turn(stopped):
                     return "stop"
@@ -3158,6 +3801,9 @@ class ApiTab(QWidget):
                 src = apicover.find(v.path) if cmode != "不传" else ""
                 if src and blackcover.is_black(src):      # 员工放的封面是黑的(截了黑的第一帧,11-06 查到的黑封面都是这样):换一帧
                     emit(-1, f"「{v.title}」放的封面是黑的,换成软件挑的一帧")
+                    src = ""
+                elif src and blackcover.is_blurry(src):   # 员工放的封面太模糊(11-16 查到的模糊封面都是同名 .jpg 本身糊):换一帧
+                    emit(-1, f"「{v.title}」放的封面太模糊,换成软件挑的一帧")
                     src = ""
                 auto_cov = False
                 if not src and cmode != "不传":
@@ -3175,15 +3821,15 @@ class ApiTab(QWidget):
                 try:
                     r = cl.send(v.path, v.title.strip(), cat, stop=stopped, before_publish=begin, cover=cimg,
                                 cover_upload=omcover.upload,
-                                on_progress=lambda o, s, i=i: emit(i, f"上传 {o * 100 // max(1, s)}%({o >> 20}/{s >> 20}MB)"),
-                                log=lambda m, i=i: emit(i, m + "…"))
+                                on_progress=lambda o, s, v=v: emit(v, f"上传 {o * 100 // max(1, s)}%({o >> 20}/{s >> 20}MB)"),
+                                log=lambda m, v=v: emit(v, m + "…"))
                 except Stopped:
-                    emit(i, "停下了,没发")
+                    emit(v, "停下了,没发")
                     return "stop"
                 except _Taken:                            # 别的号刚发过 / 正在发同一个文件:这条不发
-                    emit(i, self.rec.status_of(v.path) or "已发")
+                    emit(v, self.rec.status_of(v.path) or "已发")
                     emit(-1, f"「{nick}」{v.title}:这个文件别的号已经发了 / 正在发,这次不发")
-                    done_one(emit)
+                    done_one(emit, stopped)
                     return "next"
                 except Unknown as e:                      # 发布请求发出去了没收到回话:可能发了,不能自动再发
                     keep = f"vid={rid['vid']};" if rid.get("vid") else ""    # 视频编号留着:软件之后按它去企鹅号查发没发
@@ -3191,13 +3837,13 @@ class ApiTab(QWidget):
                         self.rec.api_finish(rid["id"], "结果不明", keep + str(e))
                     else:
                         self.rec.api_result(v, "结果不明", keep + str(e))
-                    self.why[i] = str(e)
+                    emit(v, f"__WHY__:{e}")
                     with slock:
                         stats["fails"].append((v.title, "结果不明(去后台看一眼)"))
-                    emit(i, "结果不明")
+                    emit(v, "结果不明")
                     emit(-1, f"「{nick}」{v.title}:结果不明 —— 软件过几分钟自己去企鹅号查,查到了自动记成已发")
                     bump("unsure")
-                    done_one(emit)
+                    done_one(emit, stopped)
                     return "unsure"                       # 可能已经发了:算进今天的条数(宁可少发也不多发)
                 except Exception as e:
                     raw = redact(str(e)) if isinstance(e, ApiError) else f"{type(e).__name__}: {redact(str(e))}"
@@ -3208,11 +3854,11 @@ class ApiTab(QWidget):
                         self.rec.api_finish(rid["id"], "没发成", raw)
                     else:
                         self.rec.api_result(v, "没发成", raw)
-                    self.why[i] = raw
-                    emit(i, short)
+                    emit(v, f"__WHY__:{raw}")
+                    emit(v, short)
                     emit(-1, f"「{nick}」{v.title}:{tip}")         # 原话放鼠标悬停里(界面不放开发者话)
                     bump("fail")
-                    done_one(emit)
+                    done_one(emit, stopped)
                     if getattr(e, "fatal", False):        # 换不到 token:这个号后面的都别试了,标出来
                         return "fatal"
                     return "next"
@@ -3230,9 +3876,9 @@ class ApiTab(QWidget):
                     else:
                         _retry(lambda: self.rec.api_result(v, "已发", note))
                 except Exception as e:                    # 记录库写不进去(被别的程序锁住):「发布中」那笔还在,不会重发
-                    emit(i, "已发(但没记上,去后台核对)")
+                    emit(v, "已发(但没记上,去后台核对)")
                     emit(-1, f"「{v.title}」发出去了,但发布记录写不进去({type(e).__name__}),先不挪文件。软件不会再发它;去后台核对一下")
-                    done_one(emit)
+                    done_one(emit, stopped)
                     return "ok"
                 try:
                     old = v.path
@@ -3244,14 +3890,14 @@ class ApiTab(QWidget):
                     emit(-1, f"「{v.title}」发了,但挪不走:{e}(发过的记着呢,不会重发)")
                 except Exception:
                     pass
-                emit(i, "已发" if r["status"] == "成功" else "已发(平台处理中)")
-                done_one(emit)
+                emit(v, "已发" if r["status"] == "成功" else "已发(平台处理中)")
+                done_one(emit, stopped)
                 return "ok"
 
             def fatal_rest(left):
-                for j in left:
-                    self.rec.api_result(vs[j], "没发成", "没发:号的密钥坏了(没轮到)")
-                    emit(j, "没发:号的密钥坏了")
+                for v in left:
+                    self.rec.api_result(v, "没发成", "没发:号的密钥坏了(没轮到)")
+                    emit(v, "没发:号的密钥坏了")
                 bump("skip", len(left))
                 with slock:
                     stats["bad_acc"].append(nick)
@@ -3263,11 +3909,11 @@ class ApiTab(QWidget):
             need = left_of.get(nick)
             okc, pos = 0, 0
             try:
-                while pos < len(idx) and (need is None or okc < need):
+                while pos < len(idx_vs) and (need is None or okc < need):
                     if stopped():
                         return
                     size = per_acc if need is None else min(per_acc, need - okc)
-                    grp = list(enumerate(idx[pos:pos + size], pos))
+                    grp = list(enumerate(idx_vs[pos:pos + size], pos))
                     pos += len(grp)
                     if per_acc == 1:                           # 一条一条发(原来的样子)
                         res1 = [one(*grp[0])]
@@ -3278,7 +3924,7 @@ class ApiTab(QWidget):
                             res1 = list(ex.map(run1, grp))
                     okc += res1.count("ok") + res1.count("unsure")
                     if "fatal" in res1:
-                        fatal_rest(idx[pos:])
+                        fatal_rest(idx_vs[pos:])
                         return
                     if "stop" in res1:
                         return
@@ -3288,7 +3934,7 @@ class ApiTab(QWidget):
 
         def fn(emit, stopped):
             with ThreadPoolExecutor(par) as ex:
-                for n, f in [(n, ex.submit(acc_job, n, idx, emit, stopped)) for n, idx in by_acc.items()]:
+                for n, f in [(n, ex.submit(acc_job, n, idx_vs, emit, stopped)) for n, idx_vs in by_acc_vs.items()]:
                     try:
                         f.result()
                     except Exception as e:
@@ -3311,6 +3957,7 @@ class ApiTab(QWidget):
                        (f" · 没发够(素材不够 / 没发成):{'、'.join(short)}" if short else "") +
                        (f" · {len(stats['nocov'])} 条封面没传上(平台自己截的)" if stats["nocov"] else ""))
             self._reload_after = bool(spilled)
+            self._spilled_nicks = set(by_acc) | set(full) if spilled else set()
             self._cov_after = list(stats["nocov"])
             bad = stats["fail"] or stats["unsure"] or stats["skip"]
             lst = "".join(f"\n · {t[:26]}:{why}" for t, why in stats["fails"][:6]) + \
@@ -3326,7 +3973,8 @@ class ApiTab(QWidget):
             return summary
         self._pub_begin(plan_n)
         self._start(fn, f"开始发布:{len(rows)} 条," + ("一条一条发" if par == 1 else f"{min(par, len(by_acc))} 个号一起发") +
-                    (f",同一个号一次传 {per_acc} 条" if per_acc > 1 else "") + f",间隔 {gap:g} 秒")
+                    (f",同一个号一次传 {per_acc} 条" if per_acc > 1 else "") + f",间隔 {gap:g} 秒",
+                    kind="pub", accounts=set(by_acc))
 
     # ---------------- 定时发布(到点自己点「发布」,发到完为止) ----------------
     def _sched_changed(self):

@@ -84,7 +84,14 @@ def score(png: bytes) -> float:
     m, s = float(img.mean()), float(img.std())
     if m < DARK or m > BRIGHT or s < FLAT:
         return -1.0
-    sharp = float(cv2.Laplacian(img, cv2.CV_64F).var())
+    # 分块算清晰度(80% 分位):避免画面全糊、只有底下露一行清楚字幕的帧(如转场帧)被当成清楚画面挑中
+    gh, gw = img.shape
+    bh, bw = max(16, gh // 6), max(16, gw // 6)
+    vals = [float(cv2.Laplacian(img[y:y + bh, x:x + bw], cv2.CV_64F).var())
+            for y in range(0, gh - bh + 1, bh) for x in range(0, gw - bw + 1, bw)]
+    sharp = float(np.percentile(vals, 80)) if vals else float(cv2.Laplacian(img, cv2.CV_64F).var())
+    if sharp < 25.0:
+        return -1.0
     return s * (sharp ** 0.5)
 
 

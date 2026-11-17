@@ -212,9 +212,12 @@ def ask_ai(own: str, titles: list[str], key: str, model: str = "qwen-plus",
     return {t: (g if g and b.get(t) == g else "") for t, g in a.items()}
 
 
-def _ask_once(own: str, titles: list[str], key: str, model: str, base_url: str, timeout: int) -> dict:
+def _ask_once(own: str, titles: list[str], key, model: str, base_url: str, timeout: int) -> dict:
+    """key:百炼 Key 或 aiconf.AI(自己的模型,用它的地址和模型)。"""
     import requests
-    if not key:
+    from .aiconf import as_ai, clean, tokens
+    ai = as_ai(key, model, base_url)
+    if not ai.key:
         raise RuntimeError("要用 AI 判断游戏,先在「设置」里填阿里百炼 Key")
     names = list(_WORDS)
     lines = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(titles))
@@ -226,15 +229,16 @@ def _ask_once(own: str, titles: list[str], key: str, model: str, base_url: str, 
               f"《{own}》自己有的地图、模式、活动名更不算。拿不准一律写「看不出」。\n"
               '只回一个 JSON 数组,每项 {"i": 序号, "game": "游戏名或看不出", "word": "标题里证明是那个游戏的原词(看不出就空)"},不要别的字。\n\n'
               + lines)
-    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 1200}
-    if "dashscope" in base_url:
-        body["enable_thinking"] = False
-    r = requests.post(base_url.rstrip("/") + "/chat/completions", json=body,
-                      headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, timeout=timeout)
+    body = {"model": ai.model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": tokens(ai, 1200), **ai.extra()}
     try:
-        raw = r.json()["choices"][0]["message"]["content"]
+        r = requests.post(ai.url(), json=body, headers={"Authorization": f"Bearer {ai.key}", "Content-Type": "application/json"}, timeout=timeout)
+    except (requests.RequestException, ValueError):      # ValueError:Key 里有中文
+        raise RuntimeError(f"连不上{ai.who}(网络?)")
+    try:
+        raw = clean(r.json()["choices"][0]["message"]["content"])
     except Exception:
-        raise RuntimeError(f"AI 没回话:{r.status_code} {r.text[:120]}")
+        from .aierr import why
+        raise RuntimeError(why(r, ai.who) or f"{ai.who}没回话:{r.status_code} {r.text[:120]}")
     m = re.search(r"\[.*\]", raw, re.S)
     try:
         arr = json.loads(m.group(0)) if m else []
