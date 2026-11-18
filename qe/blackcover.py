@@ -16,7 +16,9 @@ import time
 from .config import data_dir
 
 BRIGHT, LIMIT = 40, 0.03
-BLUR_LIMIT = 25.0
+TOP_LIMIT = 0.015
+BLUR_LIMIT = 28.0
+_DIRECT = None
 
 
 def _store_path():
@@ -24,14 +26,14 @@ def _store_path():
 
 
 def is_black_img(im) -> bool:
-    """im = 一张 PIL 图。"""
+    """im = 一张 PIL 图:全图几乎全黑,或顶上 75% 几乎全黑(只剩最底下小字幕 / 「加载中」黄条)都算黑封面。"""
     import numpy as np
     a = np.asarray(im.convert("L").resize((160, 160)))
-    return float((a > BRIGHT).mean()) < LIMIT
+    return float((a > BRIGHT).mean()) < LIMIT or float((a[:120] > BRIGHT).mean()) < TOP_LIMIT
 
 
 def block_sharpness(im) -> float:
-    """去掉黑边后按 6×6 分块算清晰度(80% 分位):避免单行字幕把整张模糊图的分数拉高。纯色图给 999(不算模糊照片)。"""
+    """去掉黑边、再避开最底一行字幕 / 游戏底栏后按 6×6 分块算清晰度(80% 分位)。纯色图给 999(不算模糊照片)。"""
     import cv2
     import numpy as np
     from . import sharp
@@ -45,8 +47,10 @@ def block_sharpness(im) -> float:
                     interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_CUBIC)
     gh, gw = g2.shape
     bh, bw = max(16, gh // 6), max(16, gw // 6)
+    rows = list(range(0, gh - bh + 1, bh))
+    use_rows = rows[:-1] if len(rows) >= 4 else rows    # 去掉最底一行(字幕条 / 游戏底栏),免得画面糊/空但底栏拉高分数
     vals = [float(cv2.Laplacian(g2[y:y + bh, x:x + bw], cv2.CV_64F).var())
-            for y in range(0, gh - bh + 1, bh) for x in range(0, gw - bw + 1, bw)]
+            for y in use_rows for x in range(0, gw - bw + 1, bw)]
     if not vals:
         return float(cv2.Laplacian(g2, cv2.CV_64F).var())
     return float(np.percentile(vals, 80))
@@ -89,10 +93,21 @@ def is_blurry(path: str) -> bool:
 
 
 def _fetch(url: str) -> bytes:
+    """优先直连企鹅号图床(不走本机代理,免得代理断线导致封面读不出来);直连不通再退回走系统代理。"""
+    global _DIRECT
     import requests
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    return r.content
+    if _DIRECT is None:
+        s = requests.Session()
+        s.trust_env = False
+        _DIRECT = s
+    try:
+        r = _DIRECT.get(url, timeout=30)
+        r.raise_for_status()
+        return r.content
+    except requests.RequestException:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        return r.content
 
 
 def accounts() -> list[dict]:
@@ -103,19 +118,31 @@ def accounts() -> list[dict]:
     return out + [a for a in apiacc.qload() if a.get("nick") not in have]
 
 
-def scan_one(a: dict, start: str, end: str, stopped=None, make_client=None, fetch=None) -> tuple[list[dict], int]:
-    """查一个号 start~end(「2026-11-06」)发的:返回 ([黑封面 / 模糊封面], 读不出来的几张)。删掉的不算。"""
+def scan_one(a: dict, start: str, end: str, stopped=None, make_client=None, fetch=None,
+             stats: dict | None = None) -> tuple[list[dict], int]:
+    """查一个号 start~end(「2026-11-06」)发的:返回 ([黑封面 / 模糊封面], 读不出来的几张)。删掉的不算。
+    还在处理中(flag=10/处理中/审核中)且平台还没给封面图的不算读不出来,记在 stats['pending'] 里。"""
     from PIL import Image
     from . import apiacc, omapi, verify
     cl = (make_client or (lambda x: omapi.Client(x["client_id"], apiacc.unseal(x["secret"]))))(a)
-    found, bad = [], 0
-    for p in verify.platform_between(cl, start, end, stopped=stopped):
+    items = None
+    if make_client is None and verify._can_web():
+        web = verify.web_between(a.get("nick") or "", start, end, cl=cl, stopped=stopped)
+        if web is not None:
+            items = [p for p in web if start <= (p.get("time") or "")[:10] <= end]
+    if items is None:
+        items = verify.platform_between(cl, start, end, stopped=stopped)
+    found, bad, pending = [], 0, 0
+    for p in items:
         if stopped and stopped():
             break
         if p.get("deleted"):
             continue
         if not p.get("img"):
-            bad += 1
+            if str(p.get("flag") or "") in ("10", "处理中", "审核中"):
+                pending += 1
+            else:
+                bad += 1
             continue
         try:
             with Image.open(io.BytesIO((fetch or _fetch)(p["img"]))) as im:
@@ -125,6 +152,8 @@ def scan_one(a: dict, start: str, end: str, stopped=None, make_client=None, fetc
                                   "url": p.get("url") or "", "aid": p.get("aid") or "", "kind": kind})
         except Exception:
             bad += 1
+    if stats is not None:
+        stats["pending"] = stats.get("pending", 0) + pending
     return found, bad
 
 

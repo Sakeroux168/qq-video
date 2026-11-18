@@ -21,6 +21,7 @@ class BlackWorker(QThread):
         self.items: list[dict] = []
         self.errs: list[str] = []
         self.bad = 0
+        self.pending = 0
         self.exported = 0
         self.stop = False
 
@@ -28,7 +29,9 @@ class BlackWorker(QThread):
         import concurrent.futures as cf
 
         def one(a):
-            return blackcover.scan_one(a, self.day, self.day2, stopped=lambda: self.stop)
+            st_info = {}
+            black, bad = blackcover.scan_one(a, self.day, self.day2, stopped=lambda: self.stop, stats=st_info)
+            return black, bad, st_info.get("pending", 0)
         n = 0
         with cf.ThreadPoolExecutor(6) as ex:
             futs = {ex.submit(one, a): a for a in self.accounts}
@@ -36,9 +39,10 @@ class BlackWorker(QThread):
                 n += 1
                 self.step.emit(f"查了 {n} / {len(futs)} 个号…")
                 try:
-                    black, bad = f.result()
+                    black, bad, pend = f.result()
                     self.items += black
                     self.bad += bad
+                    self.pending += pend
                 except Exception as e:
                     self.errs.append(f"{futs[f].get('nick')}:{type(e).__name__}")
         self.items.sort(key=lambda x: (x["nick"], x["time"]))
@@ -198,6 +202,7 @@ class BlackDialog(QDialog):
         self.fill(w.items)
         more = [f"{len(w.errs)} 个号没查成({w.errs[0]})"] if w.errs else []
         more += [f"{w.bad} 张封面读不出来"] if w.bad else []
+        more += [f"{w.pending} 张还在处理中(平台暂未生成封面)"] if getattr(w, "pending", 0) else []
         if more:
             self.lab_done.setText(self.lab_done.text() + ";" + ";".join(more))
         if self.on_scan:

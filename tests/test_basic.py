@@ -7548,6 +7548,47 @@ def test_verify_web_and_lag(tmp: Path):
           f"开着罐头直读实时网页列表:2 条已发对上,只勾真漏掉的 1 条 -> {r_web}")
 
 
+def test_black_cover_v2(tmp: Path):
+    print("[黑/模糊封面优化:底栏黄字黑屏、顶模糊+底工具栏、处理中不误算读不出]")
+    import io
+    from PIL import Image, ImageDraw, ImageFilter
+    from qe import blackcover as B
+
+    # 1. 上面 75%+ 全黑、只剩最底下一条亮黄色字幕块(11-17 DNF「加载中」那种) -> 算黑封面
+    blk_bar = Image.new("RGB", (640, 360), "black")
+    ImageDraw.Draw(blk_bar).rectangle([200, 315, 440, 355], fill=(250, 220, 40))
+    check(B.is_black_img(blk_bar), "顶上全黑只剩底下黄条字幕:算黑封面")
+
+    # 2. 上面 85% 全糊(只有暗场/糊景),仅最底一行有锐利游戏底栏文字 -> 避开最底一行后依然判成模糊封面
+    base = Image.new("RGB", (640, 360), (52, 58, 76))
+    db = ImageDraw.Draw(base)
+    db.rectangle([40, 20, 600, 260], fill=(74, 80, 102))
+    blur_hud = base.filter(ImageFilter.GaussianBlur(12))
+    dh = ImageDraw.Draw(blur_hud)
+    for x in range(20, 620, 28):
+        dh.rectangle([x, 316, x + 16, 352], fill=(240, 210, 60), outline=(0, 0, 0), width=2)
+    check(B.is_blurry_img(blur_hud) and B.bad_kind_img(blur_hud) == "模糊封面",
+          f"顶80%全糊但底下一行游戏UI很锐利:依然判成模糊封面 -> {B.block_sharpness(blur_hud):.1f}")
+
+    # 3. 平台还在「处理中」(flag=10) 没出封面图 -> 记成 pending,不算 bad(读不出来)
+    class Cl:
+        def list_articles(self, page, limit):
+            return {"total": 2, "articles": [] if page > 1 else [
+                {"article_id": "P1", "article_title": "处理中那条", "article_imgurl": "", "article_del_flag": "正常",
+                 "article_pub_time": "2026-11-17 19:00:00", "article_pub_flag": "10", "article_video_info": {"vid": "v1"}},
+                {"article_id": "P2", "article_title": "糊图", "article_imgurl": "u_blur", "article_del_flag": "正常",
+                 "article_pub_time": "2026-11-17 19:01:00", "article_pub_flag": "发布成功", "article_video_info": {"vid": "v2"}},
+            ]}
+
+    buf = io.BytesIO()
+    blur_hud.save(buf, "JPEG")
+    st_info = {}
+    got, bad = B.scan_one({"nick": "甲"}, "2026-11-17", "2026-11-17", make_client=lambda a: Cl(),
+                          fetch=lambda u: buf.getvalue(), stats=st_info)
+    check(len(got) == 1 and got[0]["title"] == "糊图" and bad == 0 and st_info.get("pending") == 1,
+          f"处理中(10)没图不算读不出,记在 pending -> got={got}, bad={bad}, st_info={st_info}")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -7646,6 +7687,7 @@ if __name__ == "__main__":
     test_per_account_concurrency(tmp)
     test_title_extra_clean(tmp)
     test_verify_web_and_lag(tmp)
+    test_black_cover_v2(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
