@@ -5,6 +5,8 @@ client_secret 用 Windows 自带的 DPAPI 加密(只有这台电脑、这个 Win
 """
 import base64
 import ctypes
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -35,12 +37,72 @@ def _crypt(data: bytes, protect: bool) -> bytes:
         ctypes.windll.kernel32.LocalFree(out.pbData)
 
 
+_PORT_PREFIX = "PORT1:"
+
+
+def _port_key_path():
+    return data_dir() / ".迁移钥匙"
+
+
+def _port_key(create: bool = False) -> bytes:
+    p = _port_key_path()
+    if p.is_file():
+        raw = p.read_bytes()
+        if len(raw) >= 32:
+            return raw[:32]
+    if not create:
+        raise OSError("找不到跨电脑账号钥匙(.迁移钥匙),16 个号请重新搬一次账号,教育号请重新「登录取钥匙」")
+    k = os.urandom(32)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_bytes(k)
+    os.replace(tmp, p)
+    return k
+
+
+def _port_stream(key: bytes, nonce: bytes, n: int) -> bytes:
+    out = bytearray()
+    i = 0
+    while len(out) < n:
+        out += hashlib.sha256(key + nonce + i.to_bytes(4, "big")).digest()
+        i += 1
+    return bytes(out[:n])
+
+
+def seal_portable(s: str) -> str:
+    """用数据目录下的独立钥匙(.迁移钥匙)加密保存,跨电脑 / 换 Windows 用户照样解得开。"""
+    key = _port_key(create=True)
+    raw = (s or "").encode("utf-8")
+    nonce = os.urandom(16)
+    ks = _port_stream(key, nonce, len(raw))
+    ct = bytes(a ^ b for a, b in zip(raw, ks))
+    mac = hmac.new(key, b"PORT1" + nonce + ct, hashlib.sha256).digest()[:16]
+    return _PORT_PREFIX + base64.b64encode(nonce + mac + ct).decode("ascii")
+
+
 def seal(s: str) -> str:
+    if _port_key_path().is_file():
+        return seal_portable(s)
     return base64.b64encode(_crypt(s.encode("utf-8"), True)).decode("ascii")
 
 
 def unseal(s: str) -> str:
-    return _crypt(base64.b64decode(s or ""), False).decode("utf-8") if s else ""
+    if not s:
+        return ""
+    if s.startswith(_PORT_PREFIX):
+        try:
+            blob = base64.b64decode(s[len(_PORT_PREFIX):])
+        except Exception as e:
+            raise OSError("跨电脑账号钥匙格式损坏") from e
+        if len(blob) < 32:
+            raise OSError("跨电脑账号钥匙格式损坏")
+        key = _port_key(create=False)
+        nonce, mac, ct = blob[:16], blob[16:32], blob[32:]
+        want = hmac.new(key, b"PORT1" + nonce + ct, hashlib.sha256).digest()[:16]
+        if not hmac.compare_digest(mac, want):
+            raise OSError("跨电脑账号钥匙校验失败(换错 .迁移钥匙 了?)")
+        ks = _port_stream(key, nonce, len(ct))
+        return bytes(a ^ b for a, b in zip(ct, ks)).decode("utf-8")
+    return _crypt(base64.b64decode(s), False).decode("utf-8")
 
 
 def store_path():

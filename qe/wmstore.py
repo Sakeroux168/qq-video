@@ -26,7 +26,15 @@ def _sig(path: str):
 
 
 def _view(r: dict) -> dict:
-    return {"hits": r.get("hits") or [], "shot": r.get("shot") or "", "ok": bool(r.get("ok")),
+    shot = r.get("shot") or ""
+    if shot and not os.path.isfile(shot):
+        for sub in ("结尾截图", "水印截图"):
+            if f"\\{sub}\\" in shot or f"/{sub}/" in shot:
+                alt = data_dir() / sub / os.path.basename(shot)
+                if alt.is_file():
+                    shot = str(alt)
+                break
+    return {"hits": r.get("hits") or [], "shot": shot, "ok": bool(r.get("ok")),
             "blurred": bool(r.get("blurred"))}
 
 

@@ -22,7 +22,11 @@ def app_dir() -> Path:
 
 def data_dir() -> Path:
     d = os.environ.get("QE_DATA_DIR", "").strip()
-    p = Path(d) if d else Path(os.environ.get("LOCALAPPDATA") or str(Path.home())) / APP_NAME
+    if d:
+        p = Path(d)
+    else:
+        portable = app_dir() / "数据"
+        p = portable if portable.is_dir() else Path(os.environ.get("LOCALAPPDATA") or str(Path.home())) / APP_NAME
     p.mkdir(parents=True, exist_ok=True)
     return p
 

@@ -7589,6 +7589,67 @@ def test_black_cover_v2(tmp: Path):
           f"处理中(10)没图不算读不出,记在 pending -> got={got}, bad={bad}, st_info={st_info}")
 
 
+def test_portable_bundle(tmp: Path):
+    print("\n[打包便携数据:优先读同目录「数据」、跨电脑账号钥匙、迁移后截图兜底]")
+    from qe import apiacc, config as cfg, wmstore
+    old_env = os.environ.get("QE_DATA_DIR")
+    old_app = cfg.app_dir
+    app_fake = tmp / "fake_app"
+    app_fake.mkdir()
+    port_dir = app_fake / "数据"
+    try:
+        # 1. data_dir: 未设 QE_DATA_DIR 时,旁边有「数据」目录就优先用它;QE_DATA_DIR 优先级更高
+        os.environ.pop("QE_DATA_DIR", None)
+        cfg.app_dir = lambda: app_fake
+        check(cfg.data_dir() != port_dir, "旁边还没有「数据」目录时不用它")
+        port_dir.mkdir()
+        check(cfg.data_dir() == port_dir, "旁边有「数据」目录时直接用同目录数据")
+        os.environ["QE_DATA_DIR"] = str(tmp / "override_dir")
+        check(cfg.data_dir() == tmp / "override_dir", "QE_DATA_DIR 依然优先")
+
+        # 2. PORT1 跨电脑加密与防篡改校验
+        os.environ["QE_DATA_DIR"] = str(port_dir)
+        dpapi_s = apiacc.seal("orig_dpapi_sec")
+        check(not dpapi_s.startswith("PORT1:") and apiacc.unseal(dpapi_s) == "orig_dpapi_sec",
+              "没有 .迁移钥匙 时保持原有 DPAPI 加密")
+        p_sec = apiacc.seal_portable("跨电脑密钥_xyz_123")
+        check(p_sec.startswith("PORT1:") and "跨电脑密钥" not in p_sec and apiacc.unseal(p_sec) == "跨电脑密钥_xyz_123",
+              "seal_portable 生成 PORT1 且正常解出")
+        # 已有 .迁移钥匙 后,新保存的钥匙也自动沿用便携格式
+        apiacc.save([{"nick": "测试号", "client_id": "cid1", "secret": p_sec, "enabled": True}])
+        check(apiacc.set_key("测试号", "cid1", "新换密钥_999")
+              and apiacc.find("测试号")["secret"].startswith("PORT1:")
+              and apiacc.unseal(apiacc.find("测试号")["secret"]) == "新换密钥_999",
+              "有 .迁移钥匙 时 set_key 也用 PORT1 保持便携")
+        # 篡改密文或丢了钥匙要明确报错
+        bad_blob = bytearray(p_sec.encode("ascii"))
+        bad_blob[-2] = ord("A" if bad_blob[-2] != ord("A") else "B")
+        tampered_err = False
+        try:
+            apiacc.unseal(bytes(bad_blob).decode("ascii"))
+        except OSError:
+            tampered_err = True
+        check(tampered_err, "密文被改后 PORT1 校验失败并报错")
+
+        # 3. 迁移后的旧绝对路径截图(如 C:\\Users\\1\\...\\结尾截图\\x.jpg)自动改找当前 data_dir
+        shot_dir = port_dir / "结尾截图"
+        shot_dir.mkdir(exist_ok=True)
+        (shot_dir / "abc123.jpg").write_bytes(b"jpg")
+        st_o = wmstore.Store("结尾检查_test.json")
+        vpath = str(tmp / "v1.mp4")
+        Path(vpath).write_bytes(b"vid")
+        st_o.put(vpath, {"hits": [{"start": 1.0}], "shot": r"C:\Users\old_pc\AppData\Local\企鹅号发布助手\结尾截图\abc123.jpg"})
+        got_o = st_o.get(vpath)
+        check(got_o and os.path.normpath(got_o["shot"]) == os.path.normpath(str(shot_dir / "abc123.jpg")),
+              f"旧电脑绝对路径结尾截图自动切到新数据目录 -> {got_o}")
+    finally:
+        cfg.app_dir = old_app
+        if old_env is None:
+            os.environ.pop("QE_DATA_DIR", None)
+        else:
+            os.environ["QE_DATA_DIR"] = old_env
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -7688,6 +7749,7 @@ if __name__ == "__main__":
     test_title_extra_clean(tmp)
     test_verify_web_and_lag(tmp)
     test_black_cover_v2(tmp)
+    test_portable_bundle(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)
