@@ -16,11 +16,15 @@ _LOCK = threading.RLock()
 class Adjustments:
     def __init__(self, path=None):
         self.path = str(path or (data_dir() / "封面调整.json"))
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                self.d = json.load(f)
-        except (OSError, ValueError):
-            self.d = {}
+        self.reload()
+
+    def reload(self):
+        with _LOCK:
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    self.d = json.load(f)
+            except (OSError, ValueError):
+                self.d = {}
 
     def _save(self):
         with _LOCK:
@@ -28,6 +32,15 @@ class Adjustments:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.d, f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.path)
+            from . import lansync
+            if not lansync.is_reloading():
+                lansync.bump("adjust")
+
+    def _push(self, op: str, **kw):
+        from . import lansync
+        c = None if lansync.is_reloading() else lansync.active_client()
+        if c is not None:
+            c.store_op("adjust", op, **kw)
 
     # 用户 2026-10-24:「本来调好位置了,结果挪到 10.25 又要重新调整」—— 原来只按 视频路径 + 封面路径 记,
     # 挪了文件夹 / 去黑边换了封面路径就认不出。现在路径对不上时按 视频标题 + 封面图名字 找回来,改的时候搬到新路径下
@@ -65,41 +78,50 @@ class Adjustments:
             self.d[video] = json.loads(json.dumps(self.d[old]))
 
     def manual(self, video: str, cover: str, title: str = "") -> dict:
-        m = (self.d.get(self._vkey(video, title)) or {}).get("manual") or {}
-        k = self._ckey(m, cover)
-        return dict(m.get(k) or {}) if k else {}
+        with _LOCK:
+            m = (self.d.get(self._vkey(video, title)) or {}).get("manual") or {}
+            k = self._ckey(m, cover)
+            return dict(m.get(k) or {}) if k else {}
 
     def set_box(self, video: str, cover: str, rkey: str, cx: float, cy: float, title: str = ""):
-        self._move(video, title)
-        m = self.d.setdefault(video, {}).setdefault("manual", {})
-        k = self._ckey(m, cover)
-        if k and k != cover:                              # 同一张图换了路径:框搬过去
-            m[cover] = m.pop(k)
-        m.setdefault(cover, {})[rkey] = [round(cx, 4), round(cy, 4)]
-        self._save()
+        self._push("set_box", video=video, cover=cover, rkey=rkey, cx=cx, cy=cy, title=title)
+        with _LOCK:
+            self._move(video, title)
+            m = self.d.setdefault(video, {}).setdefault("manual", {})
+            k = self._ckey(m, cover)
+            if k and k != cover:                              # 同一张图换了路径:框搬过去
+                m[cover] = m.pop(k)
+            m.setdefault(cover, {})[rkey] = [round(cx, 4), round(cy, 4)]
+            self._save()
 
     def ai235(self, video: str, title: str = ""):
         """None = 按软件自己判断;True = 人点了用 AI 扩;False = 人点了不用 AI(切头顶)。"""
-        return (self.d.get(self._vkey(video, title)) or {}).get("ai235")
+        with _LOCK:
+            return (self.d.get(self._vkey(video, title)) or {}).get("ai235")
 
     def set_ai235(self, video: str, on, title: str = ""):
-        self._move(video, title)
-        self.d.setdefault(video, {})["ai235"] = on
-        self._save()
+        self._push("set_ai235", video=video, on=on, title=title)
+        with _LOCK:
+            self._move(video, title)
+            self.d.setdefault(video, {})["ai235"] = on
+            self._save()
 
     def own_cover(self, video: str) -> str:
         """人在「封面预览」里自己换的封面(用户 2026-10-16:配错了「我自己去添加」);没换过给 ""。"""
-        return str((self.d.get(video) or {}).get("own_cover") or "")
+        with _LOCK:
+            return str((self.d.get(video) or {}).get("own_cover") or "")
 
     def set_own_cover(self, video: str, path: str):
         """换成人选的图;path 空 = 用回软件自动配的。手动拖过的框跟着作废(图换了)。"""
-        e = self.d.setdefault(video, {})
-        e.pop("manual", None)
-        if path:
-            e["own_cover"] = path
-        else:
-            e.pop("own_cover", None)
-        self._save()
+        self._push("set_own_cover", video=video, path=path)
+        with _LOCK:
+            e = self.d.setdefault(video, {})
+            e.pop("manual", None)
+            if path:
+                e["own_cover"] = path
+            else:
+                e.pop("own_cover", None)
+            self._save()
 
     def use_own(self, v) -> bool:
         """自动配封面之前:人换过封面、那张图还在 → 用人选的(只有这一张,竖的比例也从它裁)。"""
@@ -114,22 +136,27 @@ class Adjustments:
 
     def reset(self, video: str):
         """恢复自动:手动拖过的框都不要了(人自己换的封面留着,要换回去点「用回自动配的」)。"""
-        if video in self.d:
-            own = self.d[video].get("own_cover")
-            del self.d[video]
-            if own:
-                self.d[video] = {"own_cover": own}
-            self._save()
+        self._push("reset", video=video)
+        with _LOCK:
+            if video in self.d:
+                own = self.d[video].get("own_cover")
+                del self.d[video]
+                if own:
+                    self.d[video] = {"own_cover": own}
+                self._save()
 
     def set_ok(self, video: str, cover: str, title: str = ""):
         """人点了「封面都看过了」:这张封面现在这样就行,不再标黄(换了封面图就不算了,又会标黄)。"""
-        self._move(video, title)
-        self.d.setdefault(video, {})["ok"] = cover
-        self._save()
+        self._push("set_ok", video=video, cover=cover, title=title)
+        with _LOCK:
+            self._move(video, title)
+            self.d.setdefault(video, {})["ok"] = cover
+            self._save()
 
     def is_ok(self, video: str, cover: str, title: str = "") -> bool:
-        ok = (self.d.get(self._vkey(video, title)) or {}).get("ok")
-        return bool(cover) and bool(ok) and (ok == cover or self._base(ok) == self._base(cover))
+        with _LOCK:
+            ok = (self.d.get(self._vkey(video, title)) or {}).get("ok")
+            return bool(cover) and bool(ok) and (ok == cover or self._base(ok) == self._base(cover))
 
     def apply(self, v) -> None:
         """自动定完封面以后,把人调过的套上去。"""

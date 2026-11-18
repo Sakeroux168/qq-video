@@ -6,12 +6,14 @@
 import json
 import os
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP_NAME = "企鹅号发布助手"
 APP_VERSION = 1
 BJ = timezone(timedelta(hours=8))
+_LOCAL_CTX = threading.local()
 
 
 def app_dir() -> Path:
@@ -21,7 +23,8 @@ def app_dir() -> Path:
 
 
 def data_dir() -> Path:
-    d = os.environ.get("QE_DATA_DIR", "").strip()
+    ctx_d = str(getattr(_LOCAL_CTX, "data_dir", "") or "").strip()
+    d = ctx_d or os.environ.get("QE_DATA_DIR", "").strip()
     if d:
         p = Path(d)
     else:
@@ -75,6 +78,11 @@ DEFAULTS = {
     "bad_cover_dir": r"E:\图片\企鹅号",
     "theme": "浅色",            # 界面风格(gui/theme.py 里的名字:浅色 / 深色;用户 2026-10-18 选的「G 一键驾驶舱」)
     "splash": True,             # 打开软件先放「Hi,欢迎使用本工作台」开场动画
+    "lan_role": "off",          # 多台电脑局域网互通:off(单机)/ host(主机)/ client(从机)
+    "lan_port": 18620,
+    "lan_host": "",             # 从机连哪台主机(如 DESKTOP-KQ0R6HN:18620)
+    "lan_token": "",            # 6 位局域网配对码
+    "lan_merged_at": "",
 }
 
 
@@ -128,6 +136,8 @@ class Settings(dict):
         return super().pop(k, *default)
 
     def save(self):
+        dirty = set(self._dirty)
+        from . import lansync
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             disk = {}
@@ -136,13 +146,13 @@ class Settings(dict):
                 disk = d if isinstance(d, dict) else {}
             except (OSError, ValueError):
                 disk = {}
-            for k in list(self._dirty):           # 只把这次改过的盖上去;别人改的别的键保留
+            for k in list(dirty):                  # 只把这次改过的盖上去;别人改的别的键保留
                 if k in self:
                     disk[k] = self[k]
                 else:
                     disk.pop(k, None)
             for k, v in disk.items():             # 内存里也跟上别人改的
-                if k not in self._dirty:
+                if k not in dirty:
                     super().__setitem__(k, v)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(disk, ensure_ascii=False, indent=1), "utf-8")
@@ -150,6 +160,14 @@ class Settings(dict):
             self._dirty.clear()
         except OSError:
             pass
+        if not lansync.is_reloading():
+            c = lansync.active_client()
+            if c is not None:
+                patch = {k: self[k] for k in dirty if k in lansync.SHARED_SETTING_KEYS and k in self}
+                if patch:
+                    c.push_settings(patch)
+            elif dirty & lansync.SHARED_SETTING_KEYS:
+                lansync.bump("settings")
 
     def ai_key(self) -> str:
         k = str(self.get("ai_key") or "").strip()

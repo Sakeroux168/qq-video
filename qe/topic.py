@@ -250,6 +250,9 @@ class Ledger:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
+        from . import lansync
+        if not lansync.is_reloading():
+            lansync.bump("ledger")
 
     @staticmethod
     def groups_of(b: dict) -> list:
@@ -264,6 +267,10 @@ class Ledger:
         return f"{parts[0][5:]} {parts[1]}" if len(parts) >= 2 else parts[0]
 
     def add(self, at: str, moves: list) -> None:
+        from . import lansync
+        c = None if lansync.is_reloading() else lansync.active_client()
+        if c is not None:
+            c.store_op("ledger", "add", at=at, moves=moves)
         data = self._load()
         g = [list(m) for m in moves]
         if data and data[-1].get("at") == at:
@@ -313,5 +320,9 @@ class Ledger:
                     bad += 1
         if left:                                      # 改不回的留着,关掉占用的程序后还能再撤一次
             data.append({"at": b.get("at", ""), "groups": list(reversed(left))})
+        from . import lansync
+        c = None if lansync.is_reloading() else lansync.active_client()
+        if c is not None:
+            c.store_op("ledger", "save", data=data)
         self._save(data)
         return ok, bad, skipped

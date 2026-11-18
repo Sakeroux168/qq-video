@@ -9,20 +9,31 @@ from .config import data_dir
 
 _LOCK = threading.Lock()
 _D = None
+_LOADED_PATH = ""
+_PENDING: dict[str, list[int]] = {}
 
 
 def _path() -> str:
     return str(data_dir() / "视频尺寸.json")
 
 
+def reload() -> None:
+    global _D, _LOADED_PATH
+    with _LOCK:
+        _D = None
+        _LOADED_PATH = ""
+
+
 def _load() -> dict:
-    global _D
-    if _D is None:
+    global _D, _LOADED_PATH
+    p = _path()
+    if _D is None or _LOADED_PATH != p:
         try:
-            with open(_path(), encoding="utf-8") as f:
+            with open(p, encoding="utf-8") as f:
                 _D = json.load(f)
         except (OSError, ValueError):
             _D = {}
+        _LOADED_PATH = p
     return _D
 
 
@@ -49,22 +60,54 @@ def put(path: str, w: int, h: int) -> None:
         return
     with _LOCK:
         d = _load()
-        d[k] = [int(w), int(h)]
+        val = [int(w), int(h)]
+        d[k] = val
+        _PENDING[k] = val
         if len(d) > 20000:                                 # 太多了清掉老的一半
             for x in list(d)[:10000]:
                 d.pop(x, None)
 
 
-def save() -> None:
+def _write_disk(d: dict) -> None:
+    tmp = _path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+    os.replace(tmp, _path())
+
+
+def merge_remote(entries: dict) -> None:
     with _LOCK:
         d = _load()
-        tmp = _path() + ".tmp"
+        for k, v in entries.items():
+            if isinstance(v, (list, tuple)) and len(v) == 2:
+                d[k] = [int(v[0]), int(v[1])]
+        if len(d) > 20000:
+            for x in list(d)[:10000]:
+                d.pop(x, None)
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(d, f, ensure_ascii=False)
-            os.replace(tmp, _path())
+            _write_disk(d)
         except OSError:
             pass
+
+
+def save() -> None:
+    from . import lansync
+    with _LOCK:
+        pend = dict(_PENDING)
+        _PENDING.clear()
+        d = _load()
+        try:
+            _write_disk(d)
+        except OSError:
+            pass
+    c = None if lansync.is_reloading() else lansync.active_client()
+    if c is not None and pend:
+        try:
+            c.store_op("dimcache", "merge_entries", entries=pend)
+        except Exception:
+            pass
+    elif c is None and not lansync.is_reloading():
+        lansync.bump("dimcache")
 
 
 def shape(w: int, h: int) -> str:

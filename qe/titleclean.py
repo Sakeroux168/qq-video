@@ -207,11 +207,17 @@ class AdOk:
 
     def __init__(self, path=None):
         self.path = str(path or (data_dir() / "标题广告处理过.json"))
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                self.d = json.load(f)
-        except (OSError, ValueError):
-            self.d = {}
+        fn = os.path.basename(self.path)
+        self._kind = "titledate" if "日期" in fn else ("titleclean" if "广告" in fn else "")
+        self.reload()
+
+    def reload(self):
+        with _LOCK:
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    self.d = json.load(f)
+            except (OSError, ValueError):
+                self.d = {}
 
     @staticmethod
     def key(account: str, title: str) -> str:
@@ -219,9 +225,14 @@ class AdOk:
         return f"{account}|{norm_name(title) or title}"
 
     def ok(self, account: str, title: str) -> bool:
-        return bool(self.d.get(self.key(account, title)))
+        with _LOCK:
+            return bool(self.d.get(self.key(account, title)))
 
     def set(self, account: str, title: str, on: bool = True):
+        from . import lansync
+        c = None if (not self._kind or lansync.is_reloading()) else lansync.active_client()
+        if c is not None:
+            c.store_op(self._kind, "set", account=account, title=title, on=on)
         with _LOCK:
             k = self.key(account, title)
             if on:
@@ -232,6 +243,8 @@ class AdOk:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.d, f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.path)
+            if self._kind and c is None:
+                lansync.bump(self._kind)
 
 
 _STORE = None

@@ -189,7 +189,15 @@ class TodayTab(QWidget):
         weekend = now.weekday() >= 5
         self.lab_day.setText(f"{now.month} 月 {now.day} 日 · 星期{WEEK[now.weekday()]} · "
                              + ("周末一般用定时" if weekend else "平日分批发"))
-        s = plan.summary(self.rec, self.st, day)
+        from qe.lansync import LanError
+        try:
+            s = plan.summary(self.rec, self.st, day)
+        except LanError as e:
+            self.big.setText("连不上主机")
+            self.lab_sent.setText(str(e))
+            self.prob.setVisible(False)
+            self._clear(self.hist_v)
+            return
         tq, ta = s["total"]
         left = max(0, tq - ta)
         acc = t["acc"]

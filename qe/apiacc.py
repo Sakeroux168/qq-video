@@ -122,11 +122,33 @@ def load() -> list[dict]:
     return [a for a in data if isinstance(a, dict) and str(a.get("nick") or "").strip() and a["nick"] not in q]
 
 
-def save(accs: list[dict]):
-    p = store_path()
+def _sync_acc_changed():
+    from . import lansync
+    if lansync.is_reloading():
+        return
+    c = lansync.active_client()
+    if c is not None:
+        try:
+            c.push_accounts(load(), qload())
+        except Exception:
+            pass
+    else:
+        lansync.bump("apiacc")
+
+
+def _save_file(p, accs: list[dict]):
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(accs, ensure_ascii=False, indent=1), "utf-8")
     os.replace(tmp, p)
+    _sync_acc_changed()
+
+
+def save(accs: list[dict]):
+    _save_file(store_path(), accs)
+
+
+def qsave(accs: list[dict]):
+    _save_file(qstore_path(), accs)
 
 
 def migrate(db: str = OLD_DB, skip=()) -> int:
@@ -206,10 +228,7 @@ def set_qkey(nick: str, client_id: str, secret: str) -> None:
         raise ValueError("这把钥匙是 16 个号里的,不能给教育号用")
     accs = [a for a in qload() if a.get("nick") != nick]
     accs.append({"nick": nick, "client_id": client_id, "secret": seal(secret)})
-    p = qstore_path()
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(accs, ensure_ascii=False, indent=1), "utf-8")
-    os.replace(tmp, p)
+    qsave(accs)
 
 
 def qfind(nick: str) -> dict | None:

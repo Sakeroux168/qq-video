@@ -10,7 +10,7 @@ import copy
 import os
 import time
 
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDi
 from qe import blackcover
 from qe import checkline
 from qe import cropcheck
+from qe import lansync
 from qe import outrocheck
 from qe import cover as C
 from qe import sharp
@@ -27,8 +28,13 @@ from qe import folders as F
 from qe import plan
 from qe.config import APP_VERSION, bj_now, bj_str, data_dir
 from qe.adjust import Adjustments
+from qe.lansync import LanError
 from qe.records import Records
 from gui.theme import cur as _tok
+
+
+class _LanSignal(QObject):
+    changed = Signal(object)
 
 YELLOW = QBrush(QColor("#FFF3C4"))
 GREEN = QBrush(QColor("#DDF3E2"))
@@ -384,8 +390,22 @@ class MainWindow(QMainWindow):
     def __init__(self, st, records: Records | None = None):
         super().__init__()
         self.st = st
-        self.rec = records or Records()
-        self.adj = Adjustments(os.path.join(os.path.dirname(self.rec.path), "封面调整.json") if records else None)
+        self._lan_sig = _LanSignal(self)
+        self._lan_sig.changed.connect(self._on_lan_change)
+        self._lan_bind_err = ""
+        self._lan_init_err = ""
+        self._lan_poll_busy = False
+        self._has_custom_rec = records is not None
+        if records is not None:
+            self.rec = records
+            self.adj = Adjustments(os.path.join(os.path.dirname(self.rec.path), "封面调整.json"))
+        else:
+            self.adj = Adjustments()
+            try:
+                self.rec = lansync.setup(st, adj=self.adj, on_change=lambda kinds: self._lan_sig.changed.emit(kinds))
+            except OSError as e:
+                self._lan_bind_err = str(e)
+                self.rec = Records()
         self.videos: list = []            # 中间表里的
         self.batch_id = ""                # 摆好了、等人点发布的那一批
         self.batch_videos: list = []
@@ -408,13 +428,23 @@ class MainWindow(QMainWindow):
         self._build()
         self._sched_changed()
         self._load_dates()
-        ob = self.rec.open_batches()
+        try:
+            ob = self.rec.open_batches()
+        except LanError as e:
+            ob = []
+            self._lan_init_err = str(e)
         if ob:
             b = ob[-1]
             self.batch_id = b["batch"]
             self._batch_acc = b["account"]
             self.say(f"上次摆好的一批还没确认:「{b['account']}」{b['n']} 条({b['at']})。在罐头里发了就点「这批发好了」,不要了就点「这批不要了」。")
         self._refresh_buttons()
+        self._lan_timer = QTimer(self)
+        self._lan_timer.setInterval(3000)
+        self._lan_timer.timeout.connect(self._lan_poll_tick)
+        self._update_lan_ui()
+        if not self._has_custom_rec:
+            QTimer.singleShot(350, self._lan_after_start)
 
     # ---------------- 界面 ----------------
     def _build(self):
@@ -817,6 +847,137 @@ class MainWindow(QMainWindow):
             self.refresh_records()
         if p is not self.today:
             fade_in(p, 260)                           # 换页淡入一下(用户要活泼一点)
+
+    # ---------------- 多台电脑局域网互通 ----------------
+    def _update_lan_ui(self):
+        ver = getattr(self.nav, "ver_label", None)
+        role = str(self.st.get("lan_role") or lansync.ROLE_OFF).lower()
+        h = lansync.active_host()
+        c = lansync.active_client()
+        if role == lansync.ROLE_HOST:
+            if h is not None:
+                txt = f"第 {APP_VERSION} 版\n局域网主机 :{h.bound_port}"
+                tip = f"别的电脑从机可填电脑名或本机 IP:端口 {h.bound_port}"
+            else:
+                txt = f"第 {APP_VERSION} 版\n⚠ 主机未开启"
+                tip = self._lan_bind_err or "局域网主机端口没开成功"
+            if self._lan_timer.isActive():
+                self._lan_timer.stop()
+        elif role == lansync.ROLE_CLIENT:
+            addr = str(self.st.get("lan_host") or "")
+            if c is not None and c.online:
+                txt = f"第 {APP_VERSION} 版\n已连主机"
+                tip = f"已连局域网主机:{addr}"
+            else:
+                txt = f"第 {APP_VERSION} 版\n⚠ 主机离线"
+                tip = (c.last_err if c and c.last_err else f"连不上主机:{addr}")
+            if not self._lan_timer.isActive():
+                self._lan_timer.start()
+        else:
+            txt = f"第 {APP_VERSION} 版"
+            tip = ""
+            if self._lan_timer.isActive():
+                self._lan_timer.stop()
+        if ver is not None:
+            ver.setText(txt)
+            ver.setToolTip(tip)
+
+    def _lan_poll_tick(self):
+        c = lansync.active_client()
+        if c is None or self._lan_poll_busy:
+            if self._lan_timer.isActive():
+                self._lan_timer.stop()
+            return
+        self._lan_poll_busy = True
+        import threading
+        def _bg():
+            try:
+                was = c.online
+                kinds = c.sync_poll(strict=False)
+                if c.online != was and not kinds:
+                    self._lan_sig.changed.emit([])
+            finally:
+                self._lan_poll_busy = False
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_lan_change(self, kinds):
+        self._update_lan_ui()
+        kinds = list(kinds or [])
+        if not kinds:
+            return
+        cur = self.stack.currentWidget()
+        if cur is self.today:
+            self.today.refresh(animate_=False)
+        elif cur is self.daily:
+            self.daily.refresh()
+        elif cur is self.pages.get("records"):
+            self.refresh_records()
+        if "rec" in kinds or "settings" in kinds or "adjust" in kinds:
+            if not (self.worker and self.worker.isRunning()):
+                for i in range(len(self.videos)):
+                    self._fill_row(i)
+                self._update_sum()
+                self._update_tree_counts()
+                self._refresh_buttons()
+        if hasattr(self, "api_tab") and hasattr(self.api_tab, "_on_lan_changed"):
+            self.api_tab._on_lan_changed(kinds)
+
+    def _lan_after_start(self):
+        self._update_lan_ui()
+        if self._lan_bind_err:
+            QMessageBox.warning(self, "局域网主机没开起来", f"这台电脑开了「局域网主机」,但端口被别的程序占了:\n{self._lan_bind_err}\n\n去「设置」里换个端口号。")
+            return
+        c = lansync.active_client()
+        if c is None:
+            return
+        if not c.online:
+            QMessageBox.warning(self, "连不上主机",
+                                f"现在开的是「局域网从机」模式,{c.last_err or '连不上主机'}。\n\n"
+                                "请确认主机电脑上的企鹅号发布助手已经打开,且局域网能通。\n"
+                                "(连上之前软件不会擅自改本地记录或发视频;也能点左边「设置」核对主机地址)")
+            return
+        if not self.st.get("lan_merged_at"):
+            try:
+                unm = lansync.unmerged_local_rows(c)
+                if unm:
+                    if self._ask("并入本机旧记录", f"检测到这台电脑原来本地有 {len(unm)} 条发布记录,主机那边还没有。\n\n"
+                                 "现在并入主机吗?(按路径和日期去重,不会重复发)", "现在并入主机", "先不"):
+                        m, _sk = lansync.merge_local_to_host(c)
+                        self.say(f"已把本机 {m} 条记录并入主机")
+                        self.today.refresh(animate_=False)
+                self.st["lan_merged_at"] = bj_str()
+                self.st.save()
+            except Exception:
+                pass
+
+    def _swap_rec(self, new_rec):
+        old_rec = getattr(self, "rec", None)
+        self.rec = new_rec
+        self.today.rec = new_rec
+        self.daily.rec = new_rec
+        self.api_tab.rec = new_rec
+        if old_rec is not None and old_rec is not new_rec and hasattr(old_rec, "close"):
+            try:
+                old_rec.close()
+            except Exception:
+                pass
+
+    def _apply_lan_settings(self):
+        self._lan_bind_err = ""
+        try:
+            new_rec = lansync.setup(self.st, adj=self.adj, on_change=lambda kinds: self._lan_sig.changed.emit(kinds))
+            self._swap_rec(new_rec)
+        except OSError as e:
+            self._lan_bind_err = str(e)
+            QMessageBox.warning(self, "局域网设置", f"切换失败:{e}")
+            self._swap_rec(Records())
+        self._update_lan_ui()
+        c = lansync.active_client()
+        if c is not None and not c.online:
+            QMessageBox.warning(self, "连不上主机", f"连不上主机({self.st.get('lan_host')}),请确认主机软件已打开、防火墙已放行端口。")
+        self.today.refresh(animate_=False)
+        self._refresh_buttons()
+        self.api_tab.load()
 
     # ---------------- 黑封面 ----------------
     BLACK_SCAN = True                                 # 测试里关掉(不去读真号)
@@ -2070,8 +2231,12 @@ class MainWindow(QMainWindow):
         if not self._ask("标成已发", f"这 {len(vids)} 条你已经在罐头里手动发了?\n\n"
                          + "\n".join(f"· {v.title[:30]}" for v in vids[:8]), "标成已发", "先不"):
             return
-        for v in vids:
-            self.rec.manual_published(v)
+        try:
+            for v in vids:
+                self.rec.manual_published(v)
+        except LanError as e:
+            QMessageBox.warning(self, "连不上主机", str(e))
+            return
         self.say(f"记下:{len(vids)} 条是你手动发的")
         for r in rows:
             self._fill_row(r)
@@ -2097,7 +2262,11 @@ class MainWindow(QMainWindow):
                          ("\n…" if len(vids) > 8 else "") + "\n\n改回「还没发」:之后还会摆它们,每天的已发数也跟着减。"
                          "只改软件里的记录,不动文件、不碰企鹅号。", "改回还没发", "先不", default_no=True):
             return
-        n = sum(1 for v in vids if self.rec.undo_sent(v.path))
+        try:
+            n = sum(1 for v in vids if self.rec.undo_sent(v.path))
+        except LanError as e:
+            QMessageBox.warning(self, "连不上主机", str(e))
+            return
         back = self._after_status_change({v.account for v in vids})
         self.say(f"改回还没发:{n} 条(按错了标成已发的)" + (f";留到明天的 {back} 条放回来了" if back else ""))
 
@@ -2166,7 +2335,10 @@ class MainWindow(QMainWindow):
         if running:
             self.hint.setText("正在摆…摆的时候别在罐头里切到别的号。要停就点「停」。")
         elif waiting:
-            n = self.rec.ready_in_batch(self.batch_id)
+            try:
+                n = self.rec.ready_in_batch(self.batch_id)
+            except LanError:
+                n = len(self.batch_videos)
             acc = self.batch_videos[0].account if self.batch_videos else ""
             self.hint.setText(f"「{acc}」这批 {n} 条摆好了 → 去罐头里检查,点「发布 → 全部发布」→ 回来点「这批发好了」"
                               "(不要了就在罐头里删掉,点「这批不要了」)")
@@ -2207,7 +2379,10 @@ class MainWindow(QMainWindow):
             if self._unattended:
                 big = "正在自己摆、自己发…"
         elif self.batch_id:
-            nb = self.rec.ready_in_batch(self.batch_id)
+            try:
+                nb = self.rec.ready_in_batch(self.batch_id)
+            except LanError:
+                nb = len(self.batch_videos)
             acc = self.batch_account()
             big, tone = (f"「{acc}」这批 {nb} 条摆好了" if acc else f"这批 {nb} 条摆好了"), "good"
             sub = "去罐头里检查,点「发布 → 全部发布」→ 回来点「这批发好了」(不要了就在罐头里删掉,点「这批不要了」)"
@@ -2395,6 +2570,15 @@ class MainWindow(QMainWindow):
             self.say("已勾上:摆好后软件自己点「全部发布」,接着摆下一批(有问题会停下来叫你)")
 
     def start_batch(self, chained: bool = False):
+        try:
+            if hasattr(self.rec, "sync_now"):
+                self.rec.sync_now(strict=True)
+        except LanError as e:
+            if self._unattended:
+                self._sched_finish(f"连不上主机,定时发布先停下:{e}")
+            else:
+                QMessageBox.warning(self, "连不上主机", f"{e}\n\n为防止两台电脑重发或超发,先不摆。")
+            return
         if not self._unattended and not chained:        # 审查 10:没勾员工原来说「都发完了」,人以为发完了
             if not self.c_date.currentData():
                 QMessageBox.information(self, "摆下一批", PICK_DAY + ",再勾上员工。")
@@ -2507,12 +2691,17 @@ class MainWindow(QMainWindow):
             self.say("正在停…")
 
     def _one_done(self, v, ok, why):
-        if ok:
-            self.rec.prepared(v, self.batch_id)
-            self.row_note.pop(v.path, None)
-        else:
-            self.rec.failed(v, self.batch_id, why)
-            self.row_note[v.path] = f"没摆成:{why}"
+        try:
+            if ok:
+                self.rec.prepared(v, self.batch_id)
+                self.row_note.pop(v.path, None)
+            else:
+                self.rec.failed(v, self.batch_id, why)
+                self.row_note[v.path] = f"没摆成:{why}"
+        except LanError as e:
+            self.row_note[v.path] = f"没记上:{e}"
+            if self.worker:
+                self.worker.stop()
         if v in self.videos:
             self._fill_row(self.videos.index(v))
         self._update_sum()
@@ -2525,7 +2714,11 @@ class MainWindow(QMainWindow):
                     self._fill_row(self.videos.index(v))
         ok = [x for x in (res or []) if x[1]]
         bad = [x for x in (res or []) if not x[1]]
-        ready = self.rec.ready_in_batch(self.batch_id) if self.batch_id else 0
+        try:
+            ready = self.rec.ready_in_batch(self.batch_id) if self.batch_id else 0
+        except LanError as e:
+            ready = len(ok)
+            err = err or str(e)
         if not ok and not ready:
             self.batch_id = ""                         # 一条都没摆上:不用等人确认
         if self._unattended and self._sched_batch_done(ok, bad, ready, err, pub):
@@ -2815,20 +3008,28 @@ class MainWindow(QMainWindow):
     def batch_sent(self):
         if not self.batch_id:
             return
-        n_ready = self.rec.ready_in_batch(self.batch_id)
+        try:
+            n_ready = self.rec.ready_in_batch(self.batch_id)
+        except LanError as e:
+            QMessageBox.warning(self, "连不上主机", str(e))
+            return
         acc = self.batch_videos[0].account if self.batch_videos else ""
         if not self._ask("这批发好了", f"「{acc}」这批 {n_ready} 条,你已经在罐头里点了「发布 → 全部发布」,都发出去了?\n\n"
                                        "点「都发了,记下」以后这批算发出去了,软件不会再摆这批。还没发就点「还没」。",
                          "都发了,记下", "还没", default_no=True):
             return
-        n = self.rec.mark_batch_published(self.batch_id)
-        self._yellow_stop = False
-        self.say(f"记下:这批 {n} 条发了({bj_str()})")
-        bad = self.rec.failed_in_batch(self.batch_id)
-        if bad and self._ask("这批发好了", f"这批里还有 {len(bad)} 条软件没摆成(比如「{bad[0]['title'][:20]}」)。\n\n"
-                                         "你在罐头里手动补好、一起发出去了吗?", "补好一起发了", "没有"):
-            m = self.rec.mark_failed_published(self.batch_id)
-            self.say(f"记下:没摆成的 {m} 条也是你手动补好一起发的")
+        try:
+            n = self.rec.mark_batch_published(self.batch_id)
+            self._yellow_stop = False
+            self.say(f"记下:这批 {n} 条发了({bj_str()})")
+            bad = self.rec.failed_in_batch(self.batch_id)
+            if bad and self._ask("这批发好了", f"这批里还有 {len(bad)} 条软件没摆成(比如「{bad[0]['title'][:20]}」)。\n\n"
+                                             "你在罐头里手动补好、一起发出去了吗?", "补好一起发了", "没有"):
+                m = self.rec.mark_failed_published(self.batch_id)
+                self.say(f"记下:没摆成的 {m} 条也是你手动补好一起发的")
+        except LanError as e:
+            QMessageBox.warning(self, "连不上主机", str(e))
+            return
         self.batch_id = ""
         self._after_batch()
         self.schedule_black_scan()
@@ -2838,7 +3039,11 @@ class MainWindow(QMainWindow):
             return
         if not self._ask("这批不要了", "这批没发(在罐头里删掉了)?记录作废,下次这些视频还会再摆。", "不要了", "先留着"):
             return
-        n = self.rec.drop_batch(self.batch_id)
+        try:
+            n = self.rec.drop_batch(self.batch_id)
+        except LanError as e:
+            QMessageBox.warning(self, "连不上主机", str(e))
+            return
         self._yellow_stop = False
         self.say(f"这批 {n} 条作废了")
         self.batch_id = ""
@@ -2974,7 +3179,13 @@ class MainWindow(QMainWindow):
                 return tuple(int(x) for x in str(d).split(".")[:2])
             except ValueError:
                 return (99, 99)
-        dates = sorted({r["date"] for r in self.rec.rows()}, key=_dk, reverse=True)    # 和另外两页一样:最新的在上面
+        try:
+            all_rows = self.rec.rows()
+        except LanError as e:
+            self.rec_empty.setText(f"⚠ {e}")
+            self.rec_empty.setVisible(True)
+            return
+        dates = sorted({r["date"] for r in all_rows}, key=_dk, reverse=True)    # 和另外两页一样:最新的在上面
         self.c_rec_date.blockSignals(True)
         self.c_rec_date.clear()
         self.c_rec_date.addItem("全部", "")
@@ -3083,13 +3294,17 @@ class MainWindow(QMainWindow):
                                                          "你去企鹅号后台看了,这条没发出去?记成没发成,之后能在「16 个号」页再发。"),
                          what, "先不"):
             return
-        if self.rec.status_of(r["path"]) == "结果不明":
-            self.rec.resolve_unsure(r["path"], sent)
-        elif sent:
-            self.rec.mark_sent(r["id"])
-            from qe import plan
-            if plan.undo_room(self.st, r["id"]):           # 拎回来时给今天多加过 1 条额度:其实发上了,退回去(审查 2026-10-26)
-                self.say(f"数据记录:「{r['title'][:30]}」拎回来时多加的 1 条额度退回去了")
+        try:
+            if self.rec.status_of(r["path"]) == "结果不明":
+                self.rec.resolve_unsure(r["path"], sent)
+            elif sent:
+                self.rec.mark_sent(r["id"])
+                from qe import plan
+                if plan.undo_room(self.st, r["id"]):           # 拎回来时给今天多加过 1 条额度:其实发上了,退回去(审查 2026-10-26)
+                    self.say(f"数据记录:「{r['title'][:30]}」拎回来时多加的 1 条额度退回去了")
+        except LanError as e:
+            QMessageBox.warning(self, "连不上主机", str(e))
+            return
         self.say(f"数据记录:「{r['title'][:30]}」{what}")
         if not self.api_tab.busy():
             self.api_tab.load()                       # 16 个号页的状态跟着变
@@ -3121,11 +3336,15 @@ class MainWindow(QMainWindow):
             return
         from gui.api_tab import unsend_to_today
         notes, room = [], 0
-        for r in rows:
-            msg, got = unsend_to_today(self.st, self.rec, r)   # 挪进今天的文件夹(和核对的「拎回来」一样;额度在里面加)
-            if msg:
-                notes.append(f"{r['title'][:20]}:{msg}")
-            room += got
+        try:
+            for r in rows:
+                msg, got = unsend_to_today(self.st, self.rec, r)   # 挪进今天的文件夹(和核对的「拎回来」一样;额度在里面加)
+                if msg:
+                    notes.append(f"{r['title'][:20]}:{msg}")
+                room += got
+        except LanError as e:
+            QMessageBox.warning(self, "连不上主机", str(e))
+            return
         self.say(f"数据记录:{len(rows)} 条改回没发" + (";" + ";".join(notes) if notes else "") +
                  (f";补发的 {room} 条今天另外加了额度" if room else ""))
         if notes:
@@ -3463,7 +3682,113 @@ class MainWindow(QMainWindow):
         f3.addRow("", b_try)
         f3.addRow("", lab_try)
         outer.addWidget(g3)
-        labs = [fl.itemAt(r, QFormLayout.ItemRole.LabelRole).widget() for fl in (f, f2, f4, f3) for r in range(fl.rowCount())
+
+        g5 = QGroupBox("多台电脑互通(局域网)")
+        f5 = QFormLayout(g5)
+        c_lan_role = QComboBox()
+        for code, txt in (
+            (lansync.ROLE_OFF, "单机用(不互通)"),
+            (lansync.ROLE_HOST, "主机(这台软件一直开着,让另一台电脑连我同步数据)"),
+            (lansync.ROLE_CLIENT, "从机(连到另一台主机电脑,两台共用同一份记录与防重发)"),
+        ):
+            c_lan_role.addItem(txt, code)
+        old_role = str(self.st.get("lan_role") or lansync.ROLE_OFF).lower()
+        c_lan_role.setCurrentIndex(max(0, c_lan_role.findData(old_role)))
+        f5.addRow("本台电脑角色", c_lan_role)
+
+        w_host_box = QWidget()
+        fh = QFormLayout(w_host_box)
+        fh.setContentsMargins(0, 0, 0, 0)
+        sp_lport = QSpinBox()
+        sp_lport.setRange(1024, 65535)
+        old_port = _num(self.st.get("lan_port"), lansync.DEFAULT_PORT)
+        sp_lport.setValue(old_port)
+        old_token = str(self.st.get("lan_token") or "")
+        e_hpin = QLineEdit(old_token or lansync.gen_pin())
+        e_hpin.setPlaceholderText("比如 6 位数字配对码")
+        hname, hips = lansync.host_info()
+        lab_haddr = QLabel("")
+        lab_haddr.setWordWrap(True)
+        lab_haddr.setObjectName("muted")
+        def _upd_haddr():
+            p_ = sp_lport.value()
+            ips = " / ".join(f"{ip}:{p_}" for ip in hips[:2])
+            lab_haddr.setText(f"别的电脑从机里填: {hname}:{p_}" + (f" (或 {ips})" if ips else "") +
+                              f" · 配对码: {e_hpin.text().strip() or '(空)'}")
+        sp_lport.valueChanged.connect(lambda _v: _upd_haddr())
+        e_hpin.textChanged.connect(lambda _t: _upd_haddr())
+        _upd_haddr()
+        fh.addRow("监听端口", sp_lport)
+        fh.addRow("配对码", e_hpin)
+        fh.addRow("连接地址", lab_haddr)
+
+        w_cli_box = QWidget()
+        fc = QFormLayout(w_cli_box)
+        fc.setContentsMargins(0, 0, 0, 0)
+        old_lhost = str(self.st.get("lan_host") or "")
+        e_chost = QLineEdit(old_lhost)
+        e_chost.setPlaceholderText(f"比如 {hname}:{lansync.DEFAULT_PORT} 或 10.1.16.144:{lansync.DEFAULT_PORT}")
+        e_cpin = QLineEdit(old_token)
+        e_cpin.setPlaceholderText("填主机设置里显示的配对码")
+        h_cbtn = QHBoxLayout()
+        h_cbtn.setContentsMargins(0, 0, 0, 0)
+        b_test_lan = QPushButton("测一下连不连得上")
+        b_merge_lan = QPushButton("把本机旧记录并入主机…")
+        b_merge_lan.setToolTip("如果这台电脑以前单独发过视频,点这个把本地记录去重并进主机(不重发)。")
+        lab_cstate = QLabel("")
+        lab_cstate.setWordWrap(True)
+        lab_cstate.setObjectName("muted")
+        def _do_test_lan():
+            from PySide6.QtWidgets import QApplication
+            addr = e_chost.text().strip()
+            pin = e_cpin.text().strip()
+            lab_cstate.setText("正在连主机…")
+            QApplication.processEvents()
+            try:
+                info = lansync.test_connection(addr, pin)
+                lab_cstate.setText(f"✓ 连上了主机「{info.get('host')}」· 主机有 {info.get('posts', 0)} 条发布记录")
+            except Exception as ex:
+                lab_cstate.setText(f"✕ 连不上:{ex}")
+        def _do_merge_lan():
+            c_now = lansync.active_client()
+            if c_now is None:
+                QMessageBox.information(d, "并入旧记录", "先在上面选好主机地址和配对码、点「确定」连成从机,再来点合并。")
+                return
+            try:
+                unm = lansync.unmerged_local_rows(c_now)
+                if not unm:
+                    QMessageBox.information(d, "并入旧记录", "本机没有未并入主机的旧记录。")
+                    return
+                if not self._ask("并入旧记录", f"把本机本地库里还没同步的 {len(unm)} 条记录合并进主机吗?(按路径去重)", "合并", "先不"):
+                    return
+                m, sk = lansync.merge_local_to_host(c_now)
+                self.st["lan_merged_at"] = bj_str()
+                self.st.save()
+                lab_cstate.setText(f"✓ 并入主机 {m} 条,跳过重复 {sk} 条")
+                self.today.refresh(animate_=False)
+            except Exception as ex:
+                QMessageBox.warning(d, "并入旧记录", f"没并成:{ex}")
+        b_test_lan.clicked.connect(_do_test_lan)
+        b_merge_lan.clicked.connect(_do_merge_lan)
+        h_cbtn.addWidget(b_test_lan)
+        h_cbtn.addWidget(b_merge_lan)
+        h_cbtn.addStretch(1)
+        fc.addRow("主机地址", e_chost)
+        fc.addRow("配对码", e_cpin)
+        fc.addRow("", h_cbtn)
+        fc.addRow("", lab_cstate)
+
+        f5.addRow("", w_host_box)
+        f5.addRow("", w_cli_box)
+        def _sync_lan_vis():
+            r_ = c_lan_role.currentData()
+            w_host_box.setVisible(r_ == lansync.ROLE_HOST)
+            w_cli_box.setVisible(r_ == lansync.ROLE_CLIENT)
+        c_lan_role.currentIndexChanged.connect(lambda _i: _sync_lan_vis())
+        _sync_lan_vis()
+        outer.addWidget(g5)
+
+        labs = [fl.itemAt(r, QFormLayout.ItemRole.LabelRole).widget() for fl in (f, f2, f4, f3, f5, fh, fc) for r in range(fl.rowCount())
                 if fl.itemAt(r, QFormLayout.ItemRole.LabelRole) and fl.itemAt(r, QFormLayout.ItemRole.LabelRole).widget()]
         lw = max((x.sizeHint().width() for x in labs), default=0)
         for x in labs:                                   # 四组的左边标签一样宽:输入框左边对齐(设计师试用)
@@ -3484,22 +3809,41 @@ class MainWindow(QMainWindow):
                 accs.append({"name": line.strip(), "aliases": []})
         if accs:                                         # 影视号(有自己文件夹的)不在这个框里:原样留着(在「账号管理」里改)
             accs += [a for a in self.st["accounts"] if a.get("dir") and a.get("name") not in {x["name"] for x in accs}]
-        self.st.update(material_root=e_root.text().strip() or self.st["material_root"],
-                       archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
-                       batch_size=sp.value(), ai_key=e_key.text().strip(),
-                       ai_cover=k_aic.isChecked(), ai_cover_trust=k_trust.isChecked(), sharp_check=k_sharp.isChecked(),
-                       crop_check=k_crop.isChecked(), outro_check=k_outro.isChecked(),
-                       bad_cover_auto=k_bad_cov.isChecked(),
-                       bad_cover_dir=e_bad_dir.text().strip() or DEFAULTS["bad_cover_dir"],
-                       api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(),
-                       game_words={ln.split("=", 1)[0].strip(): [x.strip() for x in ln.split("=", 1)[1].replace(",", "、").replace("，", "、").split("、") if x.strip()]
-                                   for ln in e_games.toPlainText().splitlines() if "=" in ln and ln.split("=", 1)[0].strip()}, api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
-                       api_archive=api_get() or self.st.get("api_archive", ""),
-                       api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or TH.DEFAULT,
-                       splash=k_splash.isChecked(), own_ai_url=e_ourl.text().strip(), own_ai_model=e_omodel.text().strip(),
-                       own_ai_key=e_okey.text().strip(), own_ai_vision=vis[0])
+        new_role = str(c_lan_role.currentData() or lansync.ROLE_OFF)
+        new_port = int(sp_lport.value())
+        new_host = e_chost.text().strip()
+        new_token = (e_hpin.text().strip() or lansync.gen_pin()) if new_role == lansync.ROLE_HOST else (
+            e_cpin.text().strip() if new_role == lansync.ROLE_CLIENT else old_token)
+        lan_changed = (old_role, old_port, old_lhost, old_token) != (new_role, new_port, new_host, new_token)
+        new_vals = dict(
+            material_root=e_root.text().strip() or self.st["material_root"],
+            archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
+            batch_size=sp.value(), ai_key=e_key.text().strip(),
+            ai_cover=k_aic.isChecked(), ai_cover_trust=k_trust.isChecked(), sharp_check=k_sharp.isChecked(),
+            crop_check=k_crop.isChecked(), outro_check=k_outro.isChecked(),
+            bad_cover_auto=k_bad_cov.isChecked(),
+            bad_cover_dir=e_bad_dir.text().strip() or DEFAULTS["bad_cover_dir"],
+            api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(),
+            game_words={ln.split("=", 1)[0].strip(): [x.strip() for x in ln.split("=", 1)[1].replace(",", "、").replace("，", "、").split("、") if x.strip()]
+                        for ln in e_games.toPlainText().splitlines() if "=" in ln and ln.split("=", 1)[0].strip()},
+            api_interval=sp_gap.value(), api_cover=c_cov.currentData() or "原样",
+            api_archive=api_get() or self.st.get("api_archive", ""),
+            api_archive_by_game=k_game.isChecked(), theme=c_theme.currentData() or TH.DEFAULT,
+            splash=k_splash.isChecked(), own_ai_url=e_ourl.text().strip(), own_ai_model=e_omodel.text().strip(),
+            own_ai_key=e_okey.text().strip(), own_ai_vision=vis[0],
+            lan_role=new_role, lan_port=new_port, lan_host=new_host, lan_token=new_token)
+        changed_vals = {k: v for k, v in new_vals.items() if self.st.get(k) != v}
+        if changed_vals:
+            self.st.update(changed_vals)
         C.AI_KEY = self.st.ai_key()
-        self.st.save()
+        try:
+            if changed_vals:
+                self.st.save()
+        except LanError as e:
+            if not lan_changed:
+                QMessageBox.warning(self, "保存设置到主机失败", str(e))
+        if lan_changed:
+            self._apply_lan_settings()
         from PySide6.QtWidgets import QApplication
         TH.apply(QApplication.instance(), self.st["theme"])
         from gui.widgets import retheme_shell
@@ -3559,4 +3903,5 @@ class MainWindow(QMainWindow):
             while any(not j.wait(200) for j in rs):
                 QApplication.processEvents()
             dlg.close()
+        lansync.stop()
         super().closeEvent(e)

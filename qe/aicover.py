@@ -68,14 +68,26 @@ def cached(v) -> dict | None:
     return _load().get(_key_of(v))
 
 
-def _save(v, res: dict):
+def put_entry(key: str, res: dict):
     with _lock:
         d = _load()
-        d[_key_of(v)] = res
+        d[key] = res
         p = _store_path()
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
         tmp.replace(p)
+        from . import lansync
+        if not lansync.is_reloading():
+            lansync.bump("aicover")
+
+
+def _save(v, res: dict):
+    from . import lansync
+    k = _key_of(v)
+    c = None if lansync.is_reloading() else lansync.active_client()
+    if c is not None:
+        c.store_op("aicover", "put_entry", key=k, res=res)
+    put_entry(k, res)
 
 
 def _jpeg(im, h: int = 360) -> bytes:

@@ -28,11 +28,7 @@ def search(rec, kw: str, limit: int = 60) -> list[dict]:
     kw = (kw or "").strip()
     if not kw:
         return []
-    rec._fill()
-    with rec.conn:
-        rows = [dict(r) for r in rec.conn.execute(
-            "SELECT * FROM posts WHERE title LIKE ? AND status IN ('已发','摆好','结果不明','发布中','没发成') ORDER BY id DESC LIMIT 400",
-            (f"%{kw}%",))]
+    rows = rec.search_title(kw, 400)
     seen, out = set(), []
     for r in rows:
         m = re.search(r"article_id=(\w+)", r.get("note") or "")
@@ -210,8 +206,7 @@ def pull_back(st, rec, row: dict, md: str, out: dict | None = None) -> tuple[str
     out = out if out is not None else {}
     out.setdefault("room", 0)
     out.setdefault("warn", [])
-    cur = rec.conn.execute("SELECT status FROM posts WHERE id=?", (row["id"],)).fetchone()
-    status = cur[0] if cur else row.get("status")
+    status = rec.status_by_id(row["id"]) or row.get("status")
     why = why_not_movable(dict(row, status=status))
     if why:
         return "", why
@@ -278,10 +273,7 @@ def _relink_all(rec, row: dict, src: str, new: str, note: str) -> None:
     keys = {pkey(row.get("path") or ""), pkey(src)}
     if row.get("moved_pkey"):
         keys.add(row["moved_pkey"])
-    with rec.conn:
-        ids = [r[0] for r in rec.conn.execute(
-            f"SELECT id FROM posts WHERE status IN ('已发','没发成') AND (pkey IN ({','.join('?' * len(keys))}) "
-            f"OR moved_pkey IN ({','.join('?' * len(keys))}))", (*keys, *keys))]
+    ids = rec.movable_ids_for_keys(list(keys))
     ids = sorted(set(ids) | {row["id"]})
     for rid in ids:
         rec.mark_unsent(rid, note)

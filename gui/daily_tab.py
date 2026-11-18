@@ -167,6 +167,14 @@ class DailyTab(QWidget):
 
     def verify(self, nicks: list[str] | None = None):
         """去企鹅号核对:不给号 = 16 个号全查;给了 = 只查这几个(右键一个号)。"""
+        from PySide6.QtWidgets import QMessageBox
+        from qe.lansync import LanError
+        try:
+            if hasattr(self.rec, "sync_now"):
+                self.rec.sync_now(strict=True)
+        except LanError as e:
+            QMessageBox.warning(self, "去企鹅号核对", str(e))
+            return
         from gui.verify_dialog import VerifyDialog
         VerifyDialog(self.rec, self.day(), self, nicks=nicks or None, st=self.st).exec()
         self.refresh()
@@ -177,7 +185,15 @@ class DailyTab(QWidget):
         self.refresh()
 
     def refresh(self):
-        s = plan.summary(self.rec, self.st, self.day())
+        from qe.lansync import LanError
+        try:
+            s = plan.summary(self.rec, self.st, self.day())
+        except LanError as e:
+            self.hint.setText(f"⚠ {e}")
+            self.hint.setToolTip(str(e))
+            self.hint_more.hide()
+            repolish(self.hint, tone="warn")
+            return
         self._s = s
         # 「/ 后面」写原本的规定(和企业微信表一样,用户 2026-10-26「规定的 80」);还差几条按 规定 + 补发 / 临时多发 算
         rex = s.get("rows_extra") or [0] * len(s["rows"])

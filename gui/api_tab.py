@@ -136,6 +136,10 @@ class _Taken(Exception):
     """要发的时候发现这个文件别的号已经发过 / 正在发(两个号手选了同一个文件夹)。"""
 
 
+class _QuotaFull(Exception):
+    """两台电脑加起来已经发到这个号今天的规定条数上限了。"""
+
+
 def _num(x, default: int) -> int:
     """设置里手写坏了的数字(「5秒」)也不让发布按钮没反应。"""
     try:
@@ -1329,6 +1333,8 @@ class ApiTab(QWidget):
             self._busy_ui()
         if any(not j.quiet for j in self.running_jobs()):    # 有号在干活:不能整张重读,只能局部刷新别的号
             return
+        if hasattr(self.rec, "sync_now"):
+            self.rec.sync_now(strict=False)
         self._gen += 1
         d = self.day()
         if d and self.st.get("api_last_date") != d:
@@ -1357,13 +1363,22 @@ class ApiTab(QWidget):
         self._load_sent_keys()
         self._refresh_dups()
         # 这天已经发出去、挪走了的(列表里没有了,但记录里有):号那一行和上面卡片要算上
-        self.today_sent = self.rec.sent_on(plan.today())
-        self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
+        from qe.lansync import LanError
+        try:
+            self.today_sent = self.rec.sent_on(plan.today())
+            self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
+            rec_rows = self.rec.rows(d) if d else []
+        except LanError as e:
+            self.today_sent = self.rec.mirror_sent_on(plan.today()) if hasattr(self.rec, "mirror_sent_on") else {}
+            self.day_sent = self.today_sent if self._is_today() else (
+                self.rec.mirror_sent_on(self._qday()) if hasattr(self.rec, "mirror_sent_on") else {})
+            rec_rows = self.rec._mirror.rows(d) if (d and hasattr(self.rec, "_mirror") and self.rec.mirror_ready()) else []
+            self.say(f"⚠ {e}")
         self.archived = {}
         if d:
             here = {pkey(v.path) for v in self.videos}
             seen = set()
-            for r in self.rec.rows(d):
+            for r in rec_rows:
                 if r["employee"] == "接口" and r["status"] == "已发" and pkey(r["path"]) not in here and pkey(r["path"]) not in seen:
                     seen.add(pkey(r["path"]))
                     self.archived[r["account"]] = self.archived.get(r["account"], 0) + 1
@@ -1405,6 +1420,8 @@ class ApiTab(QWidget):
         d = self.day()
         if not d or not nicks:
             return
+        if hasattr(self.rec, "sync_now"):
+            self.rec.sync_now(strict=False)
         self._sharp_stop()
         words = self.st.get("api_platform_words") or None
         sel_ids = {id(self.videos[i]) for i in self.selected_rows()}
@@ -1448,12 +1465,20 @@ class ApiTab(QWidget):
         self.videos, self.state, self.why = new_vs, new_st, new_why
         self._load_sent_keys()
         self._refresh_dups()
-        self.today_sent = self.rec.sent_on(plan.today())
-        self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
+        from qe.lansync import LanError
+        try:
+            self.today_sent = self.rec.sent_on(plan.today())
+            self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
+            rec_rows = self.rec.rows(d)
+        except LanError:
+            self.today_sent = self.rec.mirror_sent_on(plan.today()) if hasattr(self.rec, "mirror_sent_on") else {}
+            self.day_sent = self.today_sent if self._is_today() else (
+                self.rec.mirror_sent_on(self._qday()) if hasattr(self.rec, "mirror_sent_on") else {})
+            rec_rows = self.rec._mirror.rows(d) if hasattr(self.rec, "_mirror") and self.rec.mirror_ready() else []
         here = {pkey(v.path) for v in self.videos}
         seen = set()
         self.archived = {}
-        for r in self.rec.rows(d):
+        for r in rec_rows:
             if r["employee"] == "接口" and r["status"] == "已发" and pkey(r["path"]) not in here and pkey(r["path"]) not in seen:
                 seen.add(pkey(r["path"]))
                 self.archived[r["account"]] = self.archived.get(r["account"], 0) + 1
@@ -2568,8 +2593,9 @@ class ApiTab(QWidget):
             self.state.pop(i, None)
         elif t:
             if t.startswith("已发") and not self.state.get(i, "").startswith("已发"):
-                self.today_sent = self.rec.sent_on(plan.today())
-                self.day_sent = self.today_sent if self._is_today() else self.rec.sent_on(self._qday())
+                self.today_sent = self.rec.mirror_sent_on(plan.today()) if hasattr(self.rec, "mirror_sent_on") else self.rec.sent_on(plan.today())
+                self.day_sent = self.today_sent if self._is_today() else (
+                    self.rec.mirror_sent_on(self._qday()) if hasattr(self.rec, "mirror_sent_on") else self.rec.sent_on(self._qday()))
                 v0 = self.videos[i]
                 self._sent_keys.setdefault(self._dkey(v0.account, v0.title), {"date": v0.date, "path": v0.path})
             self.state[i] = t
@@ -3610,7 +3636,24 @@ class ApiTab(QWidget):
         elif unchecked:
             QMessageBox.information(self, "发布", f"还有 {len(unchecked)} 条没检查完,等检查完(或点「检查」)再发。")
             return
-        rows = [i for i in scope if self._can_send(i) and not self.rec.blocked(self.videos[i].path)]
+        from qe.lansync import LanError
+        try:
+            if hasattr(self.rec, "sync_now"):
+                self.rec.sync_now(strict=True)
+        except LanError as e:
+            if auto:
+                self.say(f"⚠ {e}")
+            else:
+                QMessageBox.warning(self, "连不上主机", f"{e}\n\n为防止两台电脑重发或超发,先不发。")
+            return
+        try:
+            rows = [i for i in scope if self._can_send(i) and not self.rec.blocked(self.videos[i].path)]
+        except LanError as e:
+            if auto:
+                self.say(f"⚠ {e}")
+            else:
+                QMessageBox.warning(self, "连不上主机", f"{e}\n\n为防止两台电脑重发或超发,先不发。")
+            return
         if not rows:
             if not picked and self.filtering():
                 QMessageBox.information(self, "发布", "现在开着「只看有问题的」/ 搜索,看得见的这些里没有能发的。\n\n"
@@ -3656,8 +3699,16 @@ class ApiTab(QWidget):
             by_acc.setdefault(self.videos[i].account, []).append(i)
         # 每天规定条数的闸(用户 2026-10-20 PUBG 多发了 21 条):每个号最多发到规定条数;没发成的拿下一条补;
         # 发够了这个号还没发的挪到明天的文件夹。设置里「开闸」才不管
-        sent0 = self.rec.sent_on(plan.today())
+        try:
+            sent0 = self.rec.sent_on(plan.today())
+        except LanError as e:
+            if auto:
+                self.say(f"⚠ {e}")
+            else:
+                QMessageBox.warning(self, "连不上主机", f"{e}\n\n先不发。")
+            return
         left_of = {n: plan.left_today(self.rec, self.st, n, sent=sent0) for n in by_acc}
+        cap_of = {n: (None if left_of.get(n) is None else sent0.get(n, 0) + left_of[n]) for n in by_acc}
         full = [n for n, x in left_of.items() if x == 0]
         for n in full:
             by_acc.pop(n)
@@ -3781,18 +3832,27 @@ class ApiTab(QWidget):
                 bump("fail", len(idx_vs))
                 return
             def one(k, v, turn=True):
-                """发一条:返回 "ok" / "next"(这条跳过或没发成,接着下一条)/ "stop"(停了)/ "fatal"(号的密钥坏了,这个号后面的别发)。"""
+                """发一条:返回 "ok" / "next"(这条跳过或没发成,接着下一条)/ "stop"(停了)/ "quota"(到规定条数了)/ "fatal"(号的密钥坏了,这个号后面的别发)。"""
                 if stopped():
                     return "stop"
-                if self.rec.blocked(v.path):              # 防重发:已发 / 结果不明都不发
-                    emit(v, self.rec.status_of(v.path))
-                    return "next"
+                from qe.lansync import LanError
+                try:
+                    if self.rec.blocked(v.path):              # 防重发:已发 / 结果不明都不发
+                        emit(v, self.rec.status_of(v.path))
+                        return "next"
+                except LanError:
+                    emit(v, "没发成:连不上主机")
+                    emit(-1, f"「{nick}」{v.title}:连不上主机,先停下(防重发)")
+                    return "stop"
                 if turn and not wait_turn(stopped):
                     return "stop"
                 rid = {}
 
                 def begin(vid, v=v, rid=rid):
-                    got = _retry(lambda: self.rec.try_begin(v, f"vid={vid}"))
+                    cap = cap_of.get(nick)
+                    got = _retry(lambda: self.rec.try_begin(v, f"vid={vid}", day=plan.today(), cap=cap))
+                    if got == -1:
+                        raise _QuotaFull()
                     if got is None:
                         raise _Taken()
                     rid["id"] = got
@@ -3825,6 +3885,16 @@ class ApiTab(QWidget):
                                 log=lambda m, v=v: emit(v, m + "…"))
                 except Stopped:
                     emit(v, "停下了,没发")
+                    return "stop"
+                except _QuotaFull:
+                    emit(v, "今天规定条数已够(另一台已发满)")
+                    emit(-1, f"「{nick}」今天规定条数已够(另一台刚发满),这个号剩下的先不发")
+                    return "quota"
+                except LanError as e:
+                    emit(v, "没发成:连不上主机")
+                    emit(-1, f"「{nick}」{v.title}:{e}")
+                    bump("fail")
+                    done_one(emit, stopped)
                     return "stop"
                 except _Taken:                            # 别的号刚发过 / 正在发同一个文件:这条不发
                     emit(v, self.rec.status_of(v.path) or "已发")
@@ -3926,7 +3996,7 @@ class ApiTab(QWidget):
                     if "fatal" in res1:
                         fatal_rest(idx_vs[pos:])
                         return
-                    if "stop" in res1:
+                    if "stop" in res1 or "quota" in res1:
                         return
             finally:
                 with slock:
@@ -4301,3 +4371,41 @@ class ApiTab(QWidget):
         names = [f"{a['nick']}({apiacc.CATEGORIES.get(a['category'], a['category'])})" for a in apiacc.load()]
         self.say(f"搬了 {n} 个号:" + "、".join(names))
         self.reload_dates()
+
+    def _on_lan_changed(self, kinds: list[str]):
+        """局域网主机或另一台电脑刚发了 / 改了记录或设置:本页空闲时把数字和已发标记刷一下。"""
+        if self.busy():
+            return
+        if "settings" in kinds or "apiacc" in kinds:
+            self.load()
+            return
+        from qe import plan
+        from qe.lansync import LanError
+        try:
+            self.today_sent = self.rec.mirror_sent_on(plan.today()) if hasattr(self.rec, "mirror_sent_on") else self.rec.sent_on(plan.today())
+            self.day_sent = self.today_sent if self._is_today() else (
+                self.rec.mirror_sent_on(self._qday()) if hasattr(self.rec, "mirror_sent_on") else self.rec.sent_on(self._qday()))
+        except LanError:
+            return
+        changed_rows = []
+        for i, v in enumerate(self.videos):
+            s = self.rec.status_of(v.path)
+            if self.state.get(i, "") != (s or ""):
+                if s:
+                    self.state[i] = s
+                else:
+                    self.state.pop(i, None)
+                changed_rows.append(i)
+            elif any(k in kinds for k in ("wm", "ads", "crop", "outro", "sharp")):
+                v.sharp = sharp.STORE.get(v.path)
+                self._attach_wm(v)
+                changed_rows.append(i)
+        if "gamecheck" in kinds or "titledate" in kinds or "titleclean" in kinds:
+            self._refresh_blocked()
+            changed_rows = list(range(len(self.videos)))
+        for i in changed_rows:
+            if i in self.items:
+                self._fill(i)
+        self._load_sent_keys()
+        self._refresh_dups()
+        self._update_sum()

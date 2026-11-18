@@ -168,10 +168,19 @@ def summary_text(items: list[dict]) -> str:
 
 
 def save(day: str, items: list[dict]) -> None:
+    from . import lansync
+    c = None if lansync.is_reloading() else lansync.active_client()
+    if c is not None:
+        try:
+            c.store_op("blackcover", "save", day=day, items=items)
+        except Exception:
+            pass
     p = _store_path()
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps({"day": day, "items": items}, ensure_ascii=False), "utf-8")
     tmp.replace(p)
+    if c is None and not lansync.is_reloading():
+        lansync.bump("blackcover")
 
 
 def load(day: str) -> list[dict]:
@@ -241,8 +250,13 @@ def export_covers(items: list[dict], st, rec=None, stopped=None, step=None, ffmp
         return 0
     own_rec = rec is None
     if own_rec:
-        from . import records
-        rec = records.Records()
+        from . import lansync, records
+        c = lansync.active_client()
+        if c is not None and c.rec is not None:
+            rec = c.rec
+            own_rec = False
+        else:
+            rec = records.Records()
     ready = 0
     try:
         for i, it in enumerate(items):
@@ -258,9 +272,9 @@ def export_covers(items: list[dict], st, rec=None, stopped=None, step=None, ffmp
             if p:
                 ready += 1
     finally:
-        if own_rec and getattr(rec, "conn", None):
+        if own_rec:
             try:
-                rec.conn.close()
+                rec.close()
             except Exception:
                 pass
     return ready

@@ -7650,6 +7650,163 @@ def test_portable_bundle(tmp: Path):
             os.environ["QE_DATA_DIR"] = old_env
 
 
+def test_lan_sync(tmp: Path):
+    print("\n[两台电脑局域网互通(方案 B):记录实时同步、防重发、双机额度闸、缓存/放行互通、断主机拦阻、旧账合并]")
+    from types import SimpleNamespace
+    from qe import adjust, apiacc, config as cfg, dimcache, gamecheck, lansync, plan, titledate, wmstore
+    from qe.records import Records
+    old_env = os.environ.get("QE_DATA_DIR")
+    host_dir = tmp / "lan_host"
+    cli_dir = tmp / "lan_cli"
+    host_dir.mkdir()
+    cli_dir.mkdir()
+    try:
+        # 1. 初始化主机目录(端口 0 让系统分配空闲口),预先放好一条已发和设置
+        os.environ["QE_DATA_DIR"] = str(host_dir)
+        st_h = cfg.Settings(host_dir / "设置.json")
+        st_h.update(lan_role="host", lan_port=0, lan_token="482910", theme="深色",
+                    schedules=["host_only_sched"],
+                    daily_plan={"CSGO战神君": 2},
+                    api_picked={"11.17": {"电竞情报馆": "X:/old_pick"}})
+        st_h.save()
+        apiacc.save([{"nick": "CSGO战神君", "client_id": "cidA", "secret": apiacc.seal("secA"), "category": 1604, "enabled": True}])
+        adj_h = adjust.Adjustments(host_dir / "封面调整.json")
+        rec_h = lansync.setup(st_h, adj=adj_h)
+        h = lansync.active_host()
+        check(h is not None and h.bound_port > 0, f"主机服务启起来 -> port={getattr(h, 'bound_port', 0)}")
+        port = h.bound_port
+
+        # 错误配对码被拒绝
+        bad_pin = False
+        try:
+            lansync.test_connection(f"127.0.0.1:{port}", "000000")
+        except lansync.LanError:
+            bad_pin = True
+        check(bad_pin, "配对码不对时主机拒绝连接")
+        ping_ok = lansync.test_connection(f"127.0.0.1:{port}", "482910")
+        check(ping_ok.get("ok") is True, f"正确配对码 ping 通 -> {ping_ok}")
+
+        # 2. 主机先发一条视频 A (验证 db_rev 从 0 -> 1 也能增量同步!)
+        va = SimpleNamespace(date="11.18", account="CSGO战神君", employee="接口", title="视频A", path=str(tmp / "a.mp4"), cover_kind="")
+        Path(va.path).write_bytes(b"va")
+        rid_a = rec_h.try_begin(va, "vid=A1")
+        rec_h.api_finish(rid_a, "已发", "article_id=AA1 vid=A1")
+
+        # 3. 初始化从机(本地旧库先带 1 条重复的 va + 1 条未并入的 vd;注意从机有自己的 PORT1 钥匙 & schedules)
+        os.environ["QE_DATA_DIR"] = str(cli_dir)
+        apiacc.seal_portable("init_key")
+        st_c = cfg.Settings(cli_dir / "设置.json")
+        st_c.update(lan_role="client", lan_host=f"127.0.0.1:{port}", lan_token="482910",
+                    theme="浅色", schedules=["cli_only_sched"])
+        st_c.save()
+        vd = SimpleNamespace(date="11.18", account="CSGO战神君", employee="接口", title="视频D", path=str(tmp / "d.mp4"), cover_kind="")
+        Path(vd.path).write_bytes(b"vd")
+        old_cli_rec = Records(cli_dir / "发布记录.sqlite")
+        old_cli_rec.api_result(va, "已发", "重复的旧账")
+        old_cli_rec.api_result(vd, "已发", "只有新机发过的旧账")
+        old_cli_rec.close()
+
+        # 切换到从机实例(直接让 Host 保持在线程里;只换 client env 运行 RemoteRecords/LanClient)
+        # 因为 _HOST 与 _BOUND_DATA 绑定的是 host_dir,测试里用 LanClient + RemoteRecords 直接模拟第二台进程
+        from qe.records import RemoteRecords
+        cli = lansync.LanClient(f"127.0.0.1:{port}", "482910", st_c)
+        rrec = RemoteRecords(cli, cli_dir / "发布记录_主机镜像.sqlite")
+        cli.rec = rrec
+        # 在 cli_dir 测试过程中暂时把 lansync._CLIENT 指过去(测试结束停掉)
+        with lansync._REG_LOCK:
+            old_host_ref, old_cli_ref, old_bdata = lansync._HOST, lansync._CLIENT, lansync._BOUND_DATA
+            lansync._CLIENT = cli
+            lansync._BOUND_DATA = str(cli_dir)
+        try:
+            cli.sync_poll(strict=True)
+            check(rrec.status_of(va.path) == "已发" and rrec.sent_on(plan.today()).get("CSGO战神君") == 1,
+                  f"从机首次同步就看见主机发过的视频A与今日已发=1 -> {rrec.sent_on(plan.today())}")
+            check(st_c.get("theme") == "浅色" and st_c.get("schedules") == ["cli_only_sched"]
+                  and st_c.get("daily_plan") == {"CSGO战神君": 2},
+                  f"从机拉回主机规定条数但保留自己的皮肤与定时 -> {st_c.get('daily_plan')} / {st_c.get('theme')}")
+            # 账号密钥也通过局域网密文同步成从机 PORT1 可解
+            c_accs = apiacc.load()
+            check(len(c_accs) == 1 and c_accs[0]["secret"].startswith("PORT1:") and apiacc.unseal(c_accs[0]["secret"]) == "secA",
+                  "账号钥匙从主机密文同步到从机并转成便携 PORT1 解出正确")
+
+            # 防重发:从机想再发视频 A -> try_begin 返回 None
+            check(rrec.try_begin(va, "vid=A_dup") is None, "主机发过的视频A,从机 try_begin 原子拦住不重发")
+
+            # 从机发视频 B -> 主机立刻看见,今日总账 = 2
+            vb = SimpleNamespace(date="11.18", account="CSGO战神君", employee="接口", title="视频B", path=str(tmp / "b.mp4"), cover_kind="")
+            Path(vb.path).write_bytes(b"vb")
+            rid_b = rrec.try_begin(vb, "vid=B1", day=plan.today(), cap=2)
+            check(isinstance(rid_b, int) and rid_b > 0, f"从机领到视频B发送权 -> rid={rid_b}")
+            rrec.api_finish(rid_b, "已发", "article_id=BB1 vid=B1")
+            check(rec_h.status_of(vb.path) == "已发" and rec_h.sent_on(plan.today()).get("CSGO战神君") == 2,
+                  f"从机发完视频B,主机立刻记上(总计2条) -> {rec_h.sent_on(plan.today())}")
+
+            # 规定条数 cap=2 已满 -> 视频C(不管主机还是从机)返回 -1
+            vc = SimpleNamespace(date="11.18", account="CSGO战神君", employee="接口", title="视频C", path=str(tmp / "c.mp4"), cover_kind="")
+            Path(vc.path).write_bytes(b"vc")
+            check(rrec.try_begin(vc, "vid=C1", day=plan.today(), cap=2) == -1, "双机合计达规定上限 2,从机拦截返回 -1")
+
+            # 检查缓存与截图互传(outro + screenshot + gamecheck + titledate + settings api_picked merge)
+            cshot = cli_dir / "结尾截图" / "shot_cli.jpg"
+            cshot.parent.mkdir(parents=True, exist_ok=True)
+            cshot.write_bytes(b"JPEG_SHOT_DATA")
+            wmstore.OUTRO.put(vb.path, {"hits": [{"start": 2.0}], "shot": str(cshot)})
+            gamecheck.store().set_ok("CSGO战神君", "视频B", True)
+            titledate.store().set("CSGO战神君", "视频B", True)
+            st_c["api_picked"] = {"11.18": {"电竞情报馆": "X:/cli_1118"}}
+            st_c.save()
+            check(st_h.get("api_picked") == {"11.17": {"电竞情报馆": "X:/old_pick"}, "11.18": {"电竞情报馆": "X:/cli_1118"}}
+                  and st_h.get("schedules") == ["host_only_sched"],
+                  f"从机选文件夹温和合并进主机且不覆盖 11.17/主机定时 -> {st_h.get('api_picked')}")
+
+            # 切换到主机 env 验证主机真收到了检查结果与截图文件
+            os.environ["QE_DATA_DIR"] = str(host_dir)
+            with lansync._REG_LOCK:
+                lansync._CLIENT = None
+                lansync._HOST = h
+                lansync._BOUND_DATA = str(host_dir)
+            wmstore.OUTRO.reload()
+            got_outro = wmstore.OUTRO.get(vb.path)
+            check(bool(got_outro and got_outro["hits"] and os.path.isfile(got_outro["shot"])),
+                  f"从机上传的结尾截图与缓存同步进了主机 -> {got_outro}")
+            check(gamecheck.store().ok("CSGO战神君", "视频B") and titledate.store().ok("CSGO战神君", "视频B"),
+                  "从机点的串游戏/标题日期放行同步进主机")
+
+            # 把从机旧库里没并入的 vd 合并进主机(a 已在前端去重过滤, 只发送 d 并入)
+            os.environ["QE_DATA_DIR"] = str(cli_dir)
+            with lansync._REG_LOCK:
+                lansync._CLIENT = cli
+                lansync._BOUND_DATA = str(cli_dir)
+            unm = lansync.unmerged_local_rows(cli)
+            m_cnt, s_cnt = lansync.merge_local_to_host(cli)
+            check(len(unm) == 1 and (m_cnt, s_cnt) == (1, 0) and rec_h.status_of(vd.path) == "已发",
+                  f"旧账去重合并:筛出 1 条未同步、并入 1 条 -> unm={len(unm)} {(m_cnt, s_cnt)}")
+
+            # 主机离线(关停):从机所有写操作和 try_begin 必须抛 LanError 拦住,绝不悄悄写入本地
+            h.stop()
+            offline_blocked = False
+            try:
+                rrec.try_begin(vc, "vid=C_off")
+            except lansync.LanError:
+                offline_blocked = True
+            check(offline_blocked, "主机关掉/离线时,从机 try_begin 明确报 LanError 拦住,绝不各自乱发")
+        finally:
+            rrec.close()
+            cli.close()
+            h.stop()
+            rec_h.close()
+            with lansync._REG_LOCK:
+                lansync._HOST = old_host_ref
+                lansync._CLIENT = old_cli_ref
+                lansync._BOUND_DATA = old_bdata
+    finally:
+        lansync.stop()
+        if old_env is None:
+            os.environ.pop("QE_DATA_DIR", None)
+        else:
+            os.environ["QE_DATA_DIR"] = old_env
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -7750,6 +7907,7 @@ if __name__ == "__main__":
     test_verify_web_and_lag(tmp)
     test_black_cover_v2(tmp)
     test_portable_bundle(tmp)
+    test_lan_sync(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

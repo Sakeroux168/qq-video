@@ -108,13 +108,17 @@ class Store:
 
     def __init__(self, path=None):
         self.path = str(path or (data_dir() / "游戏判断.json"))
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                self.d = json.load(f)
-        except (OSError, ValueError):
-            self.d = {}
-        for k in (AI_KEY, "ok", "batch_ok"):
-            self.d.setdefault(k, {})
+        self.reload()
+
+    def reload(self):
+        with _LOCK:
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    self.d = json.load(f)
+            except (OSError, ValueError):
+                self.d = {}
+            for k in (AI_KEY, "ok", "batch_ok"):
+                self.d.setdefault(k, {})
 
     @staticmethod
     def tkey(title: str) -> str:
@@ -122,13 +126,16 @@ class Store:
         return norm_name(title) or str(title)
 
     def ai(self, title: str):
-        return self.d[AI_KEY].get(self.tkey(title))
+        with _LOCK:
+            return self.d[AI_KEY].get(self.tkey(title))
 
     def ok(self, nick: str, title: str) -> bool:
-        return bool(self.d["ok"].get(f"{nick}|{self.tkey(title)}"))
+        with _LOCK:
+            return bool(self.d["ok"].get(f"{nick}|{self.tkey(title)}"))
 
     def batch_ok(self, nick: str, day: str) -> bool:
-        return bool(self.d["batch_ok"].get(f"{nick}|{day}"))
+        with _LOCK:
+            return bool(self.d["batch_ok"].get(f"{nick}|{day}"))
 
     def _save(self):
         tmp = self.path + ".tmp"
@@ -137,12 +144,22 @@ class Store:
         os.replace(tmp, self.path)
 
     def set_ai(self, got: dict):
+        from . import lansync
+        c = None if lansync.is_reloading() else lansync.active_client()
+        if c is not None:
+            c.store_op("gamecheck", "set_ai", got=got)
         with _LOCK:
             for t, g in got.items():
                 self.d[AI_KEY][self.tkey(t)] = g
             self._save()
+            if c is None:
+                lansync.bump("gamecheck")
 
     def set_ok(self, nick: str, title: str, on: bool = True):
+        from . import lansync
+        c = None if lansync.is_reloading() else lansync.active_client()
+        if c is not None:
+            c.store_op("gamecheck", "set_ok", nick=nick, title=title, on=on)
         with _LOCK:
             k = f"{nick}|{self.tkey(title)}"
             if on:
@@ -150,8 +167,14 @@ class Store:
             else:
                 self.d["ok"].pop(k, None)
             self._save()
+            if c is None:
+                lansync.bump("gamecheck")
 
     def set_batch_ok(self, nick: str, day: str, on: bool = True):
+        from . import lansync
+        c = None if lansync.is_reloading() else lansync.active_client()
+        if c is not None:
+            c.store_op("gamecheck", "set_batch_ok", nick=nick, day=day, on=on)
         with _LOCK:
             k = f"{nick}|{day}"
             if on:
@@ -159,6 +182,8 @@ class Store:
             else:
                 self.d["batch_ok"].pop(k, None)
             self._save()
+            if c is None:
+                lansync.bump("gamecheck")
 
 
 _STORE = None
@@ -167,7 +192,8 @@ AI_KEY = "ai2"           # 第 2 版问法(要说出标题里哪个词是别的�
 
 def store() -> Store:
     global _STORE
-    d = os.environ.get("QE_DATA_DIR", "").strip()            # 不每次都 data_dir()(它会建文件夹,列表刷新时调用很多次)
+    from . import config as _cfg
+    d = str(getattr(_cfg._LOCAL_CTX, "data_dir", "") or "").strip() or os.environ.get("QE_DATA_DIR", "").strip()
     if _STORE is None or _STORE._env != d:
         _STORE = Store()
         _STORE._env = d

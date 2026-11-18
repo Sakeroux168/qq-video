@@ -157,6 +157,5 @@ class FindDialog(QDialog):
         if why:
             QMessageBox.warning(self, "在企鹅号上删掉", why)
             return
-        self.rec.conn.execute("UPDATE posts SET note=note || ? WHERE id=?", ("(找视频重发:在企鹅号上删掉了)", r["id"]))
-        self.rec.conn.commit()
+        self.rec.note_once(r["id"], "(找视频重发:在企鹅号上删掉了)")
         self.lab.setText("企鹅号上删掉了。要重发就再点「挪回去重发」")
