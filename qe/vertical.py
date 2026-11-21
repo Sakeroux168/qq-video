@@ -53,7 +53,8 @@ def probe(path: str, ffmpeg: str = "") -> dict:
         dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
     if rot == 90:
         w, h = h, w
-    return {"w": w, "h": h, "rot": rot, "dur": dur}
+    has_aud = bool(re.search(r"Stream #\S+.*?Audio:", txt))
+    return {"w": w, "h": h, "rot": rot, "dur": dur, "has_audio": has_aud if (w or has_aud) else None}
 
 
 def is_landscape(info: dict) -> bool:

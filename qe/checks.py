@@ -43,7 +43,8 @@ def check_one(v, words=None, ffmpeg: str = "") -> dict:
     """填 v.checks:{"w","h","landscape","platform":[..],"tags":[..],"bad_read":bool},返回它。"""
     info = vertical.probe(v.path, ffmpeg)
     tags = topic.split_topics(v.title)["tags"]
-    v.checks = {"w": info["w"], "h": info["h"], "dur": info["dur"], "landscape": vertical.is_landscape(info),
+    v.checks = {"w": info["w"], "h": info["h"], "dur": info["dur"], "has_audio": info.get("has_audio"),
+                "landscape": vertical.is_landscape(info),
                 "squarish": vertical.is_squarish(info),
                 "bad_read": not info["w"], "platform": platform_hits(v.title, words), "tags": tags}
     return v.checks

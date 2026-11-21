@@ -5,20 +5,22 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QThread, Signal
 
-from qe import aierr, cropcheck, outrocheck, sharp, vertical, wmstore
+from qe import aierr, audiocheck, cropcheck, outrocheck, sharp, vertical, wmstore
 
 
 class SharpWorker(QThread):
     one = Signal(int)
 
     def __init__(self, videos, rows, parent=None, want_sharp: bool = True, crop_key: str = "", need_crop=None, asker=None,
-                 force=None, can_crop=None, outro_key="", need_outro=None, outro_asker=None, outro_shot_dir: str = "", skip=None):
+                 force=None, can_crop=None, outro_key="", need_outro=None, outro_asker=None, outro_shot_dir: str = "", skip=None,
+                 want_audio: bool = False):
         """crop_key / outro_key = AI(空 = 不查);need_crop / need_outro(v) = 这条要不要查;can_crop(v) = 这种号查不查(重新检查时看);
-        asker / outro_asker:测试里换掉,绝不真问 AI;skip(v):这会儿这个号正忙别的事,先跳过它。"""
+        asker / outro_asker:测试里换掉,绝不真问 AI;skip(v):这会儿这个号正忙别的事,先跳过它;want_audio:查有没有声音(只提醒不拦)。"""
         super().__init__(parent)
         self.videos, self.rows = videos, rows
         self.want_sharp, self.crop_key, self.need_crop, self.asker = want_sharp, crop_key, need_crop or (lambda v: False), asker
         self.outro_key, self.need_outro, self.outro_asker = outro_key, need_outro or (lambda v: False), outro_asker
+        self.want_audio = want_audio
         self.outro_shot_dir = outro_shot_dir
         self.force = force if force is not None else set()
         self.can_crop = can_crop or (lambda v: True)
@@ -28,6 +30,7 @@ class SharpWorker(QThread):
         self.n_bad = 0
         self.n_crop = 0
         self.n_outro = 0
+        self.n_audio = 0
         self.errors: list[str] = []
         self.outro_errors: list[str] = []
 
@@ -91,6 +94,25 @@ class SharpWorker(QThread):
         self.n_outro += wmstore.blocks(got)
         return True
 
+    def _audio(self, v, ff: str, force: bool) -> bool:
+        got = None if force else audiocheck.STORE.get(v.path)
+        if got is None:
+            c = getattr(v, "checks", None) or {}
+            has_audio = None if force else c.get("has_audio")
+            dur = float(c.get("dur") or 0)
+            if has_audio is None and not dur and ff:
+                info = vertical.probe(v.path, ff)
+                dur = float(info.get("dur") or 0)
+                has_audio = info.get("has_audio")
+            try:
+                got = audiocheck.STORE.put(v.path, audiocheck.check(v.path, ff, dur=dur, has_audio=has_audio, stop=lambda: self.stop))
+            except Exception:
+                v.audio_err = not self.stop
+                return False
+        v.audio, v.audio_err = got, False
+        self.n_audio += audiocheck.flagged(got)
+        return True
+
     def run(self):
         ff = vertical.ffmpeg_path()
 
@@ -108,6 +130,8 @@ class SharpWorker(QThread):
                 self._crop(v, ff, force)
             if self.outro_key and not self.stop and (force or self.need_outro(v)):
                 self._outro(v, ff, force)
+            if self.want_audio and not self.stop:
+                self._audio(v, ff, force)
             if not self.stop:                            # 被打断的留着:页面接着查
                 self.force.discard(v.path)
                 self.left.discard(v.path)

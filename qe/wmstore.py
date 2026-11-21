@@ -52,6 +52,7 @@ _BY_FILE = {
     "字幕被裁.json": "crop",
     "结尾检查.json": "outro",
     "清晰度检查.json": "sharp",
+    "音频检查.json": "audio",
 }
 _INSTS: dict[str, "Store"] = {}
 

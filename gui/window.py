@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QMenu, QDialog, QDi
                                QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from qe import audiocheck
 from qe import blackcover
 from qe import checkline
 from qe import cropcheck
@@ -214,6 +215,9 @@ class DimWorker(QThread):
                     return
                 wh = (info["w"], info["h"])
                 dimcache.put(v.path, *wh)
+                p_st = getattr(self.parent(), "st", None)
+                if info.get("has_audio") is False and (p_st is None or p_st.get("audio_check", True)) and audiocheck.STORE.get(v.path) is None:
+                    v.audio = audiocheck.STORE.put(v.path, {"hits": [{"kind": "none"}]})
             if wh and not self.stop:
                 v.dims, v.shape = wh, dimcache.shape(*wh)
                 self.one.emit(i)
@@ -272,7 +276,7 @@ class OutroWorker(QThread):
 
     def run(self):
         from concurrent.futures import ThreadPoolExecutor
-        from qe import outrocheck, sharp, vertical, wmstore
+        from qe import audiocheck, outrocheck, sharp, vertical, wmstore
         ff = vertical.ffmpeg_path()
 
         def one(pair):
@@ -283,6 +287,7 @@ class OutroWorker(QThread):
             old_path = v.path
             old_outro = dict(getattr(v, "outro", None) or {})
             old_sharp = sharp.STORE.get(old_path)
+            old_audio = audiocheck.STORE.get(old_path)
             old_crop = wmstore.CROP.get(old_path)
             try:
                 new, _orig, gone = outrocheck.cut(old_path, start_sec, ff, stop=lambda: self.stop)
@@ -297,6 +302,11 @@ class OutroWorker(QThread):
                 v.sharp = sharp.STORE.get(new)
             else:
                 v.sharp = None
+            if old_audio and not audiocheck.flagged(old_audio):
+                audiocheck.STORE.move(old_path, new)
+                v.audio = audiocheck.STORE.get(new)
+            else:
+                v.audio = None
             if old_crop and not wmstore.blocks(old_crop):
                 wmstore.CROP.move(old_path, new)
                 v.crop = wmstore.CROP.get(new)
@@ -912,8 +922,16 @@ class MainWindow(QMainWindow):
             self.daily.refresh()
         elif cur is self.pages.get("records"):
             self.refresh_records()
-        if "rec" in kinds or "settings" in kinds or "adjust" in kinds:
+        if "rec" in kinds or "settings" in kinds or "adjust" in kinds or any(k in kinds for k in ("sharp", "audio", "crop", "outro", "wm")):
             if not (self.worker and self.worker.isRunning()):
+                if any(k in kinds for k in ("sharp", "audio", "crop", "outro", "wm")):
+                    from qe import wmstore
+                    for v in self.videos:
+                        v.wm = wmstore.get(v.path)
+                        v.crop = wmstore.CROP.get(v.path)
+                        v.outro = wmstore.OUTRO.get(v.path)
+                        v.sharp = sharp.STORE.get(v.path)
+                        v.audio = audiocheck.STORE.get(v.path)
                 for i in range(len(self.videos)):
                     self._fill_row(i)
                 self._update_sum()
@@ -1311,6 +1329,7 @@ class MainWindow(QMainWindow):
             v.crop = wmstore.CROP.get(v.path)
             v.outro = wmstore.OUTRO.get(v.path)
             v.sharp = sharp.STORE.get(v.path)          # 查过清晰度的直接挂上,刷新不再排队重查(用户 2026-11-09)
+            v.audio = audiocheck.STORE.get(v.path)
         self.table.setRowCount(len(self.videos))
         for i, v in enumerate(self.videos):
             self._fill_row(i)
@@ -1349,19 +1368,22 @@ class MainWindow(QMainWindow):
         if self.sharp_worker and self.sharp_worker.isRunning():
             return
         want = bool(self.st.get("sharp_check", True))
+        want_audio = bool(self.st.get("audio_check", True))
         from qe import aiconf
         ai = aiconf.vision(self.st)                   # 自己的模型认得图才用它
         key = ai if self.st.get("crop_check", True) and ai.key else ""
         outro_key = ai if self.st.get("outro_check", True) and ai.key else ""
         rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path) and
                 (v.path in self._recheck_paths or (want and getattr(v, "sharp", None) is None)
+                 or (want_audio and getattr(v, "audio", None) is None)
                  or (key and self._crop_todo(v)) or (outro_key and self._outro_todo(v)))]
         if not rows:
             return
         from gui.sharp_worker import SharpWorker
         w = SharpWorker(self.videos, rows, self, want_sharp=want, crop_key=key, need_crop=self._crop_todo, asker=self.CROP_ASKER,
                         force=self._recheck_paths, can_crop=self._crop_can,
-                        outro_key=outro_key, need_outro=self._outro_todo, outro_asker=self.OUTRO_ASKER)
+                        outro_key=outro_key, need_outro=self._outro_todo, outro_asker=self.OUTRO_ASKER,
+                        want_audio=want_audio)
         w.one.connect(lambda i, w=w: self._sharp_row(w, i))
         w.finished.connect(lambda w=w: self._sharp_done(w))
         self.sharp_worker = w
@@ -1385,6 +1407,8 @@ class MainWindow(QMainWindow):
         self._check_refresh()
         if w.n_bad:
             self.say(f"查了清晰度:{w.n_bad} 条疑似模糊,不拦发布,看一下状态那一格")
+        if w.n_audio:
+            self.say(f"查了声音:{w.n_audio} 条没有声音或疑似无声,不拦发布,看一下状态那一格")
         if w.n_crop:
             self.say(f"查到 {w.n_crop} 条字幕被裁:这些先不摆,点上面的「打回」")
         if w.n_outro:
@@ -1410,19 +1434,21 @@ class MainWindow(QMainWindow):
         return getattr(v, "outro", None) is None
 
     # ---------------- 「检查」那一格、进度、重新检查(用户 2026-11-07)----------------
-    def _check_cfg(self, fresh: bool = False) -> tuple[bool, bool, bool, bool]:
-        """(清晰度开着, 字幕被裁开着, 结尾求关注开着, 有 Key)。ai_key 可能要读文件,不每行都读。"""
+    def _check_cfg(self, fresh: bool = False) -> tuple[bool, bool, bool, bool, bool]:
+        """(清晰度开着, 字幕被裁开着, 结尾求关注开着, 声音开着, 有 Key)。ai_key 可能要读文件,不每行都读。"""
         if fresh or self._ck_cfg is None:
             from qe import aiconf
             self._ck_cfg = (bool(self.st.get("sharp_check", True)), bool(self.st.get("crop_check", True)),
-                            bool(self.st.get("outro_check", True)), bool(aiconf.vision(self.st).key))
+                            bool(self.st.get("outro_check", True)), bool(self.st.get("audio_check", True)),
+                            bool(aiconf.vision(self.st).key))
         return self._ck_cfg
 
     def _check_pair(self, v) -> tuple:
-        sharp_on, crop_on, outro_on, has_key = self._check_cfg()
+        sharp_on, crop_on, outro_on, audio_on, has_key = self._check_cfg()
         return checkline.pair(v, self.sharp_worker, getattr(v, "crop", None), bool(self.rec.status_of(v.path)),
                               self._crop_can(v), sharp_on, crop_on, has_key,
-                              outro=getattr(v, "outro", None), outro_on=outro_on)
+                              outro=getattr(v, "outro", None), outro_on=outro_on,
+                              audio=getattr(v, "audio", None), audio_on=audio_on)
 
     def _check_refresh(self):
         """一下子变了很多条(开始查 / 查完):只刷「检查」那一格和进度。"""
@@ -1450,10 +1476,10 @@ class MainWindow(QMainWindow):
         rows = self._recheck_rows()
         if not rows or self.batch_id or (self.worker and self.worker.isRunning()):
             return
-        want, crop_on, outro_on, has_key = self._check_cfg(fresh=True)
+        want, crop_on, outro_on, audio_on, has_key = self._check_cfg(fresh=True)
         crop = crop_on and has_key and any(self._crop_can(self.videos[r]) for r in rows)
         outro = outro_on and has_key
-        if not want and not crop and not outro:
+        if not want and not crop and not outro and not audio_on:
             QMessageBox.information(self, "重新检查", "这些视频要查的项目都没开(或者没填阿里百炼 Key),去「设置」里打开。")
             return
         if len(rows) > 30 and (crop or outro) and not self._ask("重新检查", f"重新查这 {len(rows)} 条?\n\n字幕被裁 / 结尾求关注要问 AI,条数多会花点时间和额度。"
@@ -1461,7 +1487,7 @@ class MainWindow(QMainWindow):
             return
         for r in rows:
             v = self.videos[r]
-            v.sharp_err = v.crop_err = v.outro_err = False
+            v.sharp_err = v.crop_err = v.outro_err = v.audio_err = False
             self._recheck_paths.add(v.path)
         self.say(f"重新检查 {len(rows)} 条,进度看列表上面那一行")
         if self.sharp_worker and self.sharp_worker.isRunning():
@@ -1525,6 +1551,15 @@ class MainWindow(QMainWindow):
                 sharp.STORE.set_ok(v.path, True)
                 v.sharp = sharp.STORE.get(v.path)
                 self._fill_row(r)
+
+    def set_audio_ok(self):
+        for r in sorted({ix.row() for ix in self.table.selectedIndexes()}):
+            v = self.videos[r]
+            if audiocheck.flagged(getattr(v, "audio", None)):
+                audiocheck.STORE.set_ok(v.path, True)
+                v.audio = audiocheck.STORE.get(v.path)
+                self._fill_row(r)
+        self._check_refresh()
 
     def _outro_rows(self, rows=None) -> list[int]:
         from qe import wmstore
@@ -1672,8 +1707,10 @@ class MainWindow(QMainWindow):
         dims = getattr(v, "dims", None)
         stxt = f"{shp} {dims[0]}×{dims[1]},要转竖屏" if shp and dims else ""
         fuzzy = "" if stt or note or skip or wmb or stxt else sharp.text(getattr(v, "sharp", None))
+        mute = "" if stt or note or skip or wmb or stxt else audiocheck.text(getattr(v, "audio", None))
+        warn_txt = "、".join(x for x in (fuzzy, mute) if x)
         pair = self._check_pair(v)
-        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or stxt or fuzzy or "还没发"),
+        for c, t in enumerate([v.title, v.account, v.employee, cov, stt_txt or note or (f"不发:{skip}" if skip else wtxt or stxt or warn_txt or "还没发"),
                                checkline.cell(pair)]):
             it = QTableWidgetItem(t)
             if c == 5:
@@ -1683,10 +1720,15 @@ class MainWindow(QMainWindow):
                 it.setData(THUMB, v.cover or v.png or v.vcover or v.jpg)      # 封面小图(草图 ②)
             if c == 4 and (note or skip):
                 it.setToolTip(note or skip)
-            if c == 4 and (skip or wmb or stxt or fuzzy):
+            if c == 4 and (skip or wmb or stxt or warn_txt):
                 it.setBackground(YELLOW)
-            if c == 4 and fuzzy:
-                it.setToolTip("只是提醒,不拦发布。看过没问题:右键「清晰度没问题」")
+            if c == 4 and warn_txt:
+                tips = []
+                if fuzzy:
+                    tips.append("清晰度:只是提醒,不拦发布。看过没问题:右键「清晰度没问题」")
+                if mute:
+                    tips.append(audiocheck.detail(getattr(v, "audio", None)) + "。只是提醒,不拦发布。看过没问题:右键「声音没问题」")
+                it.setToolTip("\n".join(tips))
             if c == 4 and stxt:
                 it.setToolTip("横屏 / 偏方(3:4、正方形):点上面「转标准竖屏」转成 1080×1920(上下黑边、中间原画面)")
             if c == 4 and wmb:
@@ -1865,6 +1907,8 @@ class MainWindow(QMainWindow):
                 m.addAction("没水印 / 不用管,能摆", lambda: self.set_wm_ok(True))
         if any(sharp.flagged(getattr(self.videos[r], "sharp", None)) for r in {ix.row() for ix in self.table.selectedIndexes()}):
             m.addAction("清晰度没问题", self.set_sharp_ok)
+        if any(audiocheck.flagged(getattr(self.videos[r], "audio", None)) for r in {ix.row() for ix in self.table.selectedIndexes()}):
+            m.addAction("声音没问题", self.set_audio_ok)
         crops = [getattr(self.videos[r], "crop", None) or {} for r in {ix.row() for ix in self.table.selectedIndexes()}]
         if any(c.get("hits") and not c.get("ok") for c in crops):
             m.addAction("没被裁,能摆", lambda: self.set_crop_ok(True))
@@ -2086,7 +2130,7 @@ class MainWindow(QMainWindow):
                 self.say(f"「{v.title[:24]}」改名失败:{e.strerror or e}")
                 continue
             from qe import wmstore
-            for st_wm in (wmstore.WM, wmstore.CROP, wmstore.OUTRO, sharp.STORE):
+            for st_wm in (wmstore.WM, wmstore.CROP, wmstore.OUTRO, sharp.STORE, audiocheck.STORE):
                 st_wm.move(v.path, moves[0][1])
             stem = os.path.splitext(os.path.basename(moves[0][1]))[0]
             for c in (v.png, v.jpg, v.vpng):                # 封面按名字配在别的文件夹里的:也改成新名字
@@ -3524,6 +3568,9 @@ class MainWindow(QMainWindow):
         k_outro = QCheckBox("发布前查结尾求关注:看最后几秒有没有别人头像 / 求关注 / 抖音号 / 二维码,查到了可以剪掉再发")
         k_outro.setChecked(bool(self.st.get("outro_check", True)))
         f.addRow("", k_outro)
+        k_audio = QCheckBox("发布前查有没有声音:没音轨或整条静音的标出来(只提醒,不拦发布)")
+        k_audio.setChecked(bool(self.st.get("audio_check", True)))
+        f.addRow("", k_audio)
         f.addRow("", k_trust)
         outer.addWidget(g1)
 
@@ -3820,7 +3867,7 @@ class MainWindow(QMainWindow):
             archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
             batch_size=sp.value(), ai_key=e_key.text().strip(),
             ai_cover=k_aic.isChecked(), ai_cover_trust=k_trust.isChecked(), sharp_check=k_sharp.isChecked(),
-            crop_check=k_crop.isChecked(), outro_check=k_outro.isChecked(),
+            crop_check=k_crop.isChecked(), outro_check=k_outro.isChecked(), audio_check=k_audio.isChecked(),
             bad_cover_auto=k_bad_cov.isChecked(),
             bad_cover_dir=e_bad_dir.text().strip() or DEFAULTS["bad_cover_dir"],
             api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(),

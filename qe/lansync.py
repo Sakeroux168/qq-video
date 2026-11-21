@@ -39,7 +39,7 @@ LOCAL_ONLY_KEYS = frozenset({
 SHARED_SETTING_KEYS = frozenset({
     "accounts", "daily_plan", "quota_extra", "quota_open", "redo_room",
     "api_picked", "api_cover", "api_interval", "api_archive_by_game",
-    "batch_size", "topic_model", "outro_check", "sharp_check", "crop_check",
+    "batch_size", "topic_model", "outro_check", "sharp_check", "crop_check", "audio_check",
     "ai_cover", "ai_cover_trust", "bad_cover_auto", "game_words",
     "ai_key", "own_ai_url", "own_ai_model", "own_ai_key", "own_ai_vision",
     "api_last_topic",
@@ -54,6 +54,7 @@ STORE_FILES = {
     "crop": "字幕被裁.json",
     "outro": "结尾检查.json",
     "sharp": "清晰度检查.json",
+    "audio": "音频检查.json",
     "gamecheck": "游戏判断.json",
     "titledate": "标题日期放行.json",
     "titleclean": "标题广告处理过.json",
@@ -263,8 +264,8 @@ def stop() -> None:
 
 
 def _reload_store(kind: str) -> None:
-    if kind in ("wm", "ads", "crop", "outro", "sharp"):
-        from . import wmstore
+    if kind in ("wm", "ads", "crop", "outro", "sharp", "audio"):
+        from . import audiocheck, sharp, wmstore
         s = wmstore.by_key(kind)
         if s is not None:
             s.reload()
@@ -290,8 +291,8 @@ def _reload_store(kind: str) -> None:
 
 def _exec_store_op(kind: str, op: str, kw: dict, adj=None):
     """在主机进程里执行各缓存 / 设置仓库的写操作并抬高版本号。"""
-    if kind in ("wm", "ads", "crop", "outro", "sharp"):
-        from . import wmstore
+    if kind in ("wm", "ads", "crop", "outro", "sharp", "audio"):
+        from . import audiocheck, sharp, wmstore
         st = wmstore.by_key(kind)
         if st is None:
             raise LanError(f"未知仓库:{kind}")

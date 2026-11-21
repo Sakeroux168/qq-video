@@ -1052,8 +1052,9 @@ def test_bughunt(tmp: Path):
     import gui.api_tab as T
 
     # 4. 「10.15已发」「10.15不能用」「10.150」不算 10.15
-    check([apisrc.date_key(x) for x in ("10.15", "10.15(20)", "10.14（星期三）", "10.15已发", "10.15不能用", "10.15 脏话", "10.150")]
-          == ["10.15", "10.15", "10.14", "", "", "", ""], "日期文件夹:后面跟了别的字的不算(已发 / 不能用 / 脏话)")
+    check([apisrc.date_key(x) for x in ("10.15", "10.15(20)", "10.14（星期三）", "11.22未改比例", "11.22（20）未改比例",
+                                        "11.20(20）（未改比例）", "11.19未改 比例", "10.15已发", "10.15不能用", "10.15 脏话", "10.150")]
+          == ["10.15", "10.15", "10.14", "11.22", "11.22", "11.20", "11.19", "", "", "", ""], "日期文件夹:认未改比例,仍拦已发 / 不能用 / 脏话")
 
     # 15. 同一个号两个文件夹:都扫
     r2 = tmp / "bh_dup"
@@ -5490,8 +5491,11 @@ def test_cd_items(tmp: Path):
         # 15:16 个号页也是最新的在上、今天标出来
         tab = w.api_tab
         ti = tab.c_date.findData(today)
-        check(ti > 0 and "今天" in tab.c_date.itemText(ti) and tab.c_date.itemData(1) == newest_first(
-            [tab.c_date.itemData(k) for k in range(1, tab.c_date.count())])[0], "15 16 个号页:最新的在上、今天标出来")
+        from qe import plan as _P
+        tmr = _P.tomorrow_folder()
+        tmri = tab.c_date.findData(tmr)
+        check(ti > 0 and "今天" in tab.c_date.itemText(ti) and tmri > 0 and "明天" in tab.c_date.itemText(tmri) and tab.c_date.itemData(1) == newest_first(
+            [tab.c_date.itemData(k) for k in range(1, tab.c_date.count())])[0], "15 16 个号页:最新的在上、今天和明天都标出来")
         # 14:还没搬账号(nicks 空)时「今天达标」别写「都发够了」
         apiacc.save([])
         check(tab.set_day("10.22") and tab.videos, "16 个号页选到 10.22")
@@ -6399,7 +6403,7 @@ def test_check_status(tmp: Path):
     print("\n[检查状态:每条一格、进度、重新检查]")
     import threading
     from PySide6.QtWidgets import QApplication
-    from qe import apiacc, checkline as L, cropcheck as K, folders as F, outrocheck as O, sharp as S
+    from qe import apiacc, audiocheck as A, checkline as L, cropcheck as K, folders as F, outrocheck as O, sharp as S
     from qe.config import Settings
     from qe.records import Records
     import gui.api_tab as T
@@ -6458,6 +6462,10 @@ def test_check_status(tmp: Path):
         calls.append("尾" + os.path.basename(path))
         return {"hits": []}
 
+    def faudio(path, ff, dur=0.0, has_audio=None, stop=None, measure=None):
+        calls.append("声" + os.path.basename(path))
+        return {"hits": []}
+
     def settle(idle):
         _wait(app, idle)
         for _ in range(5):
@@ -6466,17 +6474,17 @@ def test_check_status(tmp: Path):
         _wait(app, idle)
         app.processEvents()
     idle1 = lambda: not (tab.sharp_worker and tab.sharp_worker.isRunning())
-    rs, rk, ro, rask = S.check, K.check, O.check, T.ask
-    S.check, K.check, O.check = fsharp, fcrop, foutro
+    rs, rk, ro, ra, rask = S.check, K.check, O.check, A.check, T.ask
+    S.check, K.check, O.check, A.check = fsharp, fcrop, foutro, faudio
     tab.SHARP_CHECK = True
     try:
         tab._fill(0), tab._fill(1)
         tab._check_refresh()
-        check(tab.items[0].text(4) == "没查" and tab.lab_check.text() == "检查:清晰度 0/2 · 字幕 0/2 · 结尾 0/2", f"还没查:写没查 -> {tab.items[0].text(4)} / {tab.lab_check.text()}")
+        check(tab.items[0].text(4) == "没查" and tab.lab_check.text() == "检查:清晰度 0/2 · 字幕 0/2 · 结尾 0/2 · 声音 0/2", f"还没查:写没查 -> {tab.items[0].text(4)} / {tab.lab_check.text()}")
         tab._sharp_start()
         settle(idle1)
-        check(tab.items[g].text(4) == "清晰 ✓  字幕 ✓  结尾 ✓" and tab.items[i].text(4) == "疑似模糊  字幕 ✓  结尾 ✓", f"查完:每条写清楚 -> {tab.items[g].text(4)} / {tab.items[i].text(4)}")
-        check(tab.lab_check.text().startswith("检查查完了:清晰度 2/2 · 字幕 2/2 · 结尾 2/2"), f"进度 -> {tab.lab_check.text()}")
+        check(tab.items[g].text(4) == "清晰 ✓  字幕 ✓  结尾 ✓  声音 ✓" and tab.items[i].text(4) == "疑似模糊  字幕 ✓  结尾 ✓  声音 ✓", f"查完:每条写清楚 -> {tab.items[g].text(4)} / {tab.items[i].text(4)}")
+        check(tab.lab_check.text().startswith("检查查完了:清晰度 2/2 · 字幕 2/2 · 结尾 2/2 · 声音 2/2"), f"进度 -> {tab.lab_check.text()}")
         check(tab.groups["CSGO战神君"].text(4) == "查完了 · 1 条模糊", f"号那一行写查完了、查到几条 -> {tab.groups['CSGO战神君'].text(4)}")
         check(tab.b_recheck.text() == "重新检查 2 条", f"没选管全部 -> {tab.b_recheck.text()}")
         tab.items[g].setSelected(True)
@@ -6491,18 +6499,18 @@ def test_check_status(tmp: Path):
         check(not calls, "自动的:查过的不再查")
         tab.set_sharp_ok(i)
         tab._check_refresh()
-        check(tab.items[i].text(4) == "清晰 放行  字幕 ✓  结尾 ✓", f"人说没问题:写放行 -> {tab.items[i].text(4)}")
+        check(tab.items[i].text(4) == "清晰 放行  字幕 ✓  结尾 ✓  声音 ✓", f"人说没问题:写放行 -> {tab.items[i].text(4)}")
         tab.recheck()
         settle(idle1)
-        check(sorted(calls) == ["字好.mp4", "字糊.mp4", "尾好.mp4", "尾糊.mp4", "清好.mp4", "清糊.mp4"], f"点重新检查:不管查没查过都再查 -> {calls}")
-        check(tab.items[i].text(4) == "清晰 放行  字幕 ✓  结尾 ✓" and not tab._recheck_paths, f"你点过没问题的还算数,查完清单空了 -> {tab.items[i].text(4)}")
+        check(sorted(calls) == sorted(["字好.mp4", "字糊.mp4", "尾好.mp4", "尾糊.mp4", "清好.mp4", "清糊.mp4", "声好.mp4", "声糊.mp4"]), f"点重新检查:不管查没查过都再查 -> {calls}")
+        check(tab.items[i].text(4) == "清晰 放行  字幕 ✓  结尾 ✓  声音 ✓" and not tab._recheck_paths, f"你点过没问题的还算数,查完清单空了 -> {tab.items[i].text(4)}")
         # 只查选中的
         calls.clear()
         tab.items[g].setSelected(True)
         tab._update_scope()
         tab.recheck()
         settle(idle1)
-        check(sorted(calls) == ["字好.mp4", "尾好.mp4", "清好.mp4"], f"选中了:只查选中的 -> {calls}")
+        check(sorted(calls) == sorted(["字好.mp4", "尾好.mp4", "清好.mp4", "声好.mp4"]), f"选中了:只查选中的 -> {calls}")
         tab.tree.clearSelection()
         tab._update_scope()
         # 没查成
@@ -6511,7 +6519,7 @@ def test_check_status(tmp: Path):
         tab.videos[g].sharp = None
         tab._sharp_start()
         settle(idle1)
-        check(tab.items[g].text(4) == "清晰 没查成  字幕 ✓  结尾 ✓" and "1 条没查成" in tab.lab_check.text(), f"读不出来:写没查成 -> {tab.items[g].text(4)} / {tab.lab_check.text()}")
+        check(tab.items[g].text(4) == "清晰 没查成  字幕 ✓  结尾 ✓  声音 ✓" and "1 条没查成" in tab.lab_check.text(), f"读不出来:写没查成 -> {tab.items[g].text(4)} / {tab.lab_check.text()}")
         check(tab.groups["CSGO战神君"].text(4) == "1 条没查成", "号那一行也写")
         boom.clear()
         # 正在查的时候点:手上这一轮停下,接着查人点的;中间写查中
@@ -6530,13 +6538,13 @@ def test_check_status(tmp: Path):
         _wait(app, lambda: tab.sharp_worker is not old)
         gate[0] = None
         settle(idle1)
-        check("清糊.mp4" in calls and "字糊.mp4" in calls and "尾糊.mp4" in calls and not tab._recheck_paths, f"接着把人点的查完 -> {calls}")
+        check("清糊.mp4" in calls and "字糊.mp4" in calls and "尾糊.mp4" in calls and "声糊.mp4" in calls and not tab._recheck_paths, f"接着把人点的查完 -> {calls}")
         # 字幕关了
         st["crop_check"] = False
         tab.videos[i].crop = None
         tab.videos[i].checks.pop("crop", None)
         tab._check_refresh()
-        check(tab.items[i].text(4) == "清晰 放行  字幕 关了  结尾 ✓", f"设置关了:写关了 -> {tab.items[i].text(4)}")
+        check(tab.items[i].text(4) == "清晰 放行  字幕 关了  结尾 ✓  声音 ✓", f"设置关了:写关了 -> {tab.items[i].text(4)}")
         st["crop_check"] = True
         # 多的时候问一声
         seen = []
@@ -6547,7 +6555,7 @@ def test_check_status(tmp: Path):
         del tab._recheck_rows
         T.ask = rask
         apiacc.save([])
-        # 罐头页:字幕被裁只查影视号,结尾求关注教育和影视都查
+        # 罐头页:字幕被裁只查影视号,结尾求关注和声音教育和影视都查
         st2 = Settings(tmp / "st_chk2.json")
         st2["ai_key"] = "test"
         film = tmp / "chk" / "高热剧集二创" / "影视号甲"
@@ -6566,14 +6574,14 @@ def test_check_status(tmp: Path):
         w._fill_row(0), w._fill_row(1)
         w._check_line()
         check(w.table.columnCount() == 6 and w.table.item(0, 5).text() == "没查", f"还没查 -> {w.table.item(0, 5).text()}")
-        check(w.table.item(1, 5).text() == "清晰 没查  字幕 不用查  结尾 没查", f"教育:字幕不用查,结尾要查 -> {w.table.item(1, 5).text()}")
-        check(w.lab_check.text() == "检查:清晰度 0/2 · 字幕 0/1 · 结尾 0/2", f"进度只算要查的 -> {w.lab_check.text()}")
+        check(w.table.item(1, 5).text() == "清晰 没查  字幕 不用查  结尾 没查  声音 没查", f"教育:字幕不用查,结尾和声音要查 -> {w.table.item(1, 5).text()}")
+        check(w.lab_check.text() == "检查:清晰度 0/2 · 字幕 0/1 · 结尾 0/2 · 声音 0/2", f"进度只算要查的 -> {w.lab_check.text()}")
         calls.clear()
         w._sharp_start()
         settle(idle2)
-        check(sorted(calls) == ["字片.mp4", "尾片.mp4", "尾课.mp4", "清片.mp4", "清课.mp4"], f"影视号三项都查,教育查清晰度和结尾 -> {calls}")
-        check(w.table.item(0, 5).text() == "清晰 ✓  字幕 ✓  结尾 ✓" and w.table.item(1, 5).text() == "清晰 ✓  字幕 不用查  结尾 ✓"
-              and w.lab_check.text().startswith("检查查完了:清晰度 2/2 · 字幕 1/1 · 结尾 2/2"),
+        check(sorted(calls) == sorted(["字片.mp4", "尾片.mp4", "尾课.mp4", "清片.mp4", "清课.mp4", "声片.mp4", "声课.mp4"]), f"影视号四项都查,教育查清晰度结尾声音 -> {calls}")
+        check(w.table.item(0, 5).text() == "清晰 ✓  字幕 ✓  结尾 ✓  声音 ✓" and w.table.item(1, 5).text() == "清晰 ✓  字幕 不用查  结尾 ✓  声音 ✓"
+              and w.lab_check.text().startswith("检查查完了:清晰度 2/2 · 字幕 1/1 · 结尾 2/2 · 声音 2/2"),
               f"查完 -> {w.table.item(0, 5).text()} / {w.table.item(1, 5).text()} / {w.lab_check.text()}")
         check(w.b_recheck.text() == "重新检查 2 条", f"没选管全部 -> {w.b_recheck.text()}")
         w.table.selectRow(1)
@@ -6581,16 +6589,16 @@ def test_check_status(tmp: Path):
         calls.clear()
         w.recheck()
         settle(idle2)
-        check(sorted(calls) == ["尾课.mp4", "清课.mp4"], f"重新检查选中的教育:不会去查字幕 -> {calls}")
+        check(sorted(calls) == sorted(["尾课.mp4", "清课.mp4", "声课.mp4"]), f"重新检查选中的教育:不会去查字幕 -> {calls}")
         w.table.clearSelection()
         calls.clear()
         w.recheck()
         settle(idle2)
-        check(sorted(calls) == ["字片.mp4", "尾片.mp4", "尾课.mp4", "清片.mp4", "清课.mp4"], f"没选:全部再查 -> {calls}")
+        check(sorted(calls) == sorted(["字片.mp4", "尾片.mp4", "尾课.mp4", "清片.mp4", "清课.mp4", "声片.mp4", "声课.mp4"]), f"没选:全部再查 -> {calls}")
         check(w.table.item(0, 4).text() == "还没发", f"「状态」那格不受影响 -> {w.table.item(0, 4).text()}")
         w.close()
     finally:
-        S.check, K.check, O.check, T.ask = rs, rk, ro, rask
+        S.check, K.check, O.check, A.check, T.ask = rs, rk, ro, ra, rask
         apiacc.save([])
 
 
@@ -7024,7 +7032,7 @@ def test_outro_cut(tmp: Path):
             time.sleep(0.02)
     finally:
         tab.OUTRO_DIALOG = None
-    check(tab._can_send(i_bad) and tab.card_outro.isHidden() and tab.items[i_bad].text(4).endswith("结尾 已剪"),
+    check(tab._can_send(i_bad) and tab.card_outro.isHidden() and "结尾 已剪" in tab.items[i_bad].text(4),
           f"剪完以后:能发、卡片收起、状态写结尾 已剪 -> {tab.items[i_bad].text(4)}")
     apiacc.save([])
 
@@ -7069,7 +7077,7 @@ def test_outro_cut(tmp: Path):
     finally:
         w2.OUTRO_DIALOG = None
     check(W.MainWindow._title_block(ev) == "" and len(w2._todo()) == 1 and w2.b_outro.isHidden()
-          and w2.table.item(0, 5).text().endswith("结尾 已剪"),
+          and "结尾 已剪" in w2.table.item(0, 5).text(),
           f"教育号剪完:允许摆、按钮收起、写结尾 已剪 -> {w2.table.item(0, 5).text()}")
     w2.close()
 
@@ -7816,6 +7824,139 @@ def test_lan_sync(tmp: Path):
             os.environ["QE_DATA_DIR"] = old_env
 
 
+def test_audiocheck(tmp: Path):
+    print("\n[发布前查有没有声音(用户 2026-11-21):无音轨零开销 / 静音抽3段提前退出 / 只提醒不拦 / 两页都能放行 / 局域网同步]")
+    import subprocess
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from qe import apiacc, audiocheck as A, checkline as L, folders as F, lansync, vertical, wmstore
+    from qe.config import Settings
+    from qe.records import Records
+    from gui.sharp_worker import SharpWorker
+    import gui.api_tab as T
+    import gui.window as W
+
+    # 1. 单元测试:无音轨直出、第一段有声提前退出、三段全静音、中间静音但前段有声不误报、读不出抛异常
+    seen = []
+    r0 = A.check("x", "", dur=120, has_audio=False, measure=lambda s, w: seen.append((s, w)) or ("ok", -10.0))
+    check(r0 == {"hits": [{"kind": "none"}]} and not seen, f"无音轨直出不调 ffmpeg -> {r0} / {seen}")
+    check(A.flagged(r0) and A.text(r0) == "没有声音(无音轨)", f"无音轨文案 -> {A.text(r0)}")
+
+    seen.clear()
+    r1 = A.check("x", "", dur=120, has_audio=True, measure=lambda s, w: seen.append((s, w)) or ("ok", -15.0))
+    check(r1 == {"hits": []} and len(seen) == 1 and seen[0][0] == 60.0, f"正常视频第一段(50%)就提前退出 -> {r1} / {seen}")
+
+    seen.clear()
+    dbs = iter([-62.0, -58.5, -91.0])
+    r2 = A.check("x", "", dur=120, has_audio=True, measure=lambda s, w: seen.append((s, w)) or ("ok", next(dbs)))
+    check(len(seen) == 3 and r2 == {"hits": [{"kind": "silent", "max_db": -58.5}]} and A.text(r2) == "疑似无声", f"三段全静音 -> {r2} / {seen}")
+
+    seen.clear()
+    dbs2 = iter([-80.0, -12.0, -90.0])
+    r3 = A.check("x", "", dur=120, has_audio=True, measure=lambda s, w: seen.append((s, w)) or ("ok", next(dbs2)))
+    check(r3 == {"hits": []} and len(seen) == 2, f"中间静音但 15% 有声音:不误报 -> {r3} / {seen}")
+
+    seen.clear()
+    A.check("x", "", dur=12, has_audio=True, measure=lambda s, w: seen.append((s, w)) or ("ok", -80.0))
+    check(seen == [(0.0, A.SHORT_DUR)], f"短视频 <=24s 只量 1 段 -> {seen}")
+
+    err = False
+    try:
+        A.check("x", "", dur=10, measure=lambda s, w: ("err", None))
+    except OSError:
+        err = True
+    check(err, "读不出音频抛 OSError,不误记成没问题")
+
+    # 2. 真实 ffmpeg 造 4 种极端文件验证 probe.has_audio + audiocheck.check
+    ff = vertical.ffmpeg_path()
+    if ff:
+        NOWIN = 0x08000000 if os.name == "nt" else 0
+        ad = tmp / "aud_real"
+        ad.mkdir(parents=True)
+        p_no, p_sil, p_ok, p_bad = ad / "无音轨.mp4", ad / "静音.mp4", ad / "有声.mp4", ad / "坏的.mp4"
+        subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=160x160:d=2",
+                        "-c:v", "libx264", "-t", "2", str(p_no)], check=True, creationflags=NOWIN)
+        subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=160x160:d=2",
+                        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-c:v", "libx264", "-c:a", "aac", "-shortest", "-t", "2", str(p_sil)],
+                       check=True, creationflags=NOWIN)
+        subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=160x160:d=2",
+                        "-f", "lavfi", "-i", "sine=f=440:d=2", "-c:v", "libx264", "-c:a", "aac", "-shortest", "-t", "2", str(p_ok)],
+                       check=True, creationflags=NOWIN)
+        p_bad.write_bytes(b"123")
+        check(vertical.probe(str(p_no), ff).get("has_audio") is False, "probe:无音轨 has_audio=False")
+        check(vertical.probe(str(p_sil), ff).get("has_audio") is True, "probe:静音有音轨 has_audio=True")
+        check(vertical.probe(str(p_ok), ff).get("has_audio") is True, "probe:正常视频 has_audio=True")
+        check(vertical.probe(str(p_bad), ff).get("has_audio") is None, "probe:坏文件 has_audio=None")
+        check(A.check(str(p_no), ff, dur=2)["hits"][0]["kind"] == "none", "真 ffmpeg:无音轨识别成 none")
+        check(A.check(str(p_sil), ff, dur=2)["hits"][0]["kind"] == "silent", "真 ffmpeg:静音轨识别成 silent")
+        check(A.check(str(p_ok), ff, dur=2)["hits"] == [], "真 ffmpeg:正常音频不误报")
+        bad_err = False
+        try:
+            A.check(str(p_bad), ff, dur=2)
+        except OSError:
+            bad_err = True
+        check(bad_err, "真 ffmpeg:坏文件抛 OSError")
+
+    # 3. 局域网同步注册 + checkline 4 项
+    check("audio" in lansync.STORE_FILES and "audio_check" in lansync.SHARED_SETTING_KEYS and wmstore.by_key("audio") is A.STORE,
+          "音频检查仓库和开关已接入局域网同步")
+    check(L.cell((L.OK, L.OK, L.OK, L.BAD)) == "清晰 ✓  字幕 ✓  结尾 ✓  无声音"
+          and L.found([(L.OK, L.OK, L.OK, L.BAD)]) == "1 条无声"
+          and "声音 1 条" in L.unchecked_text([(L.OK, L.OK, L.OK, L.TODO)]), "checkline 第 4 项声音展示正常")
+
+    # 4. SharpWorker + ApiTab + MainWindow:只提醒不拦发布,右键放行生效
+    d = tmp / "aud_ui" / "游戏视频" / "CSGO--CSGO战神君" / "10.18"
+    d.mkdir(parents=True)
+    for n, b in (("无声片", b"11"), ("有声片", b"22")):
+        (d / f"{n}.mp4").write_bytes(b)
+    vs = [SimpleNamespace(path=str(d / "无声片.mp4"), checks={"dur": 10, "has_audio": False}),
+          SimpleNamespace(path=str(d / "有声片.mp4"), checks={"dur": 10, "has_audio": True})]
+    ra = A.check
+    A.check = lambda p, ff, dur=0.0, has_audio=None, stop=None, measure=None: {"hits": [{"kind": "none"}]} if has_audio is False else {"hits": []}
+    try:
+        w = SharpWorker(vs, [0, 1], want_sharp=False, want_audio=True)
+        w.run()
+        check(w.n_audio == 1 and A.flagged(vs[0].audio) and not A.flagged(vs[1].audio), "SharpWorker 查声音并缓存")
+        apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+        st = Settings(tmp / "st_aud.json")
+        st["api_roots"] = [str(tmp / "aud_ui" / "游戏视频")]
+        tab = T.ApiTab(st, Records(tmp / "rec_aud.sqlite"), lambda m: None)
+        tab.c_date.setCurrentIndex(tab.c_date.findData("10.18"))
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+        i = next(k for k, v in enumerate(tab.videos) if v.title == "无声片")
+        tab.videos[i].checks = dict(tab.videos[i].checks or {}, bad_read=False, landscape=False, squarish=False, w=1080, h=1920, platform=[], tags=[])
+        tab.videos[i].audio = A.STORE.get(tab.videos[i].path)
+        tab._fill(i)
+        st_, probs = tab._status_text(i)
+        check("没有声音(无音轨)" in tab.items[i].text(2) and st_.startswith("能发") and not probs and "无声音" in tab.items[i].text(4),
+              f"16个号页:备注与检查列提醒,状态依然能发(不拦) -> {tab.items[i].text(2)} / {st_} / {tab.items[i].text(4)}")
+        tab.set_audio_ok(i)
+        check("没有声音" not in tab.items[i].text(2) and "声音 放行" in tab.items[i].text(4),
+              f"16个号页:点「声音没问题」后放行 -> {tab.items[i].text(2)} / {tab.items[i].text(4)}")
+        tab.close()
+
+        # 教育/影视页
+        A.STORE.set_ok(vs[0].path, False)
+        st2 = Settings(tmp / "st_aud2.json")
+        w2 = W.MainWindow(st2, Records(tmp / "rec_aud2.sqlite"))
+        w2.AI_COVER = False
+        w2.videos = [F.Video(vs[0].path, "无声片", "研习社", "e", "10.18")]
+        w2.videos[0].audio = A.STORE.get(vs[0].path)
+        w2.table.setRowCount(1)
+        w2._fill_row(0)
+        check("没有声音(无音轨)" in w2.table.item(0, 4).text() and not w2.videos[0].skip,
+              f"罐头页:状态列提醒且不设 skip(不拦) -> {w2.table.item(0, 4).text()}")
+        w2.table.selectRow(0)
+        w2.set_audio_ok()
+        check(w2.table.item(0, 4).text() == "还没发" and "声音 放行" in w2.table.item(0, 5).text(),
+              f"罐头页:右键「声音没问题」后放行 -> {w2.table.item(0, 4).text()} / {w2.table.item(0, 5).text()}")
+        w2.close()
+    finally:
+        A.check = ra
+        apiacc.save([])
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -7917,6 +8058,7 @@ if __name__ == "__main__":
     test_black_cover_v2(tmp)
     test_portable_bundle(tmp)
     test_lan_sync(tmp)
+    test_audiocheck(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

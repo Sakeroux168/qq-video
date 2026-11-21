@@ -67,15 +67,19 @@ def repolish(w, **props):
 def fill_dates(combo, dates: list[str], cur: str = "", blank: str = "", empty=()) -> None:
     """两页的「要发哪天的」下拉(审查 15:两页顺序不一样):最新的在上面,今天标出来,没视频的灰掉。
     dates = 日期文件夹名(新的在前);empty = 这天没视频的。每项的数据 = 日期本身(文字可能多了「(今天)」)。"""
+    from datetime import timedelta
     from PySide6.QtGui import QBrush
     from qe.config import bj_now
     from qe.folders import day_of
-    today = f"{bj_now().month}.{bj_now().day}"
+    now = bj_now()
+    today = f"{now.month}.{now.day}"
+    tmr = now + timedelta(days=1)
+    tomorrow = f"{tmr.month}.{tmr.day}"
     combo.blockSignals(True)
     combo.clear()
     combo.addItem(blank, "")
     for d in dates:
-        tags = (["今天"] if day_of(d) == today else []) + (["没视频"] if d in empty else [])
+        tags = (["今天"] if day_of(d) == today else ["明天"] if day_of(d) == tomorrow else []) + (["没视频"] if d in empty else [])
         combo.addItem(d + (f"({' · '.join(tags)})" if tags else ""), d)
         if d in empty:
             i = combo.count() - 1

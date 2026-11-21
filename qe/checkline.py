@@ -13,6 +13,8 @@ _CROP = {OK: "字幕 ✓", BAD: "字幕被裁", PASSED: "字幕 放行", FIXED: 
          FAIL: "字幕 没查成", OFF: "字幕 关了", NOKEY: "字幕 没填Key", NA: "字幕 不用查"}
 _OUTRO = {OK: "结尾 ✓", BAD: "结尾求关注", PASSED: "结尾 放行", FIXED: "结尾 已剪", BUSY: "结尾 查中", TODO: "结尾 没查",
           FAIL: "结尾 没查成", OFF: "结尾 关了", NOKEY: "结尾 没填Key", NA: "结尾 不用查"}
+_AUDIO = {OK: "声音 ✓", BAD: "无声音", PASSED: "声音 放行", FIXED: "声音 ✓", BUSY: "声音 查中", TODO: "声音 没查",
+          FAIL: "声音 没查成", OFF: "声音 关了", NOKEY: "声音 关了", NA: "声音 不用查"}
 _SAME = {BUSY: "查中", TODO: "没查", FAIL: "没查成", OFF: "关了", NA: "不用查"}
 _TIP = {OK: "查过了,没问题", BAD: "查过了,有问题", PASSED: "查到过问题,你说没问题", FIXED: "查到过问题,已经剪掉了",
         BUSY: "正在查", TODO: "还没查",
@@ -40,8 +42,9 @@ def state(res: dict | None, busy: bool = False, err: bool = False, on: bool = Tr
 
 
 def pair(v, worker, crop: dict | None, sent: bool, need_crop: bool, sharp_on: bool, crop_on: bool, has_key: bool,
-         outro: dict | None = None, outro_on: bool | None = None) -> tuple:
-    """(清晰度, 字幕被裁[, 结尾求关注]) 各项的情况。worker = 后台在跑的 SharpWorker(没跑 / 跑完了算没有)。"""
+         outro: dict | None = None, outro_on: bool | None = None,
+         audio: dict | None = None, audio_on: bool | None = None) -> tuple:
+    """(清晰度, 字幕被裁[, 结尾求关注[, 声音]]) 各项的情况。worker = 后台在跑的 SharpWorker(没跑 / 跑完了算没有)。"""
     sharp = getattr(v, "sharp", None)
     run = bool(worker) and worker.isRunning() and v.path in worker.left
     force = run and v.path in worker.force
@@ -49,14 +52,22 @@ def pair(v, worker, crop: dict | None, sent: bool, need_crop: bool, sharp_on: bo
                  on=sharp_on, sent=sent),
            state(crop, busy=need_crop and (force or (run and crop is None and bool(worker.crop_key))),
                  err=getattr(v, "crop_err", False), on=crop_on, need=need_crop, key=has_key, sent=sent))
-    if outro_on is None:
-        return res
-    return res + (state(outro, busy=force or (run and outro is None and bool(getattr(worker, "outro_key", ""))),
-                        err=getattr(v, "outro_err", False), on=outro_on, key=has_key, sent=sent),)
+    if outro_on is not None:
+        res = res + (state(outro, busy=force or (run and outro is None and bool(getattr(worker, "outro_key", ""))),
+                           err=getattr(v, "outro_err", False), on=outro_on, key=has_key, sent=sent),)
+    if audio_on is not None:
+        res = res + (state(audio, busy=force or (run and audio is None and bool(getattr(worker, "want_audio", False))),
+                           err=getattr(v, "audio_err", False), on=audio_on, sent=sent),)
+    return res
 
 
 def cell(p: tuple) -> str:
     """表格里那一格。各项一样(或只剩一个词)就写一个词。"""
+    if len(p) >= 4:
+        s, c, o, a = p[:4]
+        if s == c == o == a and s in _SAME:
+            return _SAME[s]
+        return f"{_SHARP[s]}  {_CROP[c]}  {_OUTRO[o]}  {_AUDIO[a]}"
     if len(p) >= 3:
         s, c, o = p[:3]
         if s == c == o and s in _SAME:
@@ -72,6 +83,8 @@ def tip(p: tuple) -> str:
     lines = [f"清晰度:{_TIP[p[0]]}", f"字幕被裁:{_TIP[p[1]]}"]
     if len(p) >= 3:
         lines.append(f"结尾求关注:{_TIP[p[2]]}")
+    if len(p) >= 4:
+        lines.append(f"声音:{_TIP[p[3]]}")
     return "\n".join(lines)
 
 
@@ -94,6 +107,8 @@ def progress(pairs: list[tuple]) -> str:
     parts = [_part("清晰度", [p[0] for p in pairs]), _part("字幕", [p[1] for p in pairs])]
     if any(len(p) >= 3 for p in pairs):
         parts.append(_part("结尾", [p[2] for p in pairs if len(p) >= 3]))
+    if any(len(p) >= 4 for p in pairs):
+        parts.append(_part("声音", [p[3] for p in pairs if len(p) >= 4]))
     parts = [x for x in parts if x]
     fail = sum(FAIL in p for p in pairs)
     head = "正在检查" if BUSY in flat else "检查"
@@ -110,8 +125,10 @@ def found(pairs: list[tuple]) -> str:
     blur = sum(p[0] == BAD for p in pairs)
     crop = sum(p[1] == BAD for p in pairs)
     outro = sum(len(p) >= 3 and p[2] == BAD for p in pairs)
+    audio = sum(len(p) >= 4 and p[3] == BAD for p in pairs)
     return " · ".join(x for x in (f"{blur} 条模糊" if blur else "", f"{crop} 条字幕被裁" if crop else "",
-                                  f"{outro} 条结尾求关注" if outro else "") if x)
+                                  f"{outro} 条结尾求关注" if outro else "",
+                                  f"{audio} 条无声" if audio else "") if x)
 
 
 def group_text(pairs: list[tuple]) -> str:
@@ -138,6 +155,7 @@ def unchecked_text(pairs: list[tuple]) -> str:
     a = sum(p[0] in LEFT for p in pairs)
     b = sum(p[1] in LEFT for p in pairs)
     c = sum(len(p) >= 3 and p[2] in LEFT for p in pairs)
+    d = sum(len(p) >= 4 and p[3] in LEFT for p in pairs)
     what = "、".join(x for x in (f"清晰度 {a} 条" if a else "", f"字幕被裁 {b} 条" if b else "",
-                                 f"结尾求关注 {c} 条" if c else "") if x)
+                                 f"结尾求关注 {c} 条" if c else "", f"声音 {d} 条" if d else "") if x)
     return f"还有 {n} 条没查完({what}),现在发就不查了。"

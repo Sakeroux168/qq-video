@@ -74,6 +74,7 @@ DEFAULTS = {
     "api_picked": {},          # 手动给号选的文件夹:{日期: {号: 文件夹}}(像旧软件的「选择」)
     "topic_model": "qwen-plus",
     "outro_check": True,       # 发布前查结尾求关注 / 别人账号 / 二维码
+    "audio_check": True,       # 发布前查有没有声音(没音轨 / 整条静音;只提醒,不拦发布)
     "bad_cover_auto": True,    # 查出黑封面 / 模糊封面后自动从视频挑一帧清晰封面放进指定文件夹
     "bad_cover_dir": r"E:\图片\企鹅号",
     "theme": "浅色",            # 界面风格(gui/theme.py 里的名字:浅色 / 深色;用户 2026-10-18 选的「G 一键驾驶舱」)

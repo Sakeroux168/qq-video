@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from qe import apiacc, apisrc, checkline, checks, cropcheck, outrocheck, plan, sharp, titleclean, topic, vertical, wmstore
+from qe import apiacc, apisrc, audiocheck, checkline, checks, cropcheck, outrocheck, plan, sharp, titleclean, topic, vertical, wmstore
 from qe.config import bj_now, bj_str, data_dir
 from qe.records import pkey
 from html import escape as html_escape
@@ -1230,13 +1230,14 @@ class ApiTab(QWidget):
         ds = apisrc.dates(self.roots(), self.known())
         has = set(ds) | {k for k, v in (self.st.get("api_picked") or {}).items() if v}
         today = f"{bj_now().month}.{bj_now().day}"
+        tomorrow = plan.tomorrow_folder()
         # 刚打开:今天的文件夹在就选今天(试用的人早上打开都停在昨天);没有才回到上次选的那天
         cur = self.day() or (today if today in has else str(self.st.get("api_last_date") or ""))
         self._prev = self._leftover(ds, has, today)
-        for x in list((self.st.get("api_picked") or {}).keys()) + [today]:   # 手选过文件夹的日子、今天:没有日期文件夹也能选
+        for x in list((self.st.get("api_picked") or {}).keys()) + [today, tomorrow]:   # 手选过文件夹的日子、今天、明天:没有日期文件夹也能选(方便提前给明天设定时)
             if x and x not in ds:
                 ds.append(x)
-        # 和教育号页一样:最新的在上面、今天标出来、没日期文件夹的(今天还没建)灰掉(审查 15)
+        # 和教育号页一样:最新的在上面、今天/明天标出来、没日期文件夹的灰掉(审查 15)
         fill_dates(self.c_date, newest_first(ds), cur, empty={d for d in ds if d not in has})
         self.load()
 
@@ -1352,6 +1353,7 @@ class ApiTab(QWidget):
             # 用户 2026-11-09「刷新后程序会把检查好了的再次自动检查一次…检查过的就不要再检查」:
             # 查过清晰度的(记在硬盘上、文件没变)直接挂上,不进后台那一轮(原来每条都排队「查中」再去硬盘读一遍)
             v.sharp = sharp.STORE.get(v.path)
+            v.audio = audiocheck.STORE.get(v.path)
             hit = self.cache.get(pkey(v.path))
             if hit and hit[0] == self._sig(v.path):      # 检过的、文件没变:不用重新检查(标题可能改过,话题 / 平台名重算)
                 v.checks = dict(hit[1])
@@ -1432,6 +1434,7 @@ class ApiTab(QWidget):
         for v in fresh_raw:
             s = self.rec.status_of(v.path)
             v.sharp = sharp.STORE.get(v.path)
+            v.audio = audiocheck.STORE.get(v.path)
             hit = self.cache.get(pkey(v.path))
             if hit and hit[0] == self._sig(v.path):
                 v.checks = dict(hit[1])
@@ -1665,10 +1668,15 @@ class ApiTab(QWidget):
         fuzzy = sharp.text(getattr(v, "sharp", None)) if c and not self._sent(i) else ""
         if fuzzy:
             note = (note + "、" if note else "") + fuzzy
+        mute = audiocheck.text(getattr(v, "audio", None)) if c and not self._sent(i) else ""
+        if mute:
+            note = (note + "、" if note else "") + mute
         pair = self._check_pair(i)
         for col, t in enumerate([v.title, res, note, st, checkline.cell(pair)]):
             it.setText(col, t)
             it.setToolTip(col, v.path if col == 0 else (self.why.get(i) or t) if col == 3 else checkline.tip(pair) if col == 4 else t)
+        if mute and not (c.get("wm") or {}).get("hits") and not (c.get("ads") or {}).get("hits") and not (c.get("outro") or {}).get("hits"):
+            it.setToolTip(2, audiocheck.detail(getattr(v, "audio", None)) + "\n只是提醒,不拦发布。看过没问题:右键「声音没问题」")
         ad = c.get("ads") or {}
         if ad.get("hits") and not (c.get("wm") or {}).get("hits"):     # 鼠标放上去看是哪几句
             it.setToolTip(2, "查到的口播广告" + ("(已经剪掉了)" if ad.get("blurred") else "(你标过:不是广告)" if ad.get("ok") else "") +
@@ -2076,6 +2084,9 @@ class ApiTab(QWidget):
             if i != -1 and sharp.flagged(getattr(self.videos[i], "sharp", None)):
                 m.addSeparator()
                 m.addAction("清晰度没问题", lambda: self.set_sharp_ok(i))
+            if i != -1 and not self._sent(i) and audiocheck.flagged(getattr(self.videos[i], "audio", None)):
+                m.addSeparator()
+                m.addAction("声音没问题", lambda: self.set_audio_ok(i))
             crop = (self.videos[i].checks or {}).get("crop") if i != -1 else None
             if crop and crop.get("hits") and not self._sent(i):
                 m.addSeparator()
@@ -2262,19 +2273,21 @@ class ApiTab(QWidget):
         if w and w.isRunning():
             return
         want = bool(self.st.get("sharp_check", True))
+        want_audio = bool(self.st.get("audio_check", True))
         from qe import aiconf
         ai = aiconf.vision(self.st)                   # 自己的模型认得图才用它
         key = ai if self.st.get("crop_check", True) and ai.key else ""
         outro_key = ai if self.st.get("outro_check", True) and ai.key else ""
         rows = [i for i, v in enumerate(self.videos) if not self.busy(v.account) and not self._sent(i)
                 and (v.path in self._recheck_paths or (v.checks and
-                     ((want and getattr(v, "sharp", None) is None) or (key and self._crop_todo(v)) or (outro_key and self._outro_todo(v)))))]
+                     ((want and getattr(v, "sharp", None) is None) or (want_audio and getattr(v, "audio", None) is None)
+                      or (key and self._crop_todo(v)) or (outro_key and self._outro_todo(v)))))]
         if not rows:
             return
         from gui.sharp_worker import SharpWorker
         w = SharpWorker(self.videos, rows, self, want_sharp=want, crop_key=key, need_crop=self._crop_todo, asker=self.CROP_ASKER,
                         force=self._recheck_paths, outro_key=outro_key, need_outro=self._outro_todo, outro_asker=self.OUTRO_ASKER,
-                        skip=lambda v: self.busy(v.account))
+                        skip=lambda v: self.busy(v.account), want_audio=want_audio)
         w.one.connect(lambda i, w=w: self._sharp_row(w, i))
         w.finished.connect(lambda w=w: self._sharp_done(w))
         self.sharp_worker = w
@@ -2298,6 +2311,8 @@ class ApiTab(QWidget):
         self._check_refresh()
         if w.n_bad:
             self.say(f"查了清晰度:{w.n_bad} 条疑似模糊,不拦发布,看一下备注那一格")
+        if w.n_audio:
+            self.say(f"查了声音:{w.n_audio} 条没有声音或疑似无声,不拦发布,看一下备注那一格")
         if w.n_crop:
             self.say(f"查到 {w.n_crop} 条字幕被裁:这些先不发,点上面的「打回」")
         if w.n_outro:
@@ -2309,12 +2324,13 @@ class ApiTab(QWidget):
         self._update_scope()
 
     # ---------------- 「检查」那一格、进度、重新检查(用户 2026-11-07)----------------
-    def _check_cfg(self, fresh: bool = False) -> tuple[bool, bool, bool, bool]:
-        """(清晰度开着, 字幕被裁开着, 结尾求关注开着, 有 Key)。ai_key 可能要读文件,不每行都读。"""
+    def _check_cfg(self, fresh: bool = False) -> tuple[bool, bool, bool, bool, bool]:
+        """(清晰度开着, 字幕被裁开着, 结尾求关注开着, 声音开着, 有 Key)。ai_key 可能要读文件,不每行都读。"""
         if fresh or self._ck_cfg is None:
             from qe import aiconf
             self._ck_cfg = (bool(self.st.get("sharp_check", True)), bool(self.st.get("crop_check", True)),
-                            bool(self.st.get("outro_check", True)), bool(aiconf.vision(self.st).key))
+                            bool(self.st.get("outro_check", True)), bool(self.st.get("audio_check", True)),
+                            bool(aiconf.vision(self.st).key))
         return self._ck_cfg
 
     def _check_pair(self, i: int) -> tuple:
@@ -2322,9 +2338,10 @@ class ApiTab(QWidget):
         c = v.checks or {}
         crop = c.get("crop") or getattr(v, "crop", None)
         outro = c.get("outro") or getattr(v, "outro", None)
-        sharp_on, crop_on, outro_on, has_key = self._check_cfg()
+        sharp_on, crop_on, outro_on, audio_on, has_key = self._check_cfg()
         return checkline.pair(v, getattr(self, "sharp_worker", None), crop, self._sent(i), True,
-                              sharp_on, crop_on, has_key, outro=outro, outro_on=outro_on)
+                              sharp_on, crop_on, has_key, outro=outro, outro_on=outro_on,
+                              audio=getattr(v, "audio", None), audio_on=audio_on)
 
     def _check_refresh(self):
         """一下子变了很多条(开始查 / 查完):只刷「检查」那一格和进度。"""
@@ -2354,18 +2371,18 @@ class ApiTab(QWidget):
         rows = self._idle_rows(self._recheck_rows(), "重新检查")
         if not rows:
             return
-        want, crop_on, outro_on, has_key = self._check_cfg(fresh=True)
+        want, crop_on, outro_on, audio_on, has_key = self._check_cfg(fresh=True)
         crop = crop_on and has_key
         outro = outro_on and has_key
-        if not want and not crop and not outro:
-            QMessageBox.information(self, "重新检查", "清晰度、字幕被裁和结尾求关注都没开(或者没填阿里百炼 Key),去「设置」里打开。")
+        if not want and not crop and not outro and not audio_on:
+            QMessageBox.information(self, "重新检查", "清晰度、字幕被裁、结尾求关注和声音检查都没开(或者没填阿里百炼 Key),去「设置」里打开。")
             return
         if len(rows) > 30 and (crop or outro) and not ask(self, "重新检查", f"重新查这 {len(rows)} 条?\n\n字幕被裁 / 结尾求关注要问 AI,条数多会花点时间和额度。"
                                                           "后台查,不耽误你干别的。", "重新检查", "先不"):
             return
         for i in rows:
             v = self.videos[i]
-            v.sharp_err = v.crop_err = v.outro_err = False
+            v.sharp_err = v.crop_err = v.outro_err = v.audio_err = False
             self._recheck_paths.add(v.path)
         self.say(f"重新检查 {len(rows)} 条,进度看上面那一行")
         w = getattr(self, "sharp_worker", None)
@@ -2432,6 +2449,15 @@ class ApiTab(QWidget):
         v.sharp = sharp.STORE.get(v.path)
         self._fill(i)
 
+    def set_audio_ok(self, i: int):
+        rows = [r for r in (self.selected_rows() or [i]) if audiocheck.flagged(getattr(self.videos[r], "audio", None))] or [i]
+        for r in rows:
+            v = self.videos[r]
+            audiocheck.STORE.set_ok(v.path, True)
+            v.audio = audiocheck.STORE.get(v.path)
+            self._fill(r)
+        self._check_refresh()
+
     # ---------------- 结尾求关注 / 别人账号 / 二维码(用户 2026-11-16):剪前给你看,剪完照样发 ----------------
     OUTRO_ASKER = None                                # 测试里换掉(绝不真问 AI)
     OUTRO_DIALOG = None                               # 测试里可替换对话框
@@ -2495,6 +2521,7 @@ class ApiTab(QWidget):
             old_path = v.path
             old_outro = dict((v.checks or {}).get("outro") or {})
             old_sharp = sharp.STORE.get(old_path)
+            old_audio = audiocheck.STORE.get(old_path)
             old_crop = wmstore.CROP.get(old_path)
             if not _take_encode_slot(emit, v, stopped):
                 return
@@ -2516,9 +2543,12 @@ class ApiTab(QWidget):
             wmstore.OUTRO.put(new, {"hits": hits, "shot": old_outro.get("shot") or ""}, ok=True, blurred=True)
             if old_sharp and not sharp.flagged(old_sharp):
                 sharp.STORE.move(old_path, new)
+            if old_audio and not audiocheck.flagged(old_audio):
+                audiocheck.STORE.move(old_path, new)
             if old_crop and not wmstore.blocks(old_crop):
                 wmstore.CROP.move(old_path, new)
             v.sharp = sharp.STORE.get(new)
+            v.audio = audiocheck.STORE.get(new)
             self._attach_wm(v)
             self._remember_check(v)
             emit(v, CLEAR)
@@ -2743,6 +2773,8 @@ class ApiTab(QWidget):
                     return
                 if not (deep and v.checks):               # 高级检查:普通检查过的就不再做一遍
                     checks.check_one(v, words, ff)
+                    if v.checks.get("has_audio") is False and self.st.get("audio_check", True) and audiocheck.STORE.get(v.path) is None:
+                        v.audio = audiocheck.STORE.put(v.path, {"hits": [{"kind": "none"}]})
                     self._attach_wm(v)
                     self._remember_check(v)
                     emit(v, "")
@@ -3185,10 +3217,12 @@ class ApiTab(QWidget):
             v.checks["tags"] = topic.split_topics(v.title)["tags"]
             v.checks["platform"] = checks.platform_hits(v.title, self.st.get("api_platform_words") or None)
         hit = self.cache.pop(pkey(old), None)
-        wmstore.move(old, v.path)                        # 查水印 / 口播广告 / 结尾的结果跟着新名字走
+        wmstore.move(old, v.path)                        # 查水印 / 口播广告 / 结尾 / 声音的结果跟着新名字走
         wmstore.ADS.move(old, v.path)
         wmstore.CROP.move(old, v.path)
         wmstore.OUTRO.move(old, v.path)
+        sharp.STORE.move(old, v.path)
+        audiocheck.STORE.move(old, v.path)
         if hit:
             self._remember_check(v)
 
@@ -4396,8 +4430,9 @@ class ApiTab(QWidget):
                 else:
                     self.state.pop(i, None)
                 changed_rows.append(i)
-            elif any(k in kinds for k in ("wm", "ads", "crop", "outro", "sharp")):
+            elif any(k in kinds for k in ("wm", "ads", "crop", "outro", "sharp", "audio")):
                 v.sharp = sharp.STORE.get(v.path)
+                v.audio = audiocheck.STORE.get(v.path)
                 self._attach_wm(v)
                 changed_rows.append(i)
         if "gamecheck" in kinds or "titledate" in kinds or "titleclean" in kinds:
