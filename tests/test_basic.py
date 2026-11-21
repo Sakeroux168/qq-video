@@ -1656,6 +1656,15 @@ def test_at_titles(tmp: Path):
                     ("iPhone16ProMax评测 #数码", None), ("AK-12突击步枪改枪 #三角洲行动", None), ("S14总决赛 #LOL", None),
                     ("联系 a@b.com 吧", None), ("@某平台官方", None)):
         check(TC.clean(t) == want, f"整理标题:「{t}」→ {want!r}(实际 {TC.clean(t)!r})")
+    for t, want in (("(1分44s；2分14)【三角洲行动】诶？这什么？滋一下 5.56燃烧弹", "【三角洲行动】诶？这什么？滋一下 5.56燃烧弹"),
+                    ("(广告)10人口混战，真是一场酣畅淋漓的战斗", "10人口混战，真是一场酣畅淋漓的战斗"),
+                    ("(1min06s处脏话)贪吃的老叔子 野排博弈论 #三角洲行动", "贪吃的老叔子 野排博弈论 #三角洲行动"),
+                    ("（有广告）某某视频 #LOL", "某某视频 #LOL"), ("标题内容 (0:45；1:20) #CSGO", "标题内容 #CSGO"),
+                    ("（暴力出弯）保姆级教学 #QQ飞车", None), ("（3分钟学会漂移）保姆级教学", None),
+                    ("冰封列车阴间打法：速通流！（7分钟）#和平精英", None), ("当国一狼人（22660分）来峡谷打传说", None),
+                    ("（违规操作解析）为什么会被封号", None), ("（待定）沙2 B洞防 rush火", None)):
+        check(TC.clean(t) == want, f"剪辑备注:「{t}」→ {want!r}(实际 {TC.clean(t)!r})")
+    check(TC.dirty("(广告)10人口混战") == ["(广告)"] and not TC.dirty("（暴力出弯）保姆级教学"), "剪辑备注:算要处理的(给「整理标题」用),正常括号不报")
     ad = NS(title="点击下方小黄车领取同款 #好物", checks={"w": 1080, "h": 1920, "tags": ["好物"], "platform": []}, account="CSGO战神君")
     check(any("广告" in p for p in checks.problems(ad)), "标题有广告词:算有问题(视频里八成也有广告,要人工剪)")
     TC.store().set("CSGO战神君", ad.title, True)

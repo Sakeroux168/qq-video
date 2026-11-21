@@ -99,10 +99,42 @@ def esc_runs(title: str) -> list[str]:
     return out
 
 
+# 剪辑师写在标题里的备注(用户 2026-11-21:「(1分44s；2分14)【三角洲行动】…」「(广告)10人口混战…」「(1min06s处脏话)贪吃的老叔子…」)。
+# 只认两种,别的圆括号(「（暴力出弯）保姆级教学」「（3分钟学会）」「（22660分）」)是正常标题,不动:
+#   ① 括号里只有时间点(1分44s；2分14 / 1:06 / 30秒),任何位置;
+#   ② 标题开头的括号,里面有「广告 / 脏话 …」,而且(有时间点 或 去掉这个词只剩 ≤3 个字:「(广告)」「(有广告)」「(1min06s处脏话)」)
+_PAREN = re.compile(r"([（(])([^（）()]{1,40})([）)])")
+_REMARK_KW = ("广告", "脏话", "粗口", "敏感", "违规", "违禁")
+_REMARK_TIME = re.compile(r"\d+\s*分\s*\d|\d+\s*(?:秒|min|MIN|Min|[sS](?![A-Za-z]))|\d+[:：]\d")
+_REMARK_TIME_ONLY = re.compile(r"(?:\d+\s*(?:分|秒|min|MIN|Min|[smSM:：'′])?\s*[;；,，、/\-~～到至和与及]*\s*)+")
+
+
+def _is_remark(lead: bool, inner: str) -> bool:
+    s = inner.strip()
+    if not s:
+        return False
+    if _REMARK_TIME.search(s) and _REMARK_TIME_ONLY.fullmatch(s):
+        return True
+    if lead:
+        hit = next((k for k in _REMARK_KW if k in s), "")
+        if hit:
+            rest = re.sub(r"[\s,，;；、:：]", "", s.replace(hit, ""))
+            return bool(_REMARK_TIME.search(s)) or len(rest) <= 3
+    return False
+
+
+def remark_runs(title: str) -> list[str]:
+    """标题里剪辑师写的备注括号(时间点 / 开头的「广告」「脏话」)。"""
+    t = str(title or "")
+    lead_at = len(t) - len(t.lstrip())
+    return [m.group(0) for m in _PAREN.finditer(t) if _is_remark(m.start() == lead_at, m.group(2))]
+
+
 def contact_runs(title: str) -> list[str]:
-    """括号或结尾里的联系人、老师署名残片、空署名冒号。"""
+    """括号或结尾里的联系人、老师署名残片、空署名冒号、剪辑备注。"""
     t = str(title or "")
     out = [m.group(0) for m in _BRACKET.finditer(t) if _is_contact_bracket(m.group(1), m.group(2))]
+    out += [x for x in remark_runs(t) if x not in out]
     left = t
     for x in out:
         left = left.replace(x, " ")
