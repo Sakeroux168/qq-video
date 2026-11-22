@@ -50,7 +50,7 @@ def cut(path: str, hits: list[dict], ffmpeg: str = "", stop=None) -> tuple[str, 
         raise RuntimeError(f"要剪掉 {gone:.0f} 秒,超过一半了,不敢自动剪,你自己看一下")
     e = _expr(spans)
     src = Path(path)
-    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:6]}_{src.stem}.mp4")
+    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:8]}.mp4")
     try:
         err = ""
         for nvenc in (True, False):

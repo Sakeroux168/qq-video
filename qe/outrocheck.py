@@ -341,7 +341,7 @@ def cut(path: str, start: float, ffmpeg: str = "", stop=None) -> tuple[str, str,
     if gone > dur * 0.6:
         raise RuntimeError(f"要从 {fmt_time(start)} 剪到最后(剪掉 {gone:.1f} 秒,超过六成了),不敢自动剪,你自己看一下")
     src = Path(path)
-    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:6]}_{src.stem}.mp4")
+    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:8]}.mp4")
     try:
         err = ""
         for nvenc in (True, False):

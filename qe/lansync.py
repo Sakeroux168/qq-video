@@ -33,20 +33,21 @@ LOCAL_ONLY_KEYS = frozenset({
     "theme", "splash", "schedules", "sched_notice",
     "last_date", "api_last_date", "api_detail_open",
     "bad_cover_dir", "material_root", "archive_root", "api_roots", "api_archive",
-    "api_threads", "api_per_acc",
+    "api_threads", "api_per_acc", "api_picked",
+    "own_ai_url", "own_ai_model", "own_ai_key", "own_ai_vision",
 })
 
 SHARED_SETTING_KEYS = frozenset({
     "accounts", "daily_plan", "quota_extra", "quota_open", "redo_room",
-    "api_picked", "api_cover", "api_interval", "api_archive_by_game",
+    "api_cover", "api_interval", "api_archive_by_game",
     "batch_size", "topic_model", "outro_check", "sharp_check", "crop_check", "audio_check",
     "ai_cover", "ai_cover_trust", "bad_cover_auto", "game_words",
-    "ai_key", "own_ai_url", "own_ai_model", "own_ai_key", "own_ai_vision",
+    "ai_key",
     "api_last_topic",
 })
 
 DICT_MERGE_KEYS = frozenset({"daily_plan", "quota_extra", "redo_room"})
-NESTED2_MERGE_KEYS = frozenset({"api_picked"})
+NESTED2_MERGE_KEYS = frozenset()
 
 STORE_FILES = {
     "wm": "水印检查.json",

@@ -73,7 +73,7 @@ def blur(path: str, boxes: list[dict], ffmpeg: str = "", stop=None) -> tuple[str
         raise RuntimeError("视频读不出来")
     graph = filter_graph(boxes, info["w"], info["h"])
     src = Path(path)
-    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:6]}_{src.stem}.mp4")
+    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:8]}.mp4")
     try:
         err = ""
         for nvenc in (True, False):

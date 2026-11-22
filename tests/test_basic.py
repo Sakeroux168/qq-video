@@ -7684,6 +7684,8 @@ def test_lan_sync(tmp: Path):
         st_h.update(lan_role="host", lan_port=0, lan_token="482910", theme="深色",
                     schedules=["host_only_sched"],
                     daily_plan={"CSGO战神君": 2},
+                    quota_extra={"2026-11-17": {"CSGO战神君": 1}},
+                    own_ai_url="http://127.0.0.1:8788/v1",
                     api_picked={"11.17": {"电竞情报馆": "X:/old_pick"}})
         st_h.save()
         apiacc.save([{"nick": "CSGO战神君", "client_id": "cidA", "secret": apiacc.seal("secA"), "category": 1604, "enabled": True}])
@@ -7739,8 +7741,9 @@ def test_lan_sync(tmp: Path):
             check(rrec.status_of(va.path) == "已发" and rrec.sent_on(plan.today()).get("CSGO战神君") == 1,
                   f"从机首次同步就看见主机发过的视频A与今日已发=1 -> {rrec.sent_on(plan.today())}")
             check(st_c.get("theme") == "浅色" and st_c.get("schedules") == ["cli_only_sched"]
-                  and st_c.get("daily_plan") == {"CSGO战神君": 2},
-                  f"从机拉回主机规定条数但保留自己的皮肤与定时 -> {st_c.get('daily_plan')} / {st_c.get('theme')}")
+                  and st_c.get("daily_plan") == {"CSGO战神君": 2}
+                  and not st_c.get("api_picked") and not st_c.get("own_ai_url"),
+                  f"从机拉回主机规定条数但保留自己的皮肤/定时,且不拉主机的盘符手选和本机模型 -> {st_c.get('daily_plan')} / {st_c.get('api_picked')} / {st_c.get('own_ai_url')}")
             # 账号密钥也通过局域网密文同步成从机 PORT1 可解
             c_accs = apiacc.load()
             check(len(c_accs) == 1 and c_accs[0]["secret"].startswith("PORT1:") and apiacc.unseal(c_accs[0]["secret"]) == "secA",
@@ -7770,11 +7773,15 @@ def test_lan_sync(tmp: Path):
             wmstore.OUTRO.put(vb.path, {"hits": [{"start": 2.0}], "shot": str(cshot)})
             gamecheck.store().set_ok("CSGO战神君", "视频B", True)
             titledate.store().set("CSGO战神君", "视频B", True)
-            st_c["api_picked"] = {"11.18": {"电竞情报馆": "X:/cli_1118"}}
+            st_c["api_picked"] = {"11.18": {"电竞情报馆": "Z:/cli_1118"}}
+            st_c["own_ai_url"] = "http://127.0.0.1:9999/v1"
+            st_c["quota_extra"] = {"2026-11-18": {"CSGO战神君": 3}}
             st_c.save()
-            check(st_h.get("api_picked") == {"11.17": {"电竞情报馆": "X:/old_pick"}, "11.18": {"电竞情报馆": "X:/cli_1118"}}
+            check(st_h.get("quota_extra") == {"2026-11-17": {"CSGO战神君": 1}, "2026-11-18": {"CSGO战神君": 3}}
+                  and st_h.get("api_picked") == {"11.17": {"电竞情报馆": "X:/old_pick"}}
+                  and st_h.get("own_ai_url") == "http://127.0.0.1:8788/v1"
                   and st_h.get("schedules") == ["host_only_sched"],
-                  f"从机选文件夹温和合并进主机且不覆盖 11.17/主机定时 -> {st_h.get('api_picked')}")
+                  f"从机临时加量温和合并进主机;两台盘符手选/本机模型/定时各自独立不互冲 -> {st_h.get('quota_extra')} / {st_h.get('api_picked')} / {st_h.get('own_ai_url')}")
 
             # 切换到主机 env 验证主机真收到了检查结果与截图文件
             os.environ["QE_DATA_DIR"] = str(host_dir)

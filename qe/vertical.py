@@ -86,8 +86,8 @@ def to_vertical(path: str, ffmpeg: str = "", stop=None, keep_orig: bool = True) 
     if not ff:
         raise RuntimeError("找不到 ffmpeg.exe")
     src = Path(path)
-    # 临时文件名带进程号和随机数:同名的 a.mov / a.mp4 一起转不会抢同一个临时文件
-    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:6]}_{src.stem}.mp4")
+    # 临时文件名只带进程号和随机串(不拼原文件名:NAS Linux 单文件名上限 255 字节,长中文标题再加前缀会报 WinError 123)
+    tmp = src.with_name(f"_处理中_{os.getpid()}_{uuid.uuid4().hex[:8]}.mp4")
     try:
         return _convert(src, tmp, ff, stop, keep_orig)
     except RuntimeError:

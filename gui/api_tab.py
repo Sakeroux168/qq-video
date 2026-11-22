@@ -3556,6 +3556,10 @@ class ApiTab(QWidget):
         def one(v, emit, stopped):
             if stopped():
                 return
+            if not os.path.isfile(v.path):
+                emit(v, "")
+                emit(-1, f"「{v.title}」文件已经不在原位置了(可能被改名或挪走),先点一下顶部「刷新」")
+                return
             try:
                 name = None
                 b0 = base(v)

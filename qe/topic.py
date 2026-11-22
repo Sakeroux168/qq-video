@@ -8,6 +8,23 @@ TOPIC_SYSTEM / topicMessages,generate.js 的 parseTopicOrder / cleanTopic),结�
 import json
 import os
 import re
+import threading
+
+import requests as _req
+
+_REAL_POST = _req.post
+_TLS = threading.local()
+
+
+def _http_post(url: str, **kw):
+    """按线程复用长连接(免得每条视频重新建连卡 TCP 回退超时);测试里替换了 requests.post 时照旧走测试假函数。"""
+    if _req.post is not _REAL_POST:
+        return _req.post(url, **kw)
+    s = getattr(_TLS, "sess", None)
+    if s is None:
+        s = _req.Session()
+        _TLS.sess = s
+    return s.post(url, **kw)
 
 TOPIC_SYSTEM = """
 你是短视频的话题筛选员。
@@ -148,7 +165,7 @@ def ask_ai(body: str, tags: list[str], key, model: str = "qwen-plus",
         raise RuntimeError("要用 AI 挑话题,先在「设置」里填阿里百炼 Key")
     body_json = {"model": ai.model, "messages": topic_messages(body, tags), "temperature": 0, "max_tokens": tokens(ai, 400), **ai.extra()}
     try:
-        r = requests.post(ai.url(), json=body_json, headers={"Authorization": f"Bearer {ai.key}", "Content-Type": "application/json"}, timeout=timeout)
+        r = _http_post(ai.url(), json=body_json, headers={"Authorization": f"Bearer {ai.key}", "Content-Type": "application/json"}, timeout=timeout)
     except (requests.RequestException, ValueError):      # ValueError:Key 里有中文
         raise RuntimeError(f"连不上{ai.who}(网络?)")
     try:
