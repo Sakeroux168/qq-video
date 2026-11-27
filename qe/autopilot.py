@@ -46,6 +46,109 @@ class _Taken(Exception):
     pass
 
 
+_ACC_LOCK = threading.Lock()
+_ACC_LISTENERS: list[Callable[[dict], None]] = []
+
+
+def add_account_listener(fn: Callable[[dict], None]) -> None:
+    """注册全自动单号实时状态监听器（用于看板每号一张卡片实时跳动）。"""
+    with _ACC_LOCK:
+        if fn not in _ACC_LISTENERS:
+            _ACC_LISTENERS.append(fn)
+
+
+def remove_account_listener(fn: Callable[[dict], None]) -> None:
+    with _ACC_LOCK:
+        try:
+            _ACC_LISTENERS.remove(fn)
+        except ValueError:
+            pass
+
+
+def _emit_acc(ev: dict, deps: dict | None = None) -> None:
+    """向全局监听器与 deps['on_account_event'] 推送结构化单号状态事件。"""
+    cb = (deps or {}).get("on_account_event")
+    if cb is not None:
+        try:
+            cb(dict(ev))
+        except Exception:
+            pass
+    with _ACC_LOCK:
+        ls = list(_ACC_LISTENERS)
+    for fn in ls:
+        try:
+            fn(dict(ev))
+        except Exception:
+            pass
+
+
+def snapshot_accounts(
+    st,
+    rec,
+    day: str = "",
+    accounts: list[str] | None = None,
+    watch: "WatchState | None" = None,
+    deps: dict | None = None,
+) -> list[dict[str, Any]]:
+    """快速只读快照：返回所有已启用 16 个号今天的看板状态（平时空闲也能直接铺满 16 张卡）。"""
+    deps = deps or {}
+    prep = prepare(st, rec, day=day, accounts=accounts, deps=deps)
+    day_iso = prep["day_iso"]
+    sent_now = rec.sent_on(day_iso)
+    ready_map = {x["account"]: x for x in prep.get("ready_accounts") or []}
+    done_map = {x["account"]: x for x in prep.get("done_accounts") or []}
+    wait_map: dict[str, list[dict]] = {}
+    for wf in prep.get("waiting_folders") or []:
+        wait_map.setdefault(wf["account"], []).append(wf)
+    skip_set = set(watch.skip_accounts) if watch is not None else set()
+
+    out: list[dict[str, Any]] = []
+    for a in _load_enabled_api_accounts(deps):
+        nick = str(a.get("nick") or "").strip()
+        if not nick or not _match_nick_filter(nick, accounts):
+            continue
+        sent = int(sent_now.get(nick, 0))
+        q = int(plan.quota_on(st, nick, day_iso) or 0)
+        is_free = bool(st.get("quota_open", False) or plan.is_free(st, nick))
+        if nick in skip_set:
+            out.append({
+                "account": nick, "status": "idle", "stage": "已跳过",
+                "sent": sent, "target": (0 if is_free else q), "ready_count": 0,
+                "detail": "已在本次值守中跳过", "skipped": 0, "outro_cut": 0, "failed": 0,
+            })
+        elif nick in done_map:
+            t_val = q if q > 0 else sent
+            out.append({
+                "account": nick, "status": "done", "stage": "已发满",
+                "sent": sent, "target": t_val, "ready_count": 0,
+                "detail": f"今日已完成 {sent}/{t_val} 条", "skipped": 0, "outro_cut": 0, "failed": 0,
+            })
+        elif nick in ready_map:
+            rinfo = ready_map[nick]
+            rc = int(rinfo.get("to_send") or 0)
+            t_val = (sent + rc) if (is_free or q <= 0) else q
+            out.append({
+                "account": nick, "status": "waiting", "stage": f"就绪 {rc} 条",
+                "sent": sent, "target": max(t_val, sent + rc), "ready_count": rc,
+                "detail": f"今日目录有 {rc} 条待发，随时可启动", "skipped": 0, "outro_cut": 0, "failed": 0,
+            })
+        elif nick in wait_map:
+            wf0 = wait_map[nick][0]
+            out.append({
+                "account": nick, "status": "waiting", "stage": "等待素材",
+                "sent": sent, "target": (0 if is_free else q), "ready_count": 0,
+                "detail": f"等待「{wf0.get('folder_name', '')}」：{wf0.get('reason', '')}",
+                "skipped": 0, "outro_cut": 0, "failed": 0,
+            })
+        else:
+            out.append({
+                "account": nick, "status": "idle", "stage": "无今日夹",
+                "sent": sent, "target": (0 if is_free else q), "ready_count": 0,
+                "detail": "今天素材文件夹还没放进来", "skipped": 0, "outro_cut": 0, "failed": 0,
+            })
+    return out
+
+
 def check_summary(st) -> dict[str, Any]:
     """读取设置里 6 项自动检查开关状态。"""
     flags = {k: bool(st.get(k, True)) for k, _ in CHECK_LABELS}
@@ -580,208 +683,303 @@ def _publish_batch(
     stopped: Callable[[], bool] | None,
     deps: dict,
     stage_prefix: str = "④/⑥ 自动发布",
+    acc_state: dict[str, dict[str, Any]] | None = None,
+    state_lock: threading.Lock | None = None,
 ) -> dict[str, Any]:
-    """发一批已经通过检查与预处理的视频，严格守住每日规定条数闸与原子防重发锁。"""
+    """发一批已经通过检查与预处理的视频：
+    严格按设置里的 api_threads（几个号一起发）与 api_per_acc（单号一次传几条，全局最多 6 路并发）并行发，
+    并守住每日规定条数闸、原子防重发锁、单号发布间隔与致命密钥熔断。"""
     if not videos_to_send:
-        return {"published": [], "failed": [], "unsure": [], "quota_skipped": []}
+        return {"published": [], "failed": [], "unsure": [], "quota_skipped": [], "key_errors": []}
 
-    gap = max(0, int(deps.get("api_interval", st.get("api_interval", 5))))
+    gap = max(0, int(deps.get("api_interval", st.get("api_interval", 5)) or 0))
+    par = max(1, int(deps.get("api_threads", st.get("api_threads", 1)) or 1))
+    per_acc = max(1, int(deps.get("api_per_acc", st.get("api_per_acc", 1)) or 1))
     cmode = str(st.get("api_cover") or "原样")
     make_client = deps.get("make_client") or (lambda a: omapi.Client(a["client_id"], apiacc.unseal(a["secret"])))
     cover_upload_fn = deps.get("cover_upload_fn", omcover.upload)
     autocover_fn = deps.get("autocover_fn", autocover.pick)
     sleep_fn = deps.get("sleep_fn", time.sleep)
+    stage_tag = stage_prefix.split(" ")[0] if " " in stage_prefix else "④发布"
+    stage_short = "自动补发" if "补发" in stage_prefix else "发布中"
+
+    # 按号分组保持原始顺序
+    by_acc: dict[str, list[apisrc.ApiVideo]] = {}
+    for v in videos_to_send:
+        by_acc.setdefault(v.account, []).append(v)
 
     # 按号算上限（尊重 quota_open 与 quota_free）
     cap_of: dict[str, int | None] = {}
-    for nick in {v.account for v in videos_to_send}:
+    for nick in by_acc:
         if st.get("quota_open", False) or plan.is_free(st, nick):
             cap_of[nick] = None
         else:
             q = plan.quota_on(st, nick, day_iso)
             cap_of[nick] = q if q else None
 
-    published, failed, unsure, quota_skipped, key_errors = [], [], [], [], []
-    last_ts = 0.0
-    clients: dict[str, Any] = {}
-    quota_hit: set[str] = set()
-    fatal_acc: set[str] = set()
+    published: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    unsure: list[dict[str, Any]] = []
+    quota_skipped: list[dict[str, Any]] = []
+    key_errors: list[dict[str, Any]] = []
 
+    slock = state_lock or threading.Lock()
+    upsem = threading.Semaphore(6)
     total = len(videos_to_send)
-    for idx, v in enumerate(videos_to_send, 1):
-        if stopped and stopped():
-            break
-        nick = v.account
-        if nick in quota_hit or nick in fatal_acc:
-            continue
+    started_cnt = [0]
+    lan_broken = threading.Event()
+
+    def _upd_acc(nick: str, **kw):
+        if acc_state is None:
+            return
+        with slock:
+            cur = acc_state.setdefault(nick, {
+                "account": nick, "status": "running", "stage": stage_short,
+                "sent": 0, "target": 0, "ready_count": 0, "detail": "",
+                "skipped": 0, "outro_cut": 0, "failed": 0,
+            })
+            if "sent_delta" in kw:
+                cur["sent"] = int(cur.get("sent") or 0) + int(kw.pop("sent_delta"))
+            if "fail_delta" in kw:
+                cur["failed"] = int(cur.get("failed") or 0) + int(kw.pop("fail_delta"))
+            cur.update(kw)
+            snap = dict(cur)
+        _emit_acc(snap, deps)
+
+    def _acc_job(nick: str, acc_vs: list[apisrc.ApiVideo]):
+        if (stopped and stopped()) or lan_broken.is_set():
+            return
         a = accs_by_nick.get(nick)
         if not a:
-            failed.append({"account": nick, "title": v.title, "error": "找不到账号配置"})
-            continue
-
-        try:
-            if rec.blocked(v.path):
-                continue
-        except LanError as e:
-            failed.append({"account": nick, "title": v.title, "error": f"连不上局域网主机({e})"})
-            break
-
-        left = plan.left_today(rec, st, nick, day=day_iso)
-        if left == 0:
-            quota_hit.add(nick)
-            quota_skipped.append({"account": nick, "title": v.title})
-            continue
-
-        if idx > 1 and gap > 0 and last_ts > 0:
-            rem = (last_ts + gap) - time.time()
-            while rem > 0:
-                if stopped and stopped():
-                    break
-                sleep_fn(min(0.25, rem))
-                rem = (last_ts + gap) - time.time()
-            if stopped and stopped():
-                break
-
-        if on_progress:
-            on_progress(f"{stage_prefix}（{idx}/{total}）：[{nick}] {v.title[:22]}…")
-        aplog.write(
-            stage_prefix.split(" ")[0] if " " in stage_prefix else "④发布",
-            f"开始上传发布（{idx}/{total}）：《{v.title}》",
-            level="INFO", account=nick, day_iso=day_iso,
-        )
-
-        cl = clients.get(nick)
-        if cl is None:
-            try:
-                cl = make_client(a)
-                clients[nick] = cl
-            except Exception as e:
-                err_s = f"账号密钥初始化失败:{e}"
-                failed.append({"account": nick, "title": v.title, "error": err_s})
-                key_errors.append({"account": nick, "error": err_s})
-                fatal_acc.add(nick)
-                continue
-
+            with slock:
+                for v in acc_vs:
+                    failed.append({"account": nick, "title": v.title, "error": "找不到账号配置"})
+            _upd_acc(nick, status="error", stage="配置异常", detail="找不到账号配置", fail_delta=len(acc_vs))
+            return
         try:
             cat = int(a.get("category"))
         except (TypeError, ValueError):
-            failed.append({"account": nick, "title": v.title, "error": f"账号分类无效({a.get('category')!r})"})
-            fatal_acc.add(nick)
-            continue
+            with slock:
+                for v in acc_vs:
+                    failed.append({"account": nick, "title": v.title, "error": f"账号分类无效({a.get('category')!r})"})
+            _upd_acc(nick, status="error", stage="配置异常", detail="账号分类无效", fail_delta=len(acc_vs))
+            return
+        try:
+            cl = make_client(a)
+        except Exception as e:
+            err_s = f"账号密钥初始化失败:{e}"
+            with slock:
+                for v in acc_vs:
+                    failed.append({"account": nick, "title": v.title, "error": err_s})
+                key_errors.append({"account": nick, "error": err_s})
+            _upd_acc(nick, status="error", stage="密钥失效", detail=err_s[:50], fail_delta=len(acc_vs))
+            return
 
-        rid: dict[str, Any] = {}
+        last_ts = [0.0]
 
-        def begin(vid, _v=v, _rid=rid):
-            got = rec.try_begin(_v, f"vid={vid}", day=day_iso, cap=cap_of.get(nick))
-            if got == -1:
-                raise _QuotaFull()
-            if got is None:
-                raise _Taken()
-            _rid["id"] = got
-            _rid["vid"] = vid
+        def _wait_gap() -> bool:
+            if gap <= 0 or last_ts[0] <= 0:
+                return True
+            rem = (last_ts[0] + gap) - time.time()
+            while rem > 0:
+                if (stopped and stopped()) or lan_broken.is_set():
+                    return False
+                sleep_fn(min(0.25, rem))
+                rem = (last_ts[0] + gap) - time.time()
+            return not ((stopped and stopped()) or lan_broken.is_set())
 
-        src = apicover.find(v.path) if cmode != "不传" else ""
-        if src and (blackcover.is_black(src) or blackcover.is_blurry(src)):
-            src = ""
-        auto_cov = False
-        if not src and cmode != "不传":
+        def _send_one(v: apisrc.ApiVideo) -> str:
+            if (stopped and stopped()) or lan_broken.is_set():
+                return "stop"
             try:
-                src = autocover_fn(v.path) or ""
-                auto_cov = bool(src)
-            except Exception:
-                src = ""
-        try:
-            cimg = apicover.prepare(src, cmode) if src else ""
-        except Exception:
-            cimg = ""
+                if rec.blocked(v.path):
+                    return "skip"
+            except LanError as e:
+                lan_broken.set()
+                with slock:
+                    failed.append({"account": nick, "title": v.title, "error": f"连不上局域网主机({e})"})
+                _upd_acc(nick, status="error", stage="网络异常", detail=f"连不上局域网主机({e})", fail_delta=1)
+                return "stop"
 
-        try:
-            r = cl.send(
-                v.path, v.title.strip(), cat,
-                stop=stopped, before_publish=begin,
-                cover=cimg, cover_upload=cover_upload_fn,
-            )
-        except omapi.Stopped:
-            apicover.cleanup(cimg, src)
-            break
-        except _QuotaFull:
-            apicover.cleanup(cimg, src)
-            quota_hit.add(nick)
-            quota_skipped.append({"account": nick, "title": v.title})
-            continue
-        except LanError as e:
-            apicover.cleanup(cimg, src)
-            failed.append({"account": nick, "title": v.title, "error": f"连不上局域网主机({e})"})
-            break
-        except _Taken:
-            apicover.cleanup(cimg, src)
-            continue
-        except omapi.Unknown as e:
-            apicover.cleanup(cimg, src)
-            keep = f"vid={rid['vid']};" if rid.get("vid") else ""
-            if "id" in rid:
-                rec.api_finish(rid["id"], "结果不明", keep + str(e))
-            else:
-                rec.api_result(v, "结果不明", keep + str(e))
-            unsure.append({"account": nick, "title": v.title, "error": str(e)[:80]})
-            aplog.write("④发布", f"结果不明：《{v.title}》—— {str(e)[:80]}", level="WARN", account=nick, day_iso=day_iso)
-            last_ts = time.time()
-            continue
-        except Exception as e:
-            apicover.cleanup(cimg, src)
-            raw = omapi.redact(str(e))
-            if "id" in rid:
-                rec.api_finish(rid["id"], "没发成", raw)
-            else:
-                rec.api_result(v, "没发成", raw)
-            failed.append({"account": nick, "title": v.title, "error": raw[:80]})
-            is_fatal = bool(getattr(e, "fatal", False))
+            left_now = plan.left_today(rec, st, nick, day=day_iso)
+            if left_now == 0:
+                with slock:
+                    quota_skipped.append({"account": nick, "title": v.title})
+                return "quota"
+
+            with slock:
+                started_cnt[0] += 1
+                cur_idx = started_cnt[0]
+            if on_progress:
+                on_progress(f"{stage_prefix}（{cur_idx}/{total}）：[{nick}] {v.title[:22]}…")
+            _upd_acc(nick, status="running", stage=stage_short, detail=f"正在上传：《{v.title[:22]}》")
             aplog.write(
-                "④发布",
-                f"{'密钥失效/' if is_fatal else ''}发布失败：《{v.title}》—— {raw[:100]}",
-                level="ERROR", account=nick, day_iso=day_iso,
+                stage_tag,
+                f"开始上传发布（{cur_idx}/{total}）：《{v.title}》",
+                level="INFO", account=nick, day_iso=day_iso,
             )
-            last_ts = time.time()
-            if is_fatal:
-                key_errors.append({"account": nick, "error": raw[:100]})
-                fatal_acc.add(nick)
-            continue
 
-        apicover.cleanup(cimg, src)
-        note = (
-            f"article_id={r.get('article_id', '')} vid={r.get('vid', '')}"
-            + ("" if r.get("status") == "成功" else "(平台还在处理)")
-            + (f";封面{r.get('cover')}" if r.get("cover") else "")
-            + (";封面是软件自动挑的一帧" if auto_cov else "")
-        )
-        try:
-            if "id" in rid:
-                rec.api_finish(rid["id"], "已发", note)
+            rid: dict[str, Any] = {}
+
+            def begin(vid, _v=v, _rid=rid):
+                got = rec.try_begin(_v, f"vid={vid}", day=day_iso, cap=cap_of.get(nick))
+                if got == -1:
+                    raise _QuotaFull()
+                if got is None:
+                    raise _Taken()
+                _rid["id"] = got
+                _rid["vid"] = vid
+
+            src = apicover.find(v.path) if cmode != "不传" else ""
+            if src and (blackcover.is_black(src) or blackcover.is_blurry(src)):
+                src = ""
+            auto_cov = False
+            if not src and cmode != "不传":
+                try:
+                    src = autocover_fn(v.path) or ""
+                    auto_cov = bool(src)
+                except Exception:
+                    src = ""
+            try:
+                cimg = apicover.prepare(src, cmode) if src else ""
+            except Exception:
+                cimg = ""
+
+            try:
+                r = cl.send(
+                    v.path, v.title.strip(), cat,
+                    stop=stopped, before_publish=begin,
+                    cover=cimg, cover_upload=cover_upload_fn,
+                )
+            except omapi.Stopped:
+                apicover.cleanup(cimg, src)
+                return "stop"
+            except _QuotaFull:
+                apicover.cleanup(cimg, src)
+                with slock:
+                    quota_skipped.append({"account": nick, "title": v.title})
+                return "quota"
+            except LanError as e:
+                apicover.cleanup(cimg, src)
+                lan_broken.set()
+                with slock:
+                    failed.append({"account": nick, "title": v.title, "error": f"连不上局域网主机({e})"})
+                _upd_acc(nick, status="error", stage="网络异常", detail=f"连不上局域网主机({e})", fail_delta=1)
+                return "stop"
+            except _Taken:
+                apicover.cleanup(cimg, src)
+                return "skip"
+            except omapi.Unknown as e:
+                apicover.cleanup(cimg, src)
+                keep = f"vid={rid['vid']};" if rid.get("vid") else ""
+                if "id" in rid:
+                    rec.api_finish(rid["id"], "结果不明", keep + str(e))
+                else:
+                    rec.api_result(v, "结果不明", keep + str(e))
+                with slock:
+                    unsure.append({"account": nick, "title": v.title, "error": str(e)[:80]})
+                aplog.write("④发布", f"结果不明：《{v.title}》—— {str(e)[:80]}", level="WARN", account=nick, day_iso=day_iso)
+                _upd_acc(nick, detail=f"结果不明：《{v.title[:20]}》")
+                return "unsure"
+            except Exception as e:
+                apicover.cleanup(cimg, src)
+                raw = omapi.redact(str(e))
+                if "id" in rid:
+                    rec.api_finish(rid["id"], "没发成", raw)
+                else:
+                    rec.api_result(v, "没发成", raw)
+                is_fatal = bool(getattr(e, "fatal", False))
+                with slock:
+                    failed.append({"account": nick, "title": v.title, "error": raw[:80]})
+                    if is_fatal:
+                        key_errors.append({"account": nick, "error": raw[:100]})
+                aplog.write(
+                    "④发布",
+                    f"{'密钥失效/' if is_fatal else ''}发布失败：《{v.title}》—— {raw[:100]}",
+                    level="ERROR", account=nick, day_iso=day_iso,
+                )
+                if is_fatal:
+                    _upd_acc(nick, status="error", stage="密钥失效", detail=f"密钥失效：{raw[:40]}", fail_delta=1)
+                    return "fatal"
+                _upd_acc(nick, detail=f"失败：《{v.title[:18]}》", fail_delta=1)
+                return "fail"
+
+            apicover.cleanup(cimg, src)
+            note = (
+                f"article_id={r.get('article_id', '')} vid={r.get('vid', '')}"
+                + ("" if r.get("status") == "成功" else "(平台还在处理)")
+                + (f";封面{r.get('cover')}" if r.get("cover") else "")
+                + (";封面是软件自动挑的一帧" if auto_cov else "")
+            )
+            try:
+                if "id" in rid:
+                    rec.api_finish(rid["id"], "已发", note)
+                else:
+                    rec.api_result(v, "已发", note)
+            except Exception as e:
+                with slock:
+                    unsure.append({"account": nick, "title": v.title, "error": f"已发但写库失败:{type(e).__name__}"})
+                aplog.write("④发布", f"已发但写库失败：《{v.title}》—— {type(e).__name__}", level="ERROR", account=nick, day_iso=day_iso)
+                return "unsure"
+
+            try:
+                old_dir = os.path.dirname(v.path)
+                new_p = apisrc.move_published(v.path, apisrc.archive_dir(st, "", a))
+                v.path = new_p
+                with slock:
+                    pub_dirs[old_dir] = a
+                if "id" in rid:
+                    rec.mark_moved(rid["id"], new_p)
+            except OSError as e:
+                aplog.write("④归档", f"视频已发但挪归档失败：《{v.title}》—— {e}", level="WARN", account=nick, day_iso=day_iso)
+
+            with slock:
+                published.append({"account": nick, "title": v.title, "path": v.path})
+            aplog.write(
+                stage_tag,
+                f"发布成功：《{v.title}》（article_id={r.get('article_id', '')}）",
+                level="OK", account=nick, day_iso=day_iso,
+            )
+            _upd_acc(nick, status="running", stage=stage_short, detail=f"已发：《{v.title[:22]}》", sent_delta=1)
+            return "ok"
+
+        def _send_sem(v: apisrc.ApiVideo) -> str:
+            with upsem:
+                return _send_one(v)
+
+        pos = 0
+        while pos < len(acc_vs):
+            if (stopped and stopped()) or lan_broken.is_set():
+                break
+            left_acc = plan.left_today(rec, st, nick, day=day_iso)
+            if left_acc == 0:
+                with slock:
+                    for rv in acc_vs[pos:]:
+                        quota_skipped.append({"account": nick, "title": rv.title})
+                break
+            if pos > 0 and not _wait_gap():
+                break
+            gsize = per_acc if left_acc is None else min(per_acc, max(1, left_acc))
+            grp = acc_vs[pos:pos + gsize]
+            pos += len(grp)
+            if len(grp) == 1:
+                res_list = [_send_sem(grp[0])]
             else:
-                rec.api_result(v, "已发", note)
-        except Exception as e:
-            unsure.append({"account": nick, "title": v.title, "error": f"已发但写库失败:{type(e).__name__}"})
-            aplog.write("④发布", f"已发但写库失败：《{v.title}》—— {type(e).__name__}", level="ERROR", account=nick, day_iso=day_iso)
-            last_ts = time.time()
-            continue
+                with ThreadPoolExecutor(len(grp)) as gex:
+                    res_list = list(gex.map(_send_sem, grp))
+            last_ts[0] = time.time()
+            if "fatal" in res_list or "stop" in res_list or "quota" in res_list:
+                break
 
-        try:
-            old_dir = os.path.dirname(v.path)
-            new_p = apisrc.move_published(v.path, apisrc.archive_dir(st, "", a))
-            v.path = new_p
-            pub_dirs[old_dir] = a
-            if "id" in rid:
-                rec.mark_moved(rid["id"], new_p)
-        except OSError as e:
-            aplog.write("④归档", f"视频已发但挪归档失败：《{v.title}》—— {e}", level="WARN", account=nick, day_iso=day_iso)
-
-        published.append({"account": nick, "title": v.title, "path": v.path})
-        aplog.write(
-            stage_prefix.split(" ")[0] if " " in stage_prefix else "④发布",
-            f"发布成功：《{v.title}》（article_id={r.get('article_id', '')}）",
-            level="OK", account=nick, day_iso=day_iso,
-        )
-        last_ts = time.time()
+    workers = max(1, min(par, len(by_acc)))
+    if workers == 1:
+        for nk, avs in by_acc.items():
+            _acc_job(nk, avs)
+    else:
+        with ThreadPoolExecutor(workers) as ex:
+            futs = [ex.submit(_acc_job, nk, avs) for nk, avs in by_acc.items()]
+            for f in futs:
+                f.result()
 
     return {
         "published": published, "failed": failed, "unsure": unsure,
@@ -828,6 +1026,69 @@ def run(
         ready_nicks = {x["account"] for x in prep["ready_accounts"]}
         scan = _scan_smart_folders(st, rec, accs_list, md, day_iso, watch=watch, check_stability=False, deps=deps)
         cand_vs = list(scan["ready_videos"])
+
+    # 初始化各账号实时状态表（供右栏每号一张卡片实时跳动）
+    state_lock = threading.Lock()
+    acc_state: dict[str, dict[str, Any]] = {}
+    sent_init = rec.sent_on(day_iso)
+    done_set = {x["account"] for x in prep.get("done_accounts") or []}
+    wait_by_acc = {wf["account"]: wf for wf in prep.get("waiting_folders") or []}
+    cand_cnt_by_acc: dict[str, int] = {}
+    for v in cand_vs:
+        cand_cnt_by_acc[v.account] = cand_cnt_by_acc.get(v.account, 0) + 1
+    for a in accs_list:
+        nk = str(a.get("nick") or "").strip()
+        if not nk:
+            continue
+        s0 = int(sent_init.get(nk, 0))
+        q0 = int(plan.quota_on(st, nk, day_iso) or 0)
+        is_free = bool(st.get("quota_open", False) or plan.is_free(st, nk))
+        cn = cand_cnt_by_acc.get(nk, 0)
+        if cn > 0:
+            t0 = (s0 + cn) if (is_free or q0 <= 0) else min(q0, s0 + cn) if q0 < s0 + cn else q0
+            acc_state[nk] = {
+                "account": nk, "status": "running", "stage": "排队检查",
+                "sent": s0, "target": t0, "ready_count": cn,
+                "detail": f"共 {cn} 条素材，等待检查", "skipped": 0, "outro_cut": 0, "failed": 0,
+            }
+        elif nk in done_set:
+            acc_state[nk] = {
+                "account": nk, "status": "done", "stage": "已发满",
+                "sent": s0, "target": (q0 or s0), "ready_count": 0,
+                "detail": f"今日已完成 {s0}/{q0 or s0} 条", "skipped": 0, "outro_cut": 0, "failed": 0,
+            }
+        elif nk in wait_by_acc:
+            wf = wait_by_acc[nk]
+            acc_state[nk] = {
+                "account": nk, "status": "waiting", "stage": "等待素材",
+                "sent": s0, "target": (0 if is_free else q0), "ready_count": 0,
+                "detail": f"等待「{wf.get('folder_name', '')}」：{wf.get('reason', '')}",
+                "skipped": 0, "outro_cut": 0, "failed": 0,
+            }
+        else:
+            acc_state[nk] = {
+                "account": nk, "status": "idle", "stage": "无今日夹",
+                "sent": s0, "target": (0 if is_free else q0), "ready_count": 0,
+                "detail": "今天素材文件夹还没放进来", "skipped": 0, "outro_cut": 0, "failed": 0,
+            }
+    _emit_acc({"__batch__": list(acc_state.values())}, deps)
+
+    def _set_acc(nk: str, **kw):
+        with state_lock:
+            cur = acc_state.setdefault(nk, {
+                "account": nk, "status": "running", "stage": "",
+                "sent": 0, "target": 0, "ready_count": 0, "detail": "",
+                "skipped": 0, "outro_cut": 0, "failed": 0,
+            })
+            if "skip_delta" in kw:
+                cur["skipped"] = int(cur.get("skipped") or 0) + int(kw.pop("skip_delta"))
+            if "outro_delta" in kw:
+                cur["outro_cut"] = int(cur.get("outro_cut") or 0) + int(kw.pop("outro_delta"))
+            if "fail_delta" in kw:
+                cur["failed"] = int(cur.get("failed") or 0) + int(kw.pop("fail_delta"))
+            cur.update(kw)
+            snap = dict(cur)
+        _emit_acc(snap, deps)
 
     if not cand_vs:
         return {
@@ -880,6 +1141,7 @@ def run(
             break
         if on_progress:
             on_progress(f"②/⑥ 发前检查（{idx}/{len(cand_vs)}）：[{v.account}] {v.title[:20]}…")
+        _set_acc(v.account, status="running", stage="检查中", detail=f"检查：《{v.title[:20]}》")
         _c, reasons, needs_v, o_plan = _check_video_issues(v, st, flags, ff, words, deps, stopped)
         nt = folders.norm_name(v.title)
         if nt and nt in sent_title_keys.get(v.account, set()):
@@ -889,6 +1151,7 @@ def run(
         if reasons:
             skipped_items.append({"account": v.account, "title": v.title, "reasons": reasons, "path": v.path})
             aplog.write("②检查", f"拦截跳过：《{v.title}》—— {'、'.join(reasons)}", level="SKIP", account=v.account, day_iso=day_iso)
+            _set_acc(v.account, detail=f"跳过：《{v.title[:18]}》", skip_delta=1)
         else:
             if nt:
                 seen_batch_titles.setdefault(v.account, set()).add(nt)
@@ -968,17 +1231,20 @@ def run(
         def _conv_one(v: apisrc.ApiVideo):
             if stopped and stopped():
                 return
+            _set_acc(v.account, status="running", stage="转竖屏", detail=f"正在转竖屏：《{v.title[:20]}》")
             aplog.write("③转竖屏", f"开始转竖屏：《{v.title}》", level="INFO", account=v.account, day_iso=day_iso)
             try:
                 new_p, _orig = to_vert_fn(v.path, ff, stop=stopped, keep_orig=False)
                 v.path = new_p
                 aplog.write("③转竖屏", f"转竖屏成功：《{v.title}》", level="OK", account=v.account, day_iso=day_iso)
+                _set_acc(v.account, status="running", stage="转竖屏", detail=f"已转竖屏：《{v.title[:20]}》")
                 with v_lock:
                     v_done[0] += 1
                     if on_progress:
                         on_progress(f"③/⑥ 自动转竖屏（{v_done[0]}/{len(vert_targets)}）：{v.title[:20]}…")
             except Exception as e:
                 aplog.write("③转竖屏", f"转竖屏失败：《{v.title}》—— {str(e)[:80]}", level="ERROR", account=v.account, day_iso=day_iso)
+                _set_acc(v.account, detail=f"转竖屏失败：《{v.title[:16]}》", skip_delta=1)
                 with v_lock:
                     v_failed.add(id(v))
                     skipped_items.append({"account": v.account, "title": v.title, "reasons": [f"转竖屏失败:{str(e)[:40]}"], "path": v.path})
@@ -1003,6 +1269,7 @@ def run(
             if stopped and stopped():
                 return
             pl = outro_plans[id(v)]
+            _set_acc(v.account, status="running", stage="剪片尾", detail=f"正在剪片尾：《{v.title[:20]}》")
             aplog.write("③剪结尾", f"开始剪片尾（从 {outrocheck.fmt_time(pl['start'])} 剪）：《{v.title}》", level="INFO", account=v.account, day_iso=day_iso)
             try:
                 new_p, _orig, gone = outro_cut_fn(v.path, pl["start"], ff, stop=stopped)
@@ -1018,6 +1285,7 @@ def run(
                     "day_iso": day_iso,
                 }
                 aplog.write("③剪结尾", f"剪片尾成功（剪掉末尾 {gone:.1f} 秒）：《{v.title}》", level="OK", account=v.account, day_iso=day_iso)
+                _set_acc(v.account, status="running", stage="剪片尾", detail=f"已剪片尾 {gone:.1f}s：《{v.title[:18]}》", outro_delta=1)
                 with o_lock:
                     o_done[0] += 1
                     outro_cut_items.append(rec_item)
@@ -1026,6 +1294,7 @@ def run(
                         on_progress(f"③/⑥ 自动剪片尾（{o_done[0]}/{len(outro_targets)}）：{v.title[:20]}…")
             except Exception as e:
                 aplog.write("③剪结尾", f"剪片尾失败：《{v.title}》—— {str(e)[:80]}", level="ERROR", account=v.account, day_iso=day_iso)
+                _set_acc(v.account, detail=f"剪片尾失败：《{v.title[:16]}》", skip_delta=1)
                 with o_lock:
                     o_failed.add(id(v))
                     skipped_items.append({"account": v.account, "title": v.title, "reasons": [f"自动剪片尾失败:{str(e)[:40]}"], "path": v.path})
@@ -1071,12 +1340,13 @@ def run(
                 except Exception as e:
                     aplog.write("③改标题", f"改名失败：《{v.title}》—— {e}", level="WARN", account=v.account, day_iso=day_iso)
 
-    # ④/⑥ 自动发布
+    # ④/⑥ 自动发布（按设置 api_threads / api_per_acc 并行发布）
     pub_dirs: dict[str, dict] = {}
     batch1 = _publish_batch(
         st, rec, day_iso, accs_by_nick, trimmed_vs, pub_dirs,
         on_progress=on_progress, stopped=stopped, deps=deps,
         stage_prefix="④/⑥ 自动发布",
+        acc_state=acc_state, state_lock=state_lock,
     )
     cleaned_dirs = _clean_emptied_dirs(st, pub_dirs)
     for cd in cleaned_dirs:
@@ -1092,6 +1362,8 @@ def run(
 
     key_errors = list(batch1.get("key_errors") or [])
     if touched_nicks and not (stopped and stopped()):
+        for nk in touched_nicks:
+            _set_acc(nk, status="running", stage="后台核对", detail="正在核对企鹅号后台有没有漏发…")
         if on_progress:
             on_progress(f"⑤/⑥ 正在去后台核对刚才发布的 {len(touched_nicks)} 个账号有没有漏发…")
         vres = agent.tool_verify_backend(day=day_iso, accounts=touched_nicks, on_progress=on_progress, stopped=stopped)
@@ -1127,6 +1399,7 @@ def run(
                     st, rec, day_iso, accs_by_nick, retry_vs, pub_dirs2,
                     on_progress=on_progress, stopped=stopped, deps=deps,
                     stage_prefix="⑤/⑥ 自动补发漏发",
+                    acc_state=acc_state, state_lock=state_lock,
                 )
                 retried_ok = batch2["published"]
                 retried_fail = batch2["failed"]
@@ -1137,6 +1410,8 @@ def run(
     black_items: list[dict] = []
     exported_covers = 0
     if touched_nicks and not (stopped and stopped()):
+        for nk in touched_nicks:
+            _set_acc(nk, status="running", stage="查封面", detail="正在扫描黑封面 / 模糊封面…")
         if on_progress:
             on_progress(f"⑥/⑥ 正在扫描本次 {len(touched_nicks)} 个账号的黑封面 / 模糊封面…")
         bres = agent.tool_check_black_covers(
@@ -1149,6 +1424,30 @@ def run(
             aplog.write("⑥封面", f"发现问题封面 {len(black_items)} 条，已自动导出清晰封面 {exported_covers} 张", level="WARN", day_iso=day_iso)
         else:
             aplog.write("⑥封面", "封面扫描完毕，未发现黑封面/模糊封面", level="OK", day_iso=day_iso)
+
+    # 结算每个参与账号的最终卡片状态
+    sent_final = rec.sent_on(day_iso)
+    key_err_nicks = {e.get("account") for e in key_errors}
+    was_stopped_now = bool(stopped and stopped())
+    for nk in sorted(ready_nicks):
+        s_now = int(sent_final.get(nk, 0))
+        q_now = int(plan.quota_on(st, nk, day_iso) or 0)
+        is_free = bool(st.get("quota_open", False) or plan.is_free(st, nk))
+        pub_k = sum(1 for x in batch1["published"] if x["account"] == nk)
+        fail_k = sum(1 for x in batch1["failed"] + retried_fail if x["account"] == nk)
+        skip_k = sum(1 for x in skipped_items if x["account"] == nk)
+        if nk in key_err_nicks:
+            _set_acc(nk, status="error", stage="密钥失效", sent=s_now, detail="密钥失效，请到设置重新搬账号")
+        elif was_stopped_now:
+            _set_acc(nk, status="waiting", stage="已停止", sent=s_now, detail=f"已手动停止（本轮已发 {pub_k} 条）")
+        elif fail_k > 0:
+            _set_acc(nk, status="error", stage="部分失败", sent=s_now, detail=f"本轮已发 {pub_k} 条，失败 {fail_k} 条")
+        elif (not is_free) and q_now > 0 and s_now >= q_now:
+            _set_acc(nk, status="done", stage="已发满", sent=s_now, target=q_now, detail=f"今日已发满 {s_now}/{q_now} 条")
+        elif skip_k > 0 and pub_k == 0:
+            _set_acc(nk, status="error", stage="待拍板", sent=s_now, detail=f"本轮 {skip_k} 条被检查拦下，待拍板")
+        else:
+            _set_acc(nk, status="done", stage="已完成", sent=s_now, detail=f"本轮已发 {pub_k} 条" + (f"，拦下 {skip_k} 条" if skip_k else ""))
 
     # 汇总按账号统计
     all_nicks = sorted(ready_nicks)

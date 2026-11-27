@@ -8,10 +8,11 @@ import time
 
 from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+                               QVBoxLayout, QWidget)
 
 from gui import theme as TH
-from qe import aplog, assistant as A, redo
+from qe import aplog, assistant as A, autopilot as AP, redo
 
 
 class _TaskWorker(QThread):
@@ -164,13 +165,15 @@ _STAGE_MAP = {"①": 1, "②": 2, "③": 3, "④": 4, "⑤": 5, "⑥": 6}
 
 
 class AssistantHub(QObject):
-    """全屏页与右侧抽屉共用的对话中心。"""
+    """全屏页与右侧抽屉共用的对话中心与 16 号实时看板状态源。"""
     message_added = Signal(object)
     cleared = Signal()
     card_updated = Signal()
     watch_status_changed = Signal(object)
     live_changed = Signal(object)
-    _live_log_sig = Signal(str, str)
+    accounts_changed = Signal(object)
+    _live_log_sig = Signal(str, str, str)
+    _acc_event_sig = Signal(object)
     key_alert = Signal(str)
     status_changed = Signal(str)
     busy_changed = Signal(bool)
@@ -189,14 +192,22 @@ class AssistantHub(QObject):
         self._live_stage: int = 0
         self._live_headline: str = ""
         self._live_lines: list[str] = []
+        self._acc_map: dict[str, dict] = {}
+        self._acc_order: list[str] = []
+        self._all_logs: list[str] = []
+        self._acc_logs: dict[str, list[str]] = {}
         self._live_log_sig.connect(self._on_live_log)
+        self._acc_event_sig.connect(self._on_acc_event)
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(1000)
         self._watch_timer.timeout.connect(self._on_watch_second)
 
-    def _aplog_listener(self, line: str, stage: str, _level: str, _acc: str, _msg: str):
+    def _aplog_listener(self, line: str, stage: str, _level: str, acc: str, _msg: str):
         if self._live_active:
-            self._live_log_sig.emit(line, stage)
+            self._live_log_sig.emit(line, stage, acc or "")
+
+    def _acc_listener(self, ev: dict):
+        self._acc_event_sig.emit(dict(ev))
 
     def _stage_from_text(self, text: str) -> int:
         for ch, idx in _STAGE_MAP.items():
@@ -204,7 +215,7 @@ class AssistantHub(QObject):
                 return idx
         return 0
 
-    def _on_live_log(self, line: str, stage: str):
+    def _on_live_log(self, line: str, stage: str, acc: str):
         if not self._live_active:
             return
         st_i = self._stage_from_text(stage)
@@ -213,7 +224,35 @@ class AssistantHub(QObject):
         self._live_lines.append(line)
         if len(self._live_lines) > 8:
             self._live_lines = self._live_lines[-8:]
+        self._all_logs.append(line)
+        if len(self._all_logs) > 120:
+            self._all_logs = self._all_logs[-120:]
+        if acc:
+            al = self._acc_logs.setdefault(acc, [])
+            al.append(line)
+            if len(al) > 60:
+                self._acc_logs[acc] = al[-60:]
         self.live_changed.emit(self.live_info())
+
+    def _on_acc_event(self, ev: dict):
+        if not isinstance(ev, dict):
+            return
+        if "__batch__" in ev:
+            items = list(ev.get("__batch__") or [])
+            self._acc_map = {}
+            self._acc_order = []
+            for it in items:
+                nk = str(it.get("account") or "")
+                if nk:
+                    self._acc_map[nk] = dict(it)
+                    self._acc_order.append(nk)
+        else:
+            nk = str(ev.get("account") or "")
+            if nk:
+                if nk not in self._acc_map:
+                    self._acc_order.append(nk)
+                self._acc_map[nk] = dict(ev)
+        self.accounts_changed.emit(self.account_cards_info())
 
     def _on_worker_progress(self, text: str):
         self.status_changed.emit(text)
@@ -224,12 +263,55 @@ class AssistantHub(QObject):
             self._live_headline = text
             self.live_changed.emit(self.live_info())
 
+    def concurrency_label(self) -> str:
+        try:
+            par = max(1, int(self.st.get("api_threads", 1) or 1))
+        except (TypeError, ValueError):
+            par = 1
+        try:
+            per = max(1, int(self.st.get("api_per_acc", 1) or 1))
+        except (TypeError, ValueError):
+            per = 1
+        return f"{par} 号并发 · 每号 {per} 条" if par > 1 else (f"单号依次 · 每号 {per} 条" if per > 1 else "单号依次发布")
+
+    def refresh_board(self):
+        """刷新 16 号只读看板快照（运行中不覆盖正在跑的账号实时状态）。"""
+        try:
+            items = AP.snapshot_accounts(self.st, self.rec, watch=self.agent.watch, deps=self.agent.deps)
+        except Exception:
+            items = []
+        if not self._live_active:
+            self._acc_map = {}
+            self._acc_order = []
+            for it in items:
+                nk = str(it.get("account") or "")
+                if nk:
+                    self._acc_map[nk] = dict(it)
+                    self._acc_order.append(nk)
+        else:
+            for it in items:
+                nk = str(it.get("account") or "")
+                if nk and nk not in self._acc_map:
+                    self._acc_map[nk] = dict(it)
+                    self._acc_order.append(nk)
+        self.accounts_changed.emit(self.account_cards_info())
+
+    def account_cards_info(self) -> list[dict]:
+        return [dict(self._acc_map[nk]) for nk in self._acc_order if nk in self._acc_map]
+
+    def logs_for(self, account: str = "") -> list[str]:
+        if account:
+            return list(self._acc_logs.get(account) or [])
+        return list(self._all_logs)
+
     def live_info(self) -> dict:
         return {
             "active": self._live_active,
             "stage": self._live_stage,
             "headline": self._live_headline,
             "lines": list(self._live_lines),
+            "all_logs": list(self._all_logs),
+            "acc_logs": {k: list(v) for k, v in self._acc_logs.items()},
         }
 
     def is_busy(self) -> bool:
@@ -316,6 +398,7 @@ class AssistantHub(QObject):
             self._live_headline = status
             self._live_lines = []
             aplog.add_listener(self._aplog_listener)
+            AP.add_account_listener(self._acc_listener)
             self.live_changed.emit(self.live_info())
         w = _TaskWorker(self.agent, mode, arg, self)
         w.progress.connect(self._on_worker_progress)
@@ -353,6 +436,7 @@ class AssistantHub(QObject):
     def _on_done(self):
         if self._live_active:
             aplog.remove_listener(self._aplog_listener)
+            AP.remove_account_listener(self._acc_listener)
             self._live_active = False
             self._live_stage = 0
             self._live_headline = ""
@@ -361,6 +445,8 @@ class AssistantHub(QObject):
         self.busy_changed.emit(False)
         if self.is_watching():
             self.watch_status_changed.emit(self.watch_info())
+        if not self._acc_map:
+            self.refresh_board()
 
     def send(self, text: str):
         t = (text or "").strip()
@@ -422,6 +508,7 @@ class AssistantHub(QObject):
 
     def shutdown(self):
         aplog.remove_listener(self._aplog_listener)
+        AP.remove_account_listener(self._acc_listener)
         self._live_active = False
         if self._watch_timer.isActive():
             self._watch_timer.stop()
@@ -567,7 +654,7 @@ class _AutopilotConfirmCard(QFrame):
             v.addWidget(self.lab_notes)
 
         # 全天值守开关（清爽单行）
-        self.k_watch = QCheckBox("开启全天值守（每 10 分钟巡检新素材，发满或 22:30 自动收工）")
+        self.k_watch = QCheckBox("开启全天值守（每 10 分钟巡检，发满或 22:30 自动收工）")
         self.k_watch.setChecked(True)
         self.k_watch.setToolTip("勾上：跑完现在到货的视频后，每 10 分钟安静巡检一次新素材（落稳 30 秒动手、自动读懂「正在处理 / (15)」备注）；\n取消勾选：只跑完此刻盘里已有的这一批就停。")
         self.k_watch.toggled.connect(lambda _c: self.sync_state())
@@ -753,6 +840,517 @@ class _AutopilotLiveCard(QFrame):
         self.lab_feed.setStyleSheet(
             f"background:{t['soft']}; color:{t['tx2']}; border-radius:8px; padding:7px 9px; font-size:11px;"
         )
+
+
+_STATUS_ORDER = {"running": 0, "error": 1, "waiting": 2, "done": 3, "idle": 4}
+
+
+class _AccountLiveCard(QFrame):
+    """右栏「一个号一张卡片」：精炼 3 行卡（号名+状态胶囊 / 进度条+已发目标 / 当前动作+角标），点击可过滤下方日志。"""
+    clicked = Signal(str)
+
+    def __init__(self, info: dict, selected: bool = False, parent=None):
+        super().__init__(parent)
+        self.info = dict(info)
+        self._selected = selected
+        self.setObjectName("accLiveCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.setSpacing(7)
+
+        # 第 1 行：状态圆点 + 账号名 + 彩色状态胶囊
+        r1 = QHBoxLayout()
+        r1.setSpacing(6)
+        self.lab_dot = QLabel("●")
+        r1.addWidget(self.lab_dot, 0)
+        self.lab_nick = QLabel("")
+        self.lab_nick.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        r1.addWidget(self.lab_nick, 1)
+        self.lab_stage = QLabel("")
+        r1.addWidget(self.lab_stage, 0)
+        v.addLayout(r1)
+
+        # 第 2 行：细圆角进度条 + 数值比例
+        r2 = QHBoxLayout()
+        r2.setSpacing(8)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(6)
+        r2.addWidget(self.bar, 1)
+        self.lab_ratio = QLabel("")
+        r2.addWidget(self.lab_ratio, 0)
+        v.addLayout(r2)
+
+        # 第 3 行：当前正在干啥的一句话 + 自动剪片尾 / 异常跳过角标
+        r3 = QHBoxLayout()
+        r3.setSpacing(5)
+        self.lab_detail = QLabel("")
+        self.lab_detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        r3.addWidget(self.lab_detail, 1)
+        self.lab_outro = QLabel("")
+        self.lab_outro.hide()
+        r3.addWidget(self.lab_outro, 0)
+        self.lab_issue = QLabel("")
+        self.lab_issue.hide()
+        r3.addWidget(self.lab_issue, 0)
+        v.addLayout(r3)
+
+        self.update_info(self.info, selected=selected)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(str(self.info.get("account") or ""))
+        super().mousePressEvent(ev)
+
+    def update_info(self, info: dict, selected: bool | None = None):
+        self.info = dict(info)
+        if selected is not None:
+            self._selected = selected
+        nick = str(info.get("account") or "")
+        stage = str(info.get("stage") or "空闲")
+        sent = int(info.get("sent") or 0)
+        target = int(info.get("target") or 0)
+        detail = str(info.get("detail") or "")
+        outro_n = int(info.get("outro_cut") or 0)
+        issue_n = int(info.get("skipped") or 0) + int(info.get("failed") or 0)
+
+        self.lab_nick.setText(nick)
+        self.lab_stage.setText(stage)
+        if target > 0:
+            pct = max(0, min(100, int(round(sent * 100 / target))))
+            self.bar.setValue(pct)
+            self.lab_ratio.setText(f"{sent}/{target}")
+        else:
+            self.bar.setValue(100 if info.get("status") == "done" and sent > 0 else (35 if info.get("status") == "running" else 0))
+            self.lab_ratio.setText(f"已发 {sent}" if sent else "不限额")
+        self.lab_detail.setText(detail or "等待任务…")
+        self.lab_detail.setToolTip(detail)
+
+        if outro_n > 0:
+            self.lab_outro.setText(f"✂ {outro_n}")
+            self.lab_outro.setToolTip(f"本轮已自动剪片尾 {outro_n} 条")
+            self.lab_outro.show()
+        else:
+            self.lab_outro.hide()
+
+        if issue_n > 0:
+            self.lab_issue.setText(f"⚠ {issue_n}")
+            self.lab_issue.setToolTip(f"跳过/失败 {issue_n} 条")
+            self.lab_issue.show()
+        else:
+            self.lab_issue.hide()
+
+        self.retheme()
+
+    def retheme(self):
+        t = TH.cur()
+        st = str(self.info.get("status") or "idle")
+        tone_map = {
+            "running": (t["acc"], t["acc_bg"]),
+            "done": (t["ok"], t["ok_bg"]),
+            "waiting": (t["warn"], t["warn_bg"]),
+            "error": (t["bad"], t["bad_bg"]),
+            "idle": (t["dim"], t["soft"]),
+        }
+        fg, bg = tone_map.get(st, (t["dim"], t["soft"]))
+        border = f"2px solid {t['acc']}" if self._selected else f"1px solid {t['line']}"
+        card_bg = t["card"]
+        self.setStyleSheet(
+            f"QFrame#accLiveCard {{ background:{card_bg}; border:{border}; border-radius:13px; }}"
+            f"QFrame#accLiveCard:hover {{ border-color:{t['acc']}; }}"
+        )
+        self.lab_dot.setStyleSheet(f"color:{fg}; font-size:10px; background:transparent;")
+        self.lab_nick.setStyleSheet(f"color:{t['tx']}; font-size:13px; font-weight:bold; background:transparent;")
+        self.lab_stage.setStyleSheet(
+            f"background:{bg}; color:{fg}; border-radius:9px; padding:2px 8px; font-size:11px; font-weight:bold;"
+        )
+        self.bar.setStyleSheet(
+            f"QProgressBar {{ background:{t['track']}; border:none; border-radius:3px; }}"
+            f"QProgressBar::chunk {{ background:{fg}; border-radius:3px; }}"
+        )
+        self.lab_ratio.setStyleSheet(f"color:{t['tx2']}; font-size:12px; font-weight:bold; background:transparent;")
+        self.lab_detail.setStyleSheet(f"color:{t['mu']}; font-size:12px; background:transparent;")
+        self.lab_outro.setStyleSheet(
+            f"background:{t['acc_bg']}; color:{t['acc']}; border-radius:7px; padding:1px 6px; font-size:11px; font-weight:bold;"
+        )
+        self.lab_issue.setStyleSheet(
+            f"background:{t['warn_bg']}; color:{t['warn']}; border-radius:7px; padding:1px 6px; font-size:11px; font-weight:bold;"
+        )
+
+
+class _BoardLiveBanner(QFrame):
+    """看板顶部内嵌的实时运行条（全自动启动时展开，高亮 6 步 + 当前动作；同时兼容 live_card 接口）。"""
+    STEPS = ("①扫描", "②检查", "③预处理", "④发布", "⑤查漏", "⑥封面")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stage = 0
+        self.setObjectName("apBoardLive")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 6, 0, 2)
+        v.setSpacing(6)
+
+        sr = QHBoxLayout()
+        sr.setSpacing(5)
+        self._step_labs: list[QLabel] = []
+        for s in self.STEPS:
+            lb = QLabel(s)
+            lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sr.addWidget(lb, 1)
+            self._step_labs.append(lb)
+        v.addLayout(sr)
+
+        self.lab_head = QLabel("⚡ 正在执行全自动任务…")
+        self.lab_head.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        v.addWidget(self.lab_head)
+
+        self.lab_feed = QLabel("")
+        self.lab_feed.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        v.addWidget(self.lab_feed)
+
+        self.hide()
+        self.retheme()
+
+    def update_state(self, info: dict):
+        active = bool((info or {}).get("active"))
+        self.setVisible(active)
+        if not active:
+            self._stage = 0
+            return
+        self._stage = int(info.get("stage") or 1)
+        self.lab_head.setText("⚡ " + str(info.get("headline") or "正在执行全自动任务…"))
+        lines = list(info.get("lines") or [])
+        self.lab_feed.setText(lines[-1] if lines else "正在启动，马上输出实时步骤…")
+        self.retheme()
+
+    def retheme(self):
+        t = TH.cur()
+        self.setStyleSheet("QFrame#apBoardLive { background:transparent; border:none; }")
+        for idx, lb in enumerate(self._step_labs, 1):
+            if idx == self._stage:
+                lb.setStyleSheet(f"background:{t['acc']}; color:#ffffff; border-radius:8px; padding:4px 2px; font-size:11px; font-weight:bold;")
+            elif idx < self._stage:
+                lb.setStyleSheet(f"background:{t['ok_bg']}; color:{t['ok']}; border-radius:8px; padding:4px 2px; font-size:11px; font-weight:bold;")
+            else:
+                lb.setStyleSheet(f"background:{t['soft']}; color:{t['dim']}; border-radius:8px; padding:4px 2px; font-size:11px;")
+        self.lab_head.setStyleSheet(f"color:{t['tx']}; font-size:12px; font-weight:bold; background:transparent;")
+        self.lab_feed.setStyleSheet(f"color:{t['mu']}; font-size:11px; background:transparent;")
+
+
+class _AutopilotBoardPanel(QFrame):
+    """全屏 AI 助手页右栏（60%）：顶部控制条 + 状态筛选胶囊 + 2 列 16 号实时卡片墙 + 可收起现场流水。"""
+    FILTERS = (
+        ("all", "全部"),
+        ("running", "运行中"),
+        ("waiting", "等待"),
+        ("done", "已完成"),
+        ("error", "异常"),
+    )
+
+    def __init__(self, hub: AssistantHub, parent=None):
+        super().__init__(parent)
+        self.hub = hub
+        self._filter = "all"
+        self._selected_account = ""
+        self._cards: dict[str, _AccountLiveCard] = {}
+        self._items: list[dict] = []
+        self._log_open = True
+        self.setObjectName("apBoard")
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+
+        # 1. 顶部控制卡片
+        self.top_card = QFrame()
+        self.top_card.setObjectName("apBoardTop")
+        tl = QVBoxLayout(self.top_card)
+        tl.setContentsMargins(16, 12, 16, 12)
+        tl.setSpacing(8)
+
+        tr1 = QHBoxLayout()
+        tr1.setSpacing(8)
+        self.lab_board_title = QLabel("16 号全自动看板")
+        tr1.addWidget(self.lab_board_title)
+        self.lab_conc = QLabel("")
+        tr1.addWidget(self.lab_conc)
+        tr1.addStretch(1)
+        self.b_refresh = QPushButton("刷新")
+        self.b_refresh.setObjectName("pill")
+        self.b_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_refresh.clicked.connect(self.hub.refresh_board)
+        tr1.addWidget(self.b_refresh)
+        self.b_start_ap = QPushButton("🚀 今日全自动")
+        self.b_start_ap.setObjectName("primary")
+        self.b_start_ap.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_start_ap.clicked.connect(lambda: self.hub.quick("autopilot", "🚀 今日全自动"))
+        tr1.addWidget(self.b_start_ap)
+        self.b_stop_ap = QPushButton("停止")
+        self.b_stop_ap.setObjectName("danger")
+        self.b_stop_ap.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_stop_ap.clicked.connect(self.hub.stop)
+        self.b_stop_ap.hide()
+        tr1.addWidget(self.b_stop_ap)
+        tl.addLayout(tr1)
+
+        # 全天值守状态条（值守时展示在控制卡内，不占额外大块）
+        self.watch_strip = QFrame()
+        self.watch_strip.setObjectName("apWatchStrip")
+        wl = QHBoxLayout(self.watch_strip)
+        wl.setContentsMargins(10, 5, 10, 5)
+        wl.setSpacing(8)
+        self.lab_watch = QLabel("")
+        self.lab_watch.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        wl.addWidget(self.lab_watch, 1)
+        self.b_watch_now = QPushButton("立即巡检")
+        self.b_watch_now.setObjectName("link")
+        self.b_watch_now.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_watch_now.clicked.connect(self.hub.watch_tick_now)
+        wl.addWidget(self.b_watch_now)
+        self.b_watch_stop = QPushButton("结束值守")
+        self.b_watch_stop.setObjectName("link")
+        self.b_watch_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_watch_stop.clicked.connect(self.hub.stop_watch)
+        wl.addWidget(self.b_watch_stop)
+        self.watch_strip.hide()
+        tl.addWidget(self.watch_strip)
+
+        # 实时 6 步进度条（运行中展开）
+        self.live_banner = _BoardLiveBanner(self.top_card)
+        tl.addWidget(self.live_banner)
+        v.addWidget(self.top_card)
+
+        # 2. 状态筛选胶囊条
+        fr = QHBoxLayout()
+        fr.setSpacing(6)
+        self._filter_btns: dict[str, QPushButton] = {}
+        for fk, flab in self.FILTERS:
+            b = QPushButton(flab)
+            b.setCheckable(True)
+            b.setChecked(fk == "all")
+            b.setObjectName("apFilterBtn")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, k=fk: self.set_filter(k))
+            fr.addWidget(b)
+            self._filter_btns[fk] = b
+        fr.addStretch(1)
+        self.lab_hint = QLabel("点击任意卡片，下方只看该号日志")
+        fr.addWidget(self.lab_hint)
+        v.addLayout(fr)
+
+        # 3. 2 列账号实时卡片墙
+        self.grid_scroll = QScrollArea()
+        self.grid_scroll.setWidgetResizable(True)
+        self.grid_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._grid_host = QWidget()
+        self._grid_wrap = QVBoxLayout(self._grid_host)
+        self._grid_wrap.setContentsMargins(2, 2, 6, 4)
+        self._grid_wrap.setSpacing(8)
+        self._grid = QGridLayout()
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(10)
+        self._grid.setVerticalSpacing(10)
+        self._grid.setColumnStretch(0, 1)
+        self._grid.setColumnStretch(1, 1)
+        self._grid_wrap.addLayout(self._grid)
+        self.lab_empty = QLabel("当前筛选条件下暂无账号卡片。")
+        self.lab_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lab_empty.hide()
+        self._grid_wrap.addWidget(self.lab_empty)
+        self._grid_wrap.addStretch(1)
+        self.grid_scroll.setWidget(self._grid_host)
+        v.addWidget(self.grid_scroll, 1)
+
+        # 4. 底部可收起实时现场流水卡片
+        self.log_card = QFrame()
+        self.log_card.setObjectName("apLogCard")
+        ll = QVBoxLayout(self.log_card)
+        ll.setContentsMargins(14, 10, 14, 10)
+        ll.setSpacing(6)
+        lh = QHBoxLayout()
+        lh.setSpacing(8)
+        self.lab_log_title = QLabel("实时现场流水")
+        lh.addWidget(self.lab_log_title)
+        self.b_acc_filter = QPushButton("")
+        self.b_acc_filter.setObjectName("link")
+        self.b_acc_filter.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_acc_filter.clicked.connect(lambda: self.select_account(""))
+        self.b_acc_filter.hide()
+        lh.addWidget(self.b_acc_filter)
+        lh.addStretch(1)
+        self.b_full_log = QPushButton("完整留痕")
+        self.b_full_log.setObjectName("link")
+        self.b_full_log.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_full_log.clicked.connect(lambda: self.hub.open_log_dialog("", self))
+        lh.addWidget(self.b_full_log)
+        self.b_toggle_log = QPushButton("收起 ▾")
+        self.b_toggle_log.setObjectName("link")
+        self.b_toggle_log.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_toggle_log.clicked.connect(self._toggle_log)
+        lh.addWidget(self.b_toggle_log)
+        ll.addLayout(lh)
+
+        self.ed_log = QPlainTextEdit()
+        self.ed_log.setReadOnly(True)
+        self.ed_log.setFixedHeight(132)
+        self.ed_log.setPlaceholderText("启动全自动后，这里实时滚动各号转竖屏、剪片尾与发布流水…")
+        ll.addWidget(self.ed_log)
+        v.addWidget(self.log_card)
+
+        self.retheme()
+
+    def set_filter(self, key: str):
+        self._filter = key
+        for fk, b in self._filter_btns.items():
+            b.setChecked(fk == key)
+        self._render_cards()
+
+    def select_account(self, nick: str):
+        self._selected_account = "" if (nick and nick == self._selected_account) else nick
+        if self._selected_account:
+            self.b_acc_filter.setText(f"只看：{self._selected_account} ×")
+            self.b_acc_filter.show()
+        else:
+            self.b_acc_filter.hide()
+        for nk, c in self._cards.items():
+            c.update_info(c.info, selected=(nk == self._selected_account))
+        self.refresh_logs()
+
+    def _toggle_log(self):
+        self._log_open = not self._log_open
+        self.ed_log.setVisible(self._log_open)
+        self.b_toggle_log.setText("收起 ▾" if self._log_open else "展开 ▴")
+
+    def update_accounts(self, items: list[dict]):
+        self._items = [dict(x) for x in (items or [])]
+        # 更新各筛选胶囊计数
+        counts = {"all": len(self._items), "running": 0, "waiting": 0, "done": 0, "error": 0}
+        for it in self._items:
+            st = str(it.get("status") or "idle")
+            if st in counts:
+                counts[st] += 1
+            elif st == "idle":
+                counts["waiting"] += 1
+        for fk, flab in self.FILTERS:
+            n = counts.get(fk, 0)
+            self._filter_btns[fk].setText(f"{flab} {n}" if n else flab)
+        self._render_cards()
+
+    def _render_cards(self):
+        while self._grid.count():
+            it = self._grid.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.hide()
+
+        filtered = []
+        for idx, it in enumerate(self._items):
+            st = str(it.get("status") or "idle")
+            if self._filter == "all":
+                ok = True
+            elif self._filter == "waiting":
+                ok = st in ("waiting", "idle")
+            else:
+                ok = (st == self._filter)
+            if ok:
+                filtered.append((_STATUS_ORDER.get(st, 9), idx, it))
+        filtered.sort(key=lambda x: (x[0], x[1]))
+
+        keep = set()
+        for pos, (_ord, _idx, it) in enumerate(filtered):
+            nk = str(it.get("account") or "")
+            keep.add(nk)
+            card = self._cards.get(nk)
+            if card is None:
+                card = _AccountLiveCard(it, selected=(nk == self._selected_account), parent=self._grid_host)
+                card.clicked.connect(self.select_account)
+                self._cards[nk] = card
+            else:
+                card.update_info(it, selected=(nk == self._selected_account))
+            card.show()
+            self._grid.addWidget(card, pos // 2, pos % 2)
+
+        for nk in list(self._cards):
+            if nk not in keep and nk not in {str(x.get("account") or "") for x in self._items}:
+                w = self._cards.pop(nk)
+                w.deleteLater()
+
+        self.lab_empty.setVisible(len(filtered) == 0)
+
+    def update_live(self, info: dict):
+        active = bool((info or {}).get("active"))
+        self.live_banner.update_state(info)
+        self.b_stop_ap.setVisible(active)
+        self.b_start_ap.setVisible(not active)
+        self.b_refresh.setEnabled(not active)
+        self.refresh_logs()
+
+    def update_watch(self, info: dict):
+        active = bool((info or {}).get("active"))
+        self.watch_strip.setVisible(active)
+        if not active:
+            return
+        rem = int(info.get("next_in_sec") or 0)
+        mm, ss = rem // 60, rem % 60
+        sent, quota = int(info.get("api_sent") or 0), int(info.get("api_quota") or 0)
+        busy = bool(info.get("busy"))
+        q_str = f" · 今日 {sent}/{quota}" if quota else (f" · 今日已发 {sent}" if sent else "")
+        self.lab_watch.setText(f"🟢 值守巡检中…{q_str}" if busy else f"🟢 值守中 · 下次巡检 {mm:02d}:{ss:02d}{q_str}")
+        self.b_watch_now.setEnabled(not busy)
+        self.b_watch_stop.setEnabled(not busy)
+
+    def set_busy(self, busy: bool):
+        self.b_start_ap.setEnabled(not busy)
+        self.b_refresh.setEnabled(not busy)
+
+    def refresh_logs(self):
+        lines = self.hub.logs_for(self._selected_account)
+        if lines:
+            self.ed_log.setPlainText("\n".join(lines[-40:]))
+            sb = self.ed_log.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        else:
+            if self._selected_account:
+                self.ed_log.setPlainText(f"「{self._selected_account}」本轮暂无新流水。")
+            else:
+                self.ed_log.clear()
+
+    def retheme(self):
+        t = TH.cur()
+        self.lab_conc.setText(self.hub.concurrency_label())
+        self.setStyleSheet("QFrame#apBoard { background:transparent; border:none; }")
+        self.top_card.setStyleSheet(
+            f"QFrame#apBoardTop {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:16px; }}"
+        )
+        self.lab_board_title.setStyleSheet(f"color:{t['tx']}; font-size:15px; font-weight:bold; background:transparent;")
+        self.lab_conc.setStyleSheet(
+            f"background:{t['acc_bg']}; color:{t['acc']}; border-radius:9px; padding:2px 9px; font-size:11px; font-weight:bold;"
+        )
+        self.watch_strip.setStyleSheet(
+            f"QFrame#apWatchStrip {{ background:{t['ok_bg']}; border:1px solid {t['ok']}; border-radius:10px; }}"
+        )
+        self.lab_watch.setStyleSheet(f"color:{t['ok']}; font-weight:bold; font-size:12px; background:transparent;")
+        for b in self._filter_btns.values():
+            b.setStyleSheet(
+                f"QPushButton#apFilterBtn {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:14px; padding:4px 12px; font-size:12px; color:{t['tx2']}; }}"
+                f"QPushButton#apFilterBtn:hover {{ background:{t['soft']}; }}"
+                f"QPushButton#apFilterBtn:checked {{ background:{t['acc']}; border-color:{t['acc']}; color:#ffffff; font-weight:bold; }}"
+            )
+        self.lab_hint.setStyleSheet(f"color:{t['dim']}; font-size:12px; background:transparent;")
+        self.lab_empty.setStyleSheet(f"color:{t['dim']}; font-size:13px; padding:24px; background:transparent;")
+        self.log_card.setStyleSheet(
+            f"QFrame#apLogCard {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:14px; }}"
+        )
+        self.lab_log_title.setStyleSheet(f"color:{t['tx']}; font-size:13px; font-weight:bold; background:transparent;")
+        self.ed_log.setStyleSheet(
+            f"QPlainTextEdit {{ background:{t['soft']}; color:{t['tx2']}; border:none; border-radius:9px; padding:8px; font-size:11px; }}"
+        )
+        self.live_banner.retheme()
+        for c in self._cards.values():
+            c.retheme()
 
 
 class _AutopilotReportCard(QFrame):
@@ -1030,13 +1628,9 @@ class _Bubble(QFrame):
             ck = card_data.get("kind")
             if ck == "autopilot_confirm":
                 self.card_widget = _AutopilotConfirmCard(card_data, self.on_action, self.on_cancel_card, compact, self.card)
-                if not compact:
-                    self.card_widget.setMinimumWidth(560)
                 cv.addWidget(self.card_widget)
             elif ck == "autopilot_report":
                 self.card_widget = _AutopilotReportCard(card_data, compact, on_action=self.on_action, parent=self.card)
-                if not compact:
-                    self.card_widget.setMinimumWidth(560)
                 cv.addWidget(self.card_widget)
 
         actions = list(msg.get("actions") or [])
@@ -1063,8 +1657,8 @@ class _Bubble(QFrame):
             row.addStretch(1)
             row.addWidget(self.card, 0)
         else:
-            row.addWidget(self.card, 1 if compact else 0)
-            if not compact:
+            row.addWidget(self.card, 1 if (compact or self._is_rich_card) else 0)
+            if not compact and not self._is_rich_card:
                 row.addStretch(1)
         if not compact:
             self.card.setMaximumWidth(780)
@@ -1101,7 +1695,7 @@ class _Bubble(QFrame):
 
 
 class AssistantView(QWidget):
-    """可作为左侧独立全屏页，也可作为右侧可收起抽屉使用的 AI 助手面板。"""
+    """AI 助手视图：compact=False 为全屏左右双栏工作台（左对话 + 右 16 号实时看板）；compact=True 为右侧紧凑抽屉。"""
 
     def __init__(self, hub: AssistantHub, compact: bool = False, on_close=None, parent=None):
         super().__init__(parent)
@@ -1110,24 +1704,24 @@ class AssistantView(QWidget):
         self.on_close = on_close
         self._bubbles: list[_Bubble] = []
         self._quick_btns: list[QPushButton] = []
+        self.board: _AutopilotBoardPanel | None = None
         self.setObjectName("aiDrawer" if compact else "page")
         self._build()
         self._connect_hub()
         self._rebuild_messages()
         self.retheme()
+        if not self.compact:
+            self.hub.refresh_board()
 
-    def _build(self):
-        v = QVBoxLayout(self)
-        m = 12 if self.compact else 24
-        v.setContentsMargins(m, 14 if self.compact else 18, m, 12)
-        v.setSpacing(10)
-
+    def _build_chat_column(self, parent_lay: QVBoxLayout):
         # 顶栏
         head = QHBoxLayout()
         head.setSpacing(8)
         title = QLabel("AI 助手")
         title.setObjectName("secTitle" if self.compact else "pageTitle")
         head.addWidget(title)
+        self.lab_model_dot = QLabel("●")
+        head.addWidget(self.lab_model_dot)
         self.lab_model = QLabel("")
         self.lab_model.setObjectName("muted")
         self.lab_model.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -1149,38 +1743,28 @@ class AssistantView(QWidget):
             self.b_close.setCursor(Qt.CursorShape.PointingHandCursor)
             self.b_close.clicked.connect(self.on_close)
             head.addWidget(self.b_close)
-        v.addLayout(head)
+        parent_lay.addLayout(head)
 
-        # 快捷提问按钮区
+        # 快捷提问按钮区（2 列或 3 列网格，干净整齐绝不溢出）
         quick_box = QWidget()
-        if self.compact:
-            ql = QGridLayout(quick_box)
-            ql.setContentsMargins(0, 0, 0, 0)
-            ql.setSpacing(6)
-            total_q = len(A.QUICK_PROMPTS)
-            for idx, (kind, label, _prompt) in enumerate(A.QUICK_PROMPTS):
-                b = QPushButton(label)
-                b.setObjectName("pill")
-                b.setCursor(Qt.CursorShape.PointingHandCursor)
-                b.clicked.connect(lambda _c=False, k=kind, l=label: self.hub.quick(k, l))
-                span = 2 if (total_q % 2 == 1 and idx == total_q - 1) else 1
-                ql.addWidget(b, idx // 2, idx % 2, 1, span)
-                self._quick_btns.append(b)
-        else:
-            ql = QHBoxLayout(quick_box)
-            ql.setContentsMargins(0, 0, 0, 0)
-            ql.setSpacing(8)
-            for kind, label, _prompt in A.QUICK_PROMPTS:
-                b = QPushButton(label)
-                b.setObjectName("pill")
-                b.setCursor(Qt.CursorShape.PointingHandCursor)
-                b.clicked.connect(lambda _c=False, k=kind, l=label: self.hub.quick(k, l))
-                ql.addWidget(b)
-                self._quick_btns.append(b)
-            ql.addStretch(1)
-        v.addWidget(quick_box)
+        ql = QGridLayout(quick_box)
+        ql.setContentsMargins(0, 0, 0, 0)
+        ql.setSpacing(6)
+        cols = 2 if self.compact else 3
+        prompts = [p for p in A.QUICK_PROMPTS if (self.compact or p[0] != "autopilot")]
+        total_q = len(prompts)
+        for idx, (kind, label, _prompt) in enumerate(prompts):
+            b = QPushButton(label)
+            b.setObjectName("pill")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, k=kind, l=label: self.hub.quick(k, l))
+            rem = total_q % cols
+            span = (cols - rem + 1) if (rem and idx == total_q - 1 and self.compact) else 1
+            ql.addWidget(b, idx // cols, idx % cols, 1, span)
+            self._quick_btns.append(b)
+        parent_lay.addWidget(quick_box)
 
-        # 全天值守状态条（开启值守时显示，平时隐藏）
+        # 仅在紧凑抽屉里放独立值守条和紧凑动态卡（全屏页由右栏看板统一承载）
         self.watch_bar = QFrame()
         self.watch_bar.setObjectName("apWatchBar")
         wl = QHBoxLayout(self.watch_bar)
@@ -1201,35 +1785,34 @@ class AssistantView(QWidget):
         self.b_watch_stop.clicked.connect(self.hub.stop_watch)
         wl.addWidget(self.b_watch_stop)
         self.watch_bar.hide()
-        v.addWidget(self.watch_bar)
-
-        # 全自动实时执行动态卡片（跑任务时自动展开，实时高亮阶段 + 滚动最近现场流水）
-        self.live_card = _AutopilotLiveCard(self.hub.stop, self.compact, self)
-        v.addWidget(self.live_card)
+        if self.compact:
+            parent_lay.addWidget(self.watch_bar)
+            self.live_card = _AutopilotLiveCard(self.hub.stop, True, self)
+            parent_lay.addWidget(self.live_card)
 
         # 对话消息滚动区
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._msg_host = QWidget()
         self._msg_lay = QVBoxLayout(self._msg_host)
         self._msg_lay.setContentsMargins(2, 4, 6, 4)
         self._msg_lay.setSpacing(10)
         self.welcome = QLabel(
-            "你可以直接点上面的快捷按钮，或者用大白话让我帮忙：\n"
-            "· 查今天各号发完没、后台有没有漏发 / 黑封面\n"
-            "· 找「没发但已挪进归档」的视频，并一键拎回今天待发目录\n"
-            "· 查游戏 / 动漫目录里的过期文件夹与残留文件，已发过的归档/去重、空夹删除（绝不删未发视频）\n"
-            "安全说明：我绝不会自动发布视频，也绝不会删除线上作品。"
+            "直接点上方快捷按钮，或用大白话吩咐我：\n"
+            "· 点右侧「🚀 今日全自动」或说「把今天能发的都发了」\n"
+            "· 值守中途随时指挥：「跳过 PUBG」「5 分钟巡检一次」\n"
+            "· 查后台漏发 / 黑封面 / 过期残留文件夹"
         )
         self.welcome.setWordWrap(True)
         self.welcome.setObjectName("hint")
         self._msg_lay.addWidget(self.welcome)
         self._msg_lay.addStretch(1)
         self.scroll.setWidget(self._msg_host)
-        v.addWidget(self.scroll, 1)
+        parent_lay.addWidget(self.scroll, 1)
 
-        # 进度条 / 停止按钮
+        # 进度条 / 停止按钮（仅非全自动的普通查询显示，彻底避免和右栏全自动停止按钮重复）
         self.status_bar = QWidget()
         sh = QHBoxLayout(self.status_bar)
         sh.setContentsMargins(2, 0, 2, 0)
@@ -1243,14 +1826,14 @@ class AssistantView(QWidget):
         self.b_stop.clicked.connect(self.hub.stop)
         sh.addWidget(self.b_stop)
         self.status_bar.hide()
-        v.addWidget(self.status_bar)
+        parent_lay.addWidget(self.status_bar)
 
         # 输入区
         inp_row = QHBoxLayout()
         inp_row.setSpacing(8)
         self.ed_input = QPlainTextEdit()
-        self.ed_input.setPlaceholderText("问点什么，例如：今天有没有没发上但挪到归档里的视频？（Enter 发送，Shift+Enter 换行）")
-        self.ed_input.setFixedHeight(64 if self.compact else 72)
+        self.ed_input.setPlaceholderText("问点什么，例如：今天有没有漏发或黑封面？（Enter 发送，Shift+Enter 换行）")
+        self.ed_input.setFixedHeight(62 if self.compact else 68)
         self.ed_input.installEventFilter(self)
         inp_row.addWidget(self.ed_input, 1)
         self.b_send = QPushButton("发送")
@@ -1258,18 +1841,68 @@ class AssistantView(QWidget):
         self.b_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self.b_send.clicked.connect(self._send_clicked)
         inp_row.addWidget(self.b_send, 0, Qt.AlignmentFlag.AlignBottom)
-        v.addLayout(inp_row)
+        parent_lay.addLayout(inp_row)
+
+    def _build(self):
+        if self.compact:
+            v = QVBoxLayout(self)
+            v.setContentsMargins(12, 14, 12, 12)
+            v.setSpacing(10)
+            self._chat_card = None
+            self._build_chat_column(v)
+            return
+
+        # 全屏左右双栏工作台：左 40% 对话区卡片 + 右 60% 16 号实时看板
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 16, 20, 16)
+        outer.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        self._chat_card = QFrame()
+        self._chat_card.setObjectName("aiChatCard")
+        cl = QVBoxLayout(self._chat_card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+        self._build_chat_column(cl)
+        splitter.addWidget(self._chat_card)
+
+        self.board = _AutopilotBoardPanel(self.hub, self)
+        self.live_card = self.board.live_banner
+        splitter.addWidget(self.board)
+
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 6)
+        splitter.setSizes([440, 680])
+        outer.addWidget(splitter, 1)
 
     def _connect_hub(self):
         self.hub.message_added.connect(self._add_bubble)
         self.hub.cleared.connect(self._rebuild_messages)
         self.hub.card_updated.connect(self._sync_cards)
         self.hub.watch_status_changed.connect(self._on_watch_status)
-        self.hub.live_changed.connect(self.live_card.update_state)
+        self.hub.live_changed.connect(self._on_live_changed)
+        self.hub.accounts_changed.connect(self._on_accounts_changed)
         self.hub.status_changed.connect(self._on_status)
         self.hub.busy_changed.connect(self._on_busy)
 
+    def _on_live_changed(self, info: dict):
+        if self.board is not None:
+            self.board.update_live(info)
+            if bool((info or {}).get("active")):
+                self.status_bar.hide()
+        else:
+            self.live_card.update_state(info)
+
+    def _on_accounts_changed(self, items: list[dict]):
+        if self.board is not None:
+            self.board.update_accounts(items)
+
     def _on_watch_status(self, info: dict):
+        if self.board is not None:
+            self.board.update_watch(info)
+            return
         active = bool((info or {}).get("active"))
         self.watch_bar.setVisible(active)
         if not active:
@@ -1331,7 +1964,8 @@ class AssistantView(QWidget):
 
     def _on_status(self, txt: str):
         self.lab_status.setText(txt)
-        self.status_bar.setVisible(bool(txt) or self.hub.is_busy())
+        hide_dup = (self.board is not None and self.hub._live_active)
+        self.status_bar.setVisible((not hide_dup) and (bool(txt) or self.hub.is_busy()))
 
     def _on_busy(self, busy: bool):
         self.b_send.setEnabled(not busy)
@@ -1340,22 +1974,39 @@ class AssistantView(QWidget):
             b.setEnabled(not busy)
         for bub in self._bubbles:
             bub.set_busy(busy)
-        self.status_bar.setVisible(busy or bool(self.lab_status.text()))
+        if self.board is not None:
+            self.board.set_busy(busy)
+        hide_dup = (self.board is not None and self.hub._live_active)
+        self.status_bar.setVisible((not hide_dup) and (busy or bool(self.lab_status.text())))
 
     def retheme(self):
         t = TH.cur()
+        has_key = bool(self.hub.agent.ai_config().key)
+        self.lab_model_dot.setStyleSheet(
+            f"color:{t['ok'] if has_key else t['dim']}; font-size:10px; background:transparent;"
+        )
         self.lab_model.setText(self.hub.model_label())
         if self.compact:
             self.setStyleSheet(f"QWidget#aiDrawer {{ background:{t['bg']}; border-left:1px solid {t['line']}; }}")
+        elif self._chat_card is not None:
+            self._chat_card.setStyleSheet(
+                f"QFrame#aiChatCard {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:16px; }}"
+            )
+            self._msg_host.setStyleSheet(f"background:{t['card']};")
+            self.scroll.setStyleSheet(f"QScrollArea {{ background:{t['card']}; border:none; }}")
         self.welcome.setStyleSheet(
-            f"background:{t['card']}; color:{t['mu']}; border:1px solid {t['line']}; border-radius:12px; padding:12px; font-size:13px;"
+            f"background:{t['soft']}; color:{t['mu']}; border:1px solid {t['line2']}; border-radius:12px; padding:12px; font-size:13px;"
         )
         self.watch_bar.setStyleSheet(
             f"QFrame#apWatchBar {{ background:{t['ok_bg']}; border:1px solid {t['ok']}; border-radius:10px; }}"
         )
         self.lab_watch.setStyleSheet(f"color:{t['ok']}; font-weight:bold; font-size:12px; background:transparent;")
         self._on_watch_status(self.hub.watch_info())
-        self.live_card.update_state(self.hub.live_info())
-        self.live_card.retheme()
+        self._on_live_changed(self.hub.live_info())
+        if self.board is not None:
+            self.board.update_accounts(self.hub.account_cards_info())
+            self.board.retheme()
+        else:
+            self.live_card.retheme()
         for b in self._bubbles:
             b.retheme()

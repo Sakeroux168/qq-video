@@ -8980,6 +8980,133 @@ def test_autopilot_fixes_and_live(tmp: Path):
     apiacc.save([])
 
 
+def test_autopilot_parallel_and_board(tmp: Path):
+    print("[全自动并发发布(api_threads+api_per_acc) + 左右双栏16号实时卡片墙 + 点击卡片过滤流水]")
+    import threading
+    import time
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    import gui.window as W
+    from qe import apiacc, aplog, autopilot as AP
+    from qe.config import Settings
+    from qe.records import Records
+
+    groot = tmp / "par_root" / "游戏视频"
+    for folder, prefix in (
+        ("CSGO--CSGO战神君", "cs"),
+        ("PUBG--PUBG突围君", "pg"),
+        ("LOL--LOL玩家聚集地", "ll"),
+    ):
+        d = groot / folder / "11.27"
+        d.mkdir(parents=True)
+        for k in (1, 2):
+            (d / f"{prefix}_并发片{k}.mp4").write_bytes(b"vbytes")
+
+    accs = [
+        {"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c1", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "c2", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "LOL玩家聚集地", "source_name": "LOL", "client_id": "c3", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+    ]
+    apiacc.save(accs)
+    st = Settings(tmp / "st_par.json")
+    st["api_roots"] = [str(groot)]
+    st["api_archive"] = str(tmp / "par_arc" / "{date}")
+    st["api_interval"] = 0
+    st["api_threads"] = 3
+    st["api_per_acc"] = 2
+    st["api_cover"] = "不传"
+    for k in ("sharp_check", "crop_check", "outro_check", "audio_check", "long_check", "game_ai_check"):
+        st[k] = False
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 10, "PUBG突围君": 10, "LOL玩家聚集地": 10}}]
+    rec = Records(tmp / "rec_par.sqlite")
+
+    in_flight = [0]
+    max_in_flight = [0]
+    fl_lock = threading.Lock()
+    events_seen = []
+
+    class SlowParallelClient:
+        def send(self, path, title, cat, before_publish=None, **_k):
+            with fl_lock:
+                in_flight[0] += 1
+                max_in_flight[0] = max(max_in_flight[0], in_flight[0])
+            try:
+                time.sleep(0.08)
+                if before_publish:
+                    before_publish("VID_" + title)
+                return {"article_id": "AID_" + title, "vid": "VID_" + title, "status": "成功"}
+            finally:
+                with fl_lock:
+                    in_flight[0] -= 1
+
+    deps = {
+        "today_fn": lambda: "2026-11-27",
+        "api_accounts_fn": lambda: accs,
+        "accounts_fn": lambda: [(a, False) for a in accs],
+        "make_client": lambda _a: SlowParallelClient(),
+        "check_one_fn": lambda v, words=None, ff="": {"w": 1080, "h": 1920, "dur": 30.0, "has_audio": True, "landscape": False, "tags": [], "platform": [], "bad_read": False},
+        "check_account_fn": lambda cl, r_db, nick, d: {"nick": nick, "ours": 2, "live": 2, "ok": 2, "review": 0, "missing": [], "extra": []},
+        "scan_one_fn": lambda acc, s, e, **_k: ([], 0),
+        "on_account_event": events_seen.append,
+        "api_interval": 0,
+    }
+    rep = AP.run(st, rec, deps=deps)
+    check(rep["published_count"] == 6 and rep["failed_count"] == 0,
+          f"3 个号各 2 条全部发布成功 -> pub={rep['published_count']}, fail={rep['failed_count']}")
+    check(max_in_flight[0] >= 2,
+          f"全自动严格按设置 api_threads=3 / api_per_acc=2 并行上传（峰值并发 {max_in_flight[0]}）")
+    seen_nicks = {e.get("account") for e in events_seen if "account" in e}
+    check({"CSGO战神君", "PUBG突围君", "LOL玩家聚集地"}.issubset(seen_nicks),
+          f"全过程实时推送各账号结构化状态事件 -> {seen_nicks}")
+
+    # 2. 左右双栏工作台 UI + 并发标签 + 筛选胶囊 + 点击账号卡片过滤日志 + 无重复停止条
+    w = W.MainWindow(st, rec)
+    bd = w.ai_page.board
+    check(bd is not None and "3 号并发" in bd.lab_conc.text() and "每号 2 条" in bd.lab_conc.text(),
+          f"右栏看板正确展示并发配置标签 -> {bd.lab_conc.text() if bd else None}")
+
+    w.ai_hub._live_active = True
+    w.ai_hub._live_stage = 4
+    w.ai_hub._live_headline = "④/⑥ 自动发布（3/6）"
+    aplog.add_listener(w.ai_hub._aplog_listener)
+    w.ai_hub._on_acc_event({"__batch__": [
+        {"account": "CSGO战神君", "status": "running", "stage": "发布中", "sent": 2, "target": 10, "detail": "正在上传：《cs_并发片2》", "skipped": 0, "outro_cut": 1, "failed": 0},
+        {"account": "PUBG突围君", "status": "done", "stage": "已发满", "sent": 10, "target": 10, "detail": "今日已完成 10/10 条", "skipped": 0, "outro_cut": 0, "failed": 0},
+        {"account": "LOL玩家聚集地", "status": "error", "stage": "密钥失效", "sent": 0, "target": 10, "detail": "密钥失效，请重新搬账号", "skipped": 0, "outro_cut": 0, "failed": 2},
+    ]})
+    w.ai_hub.live_changed.emit(w.ai_hub.live_info())
+    w.ai_hub._on_worker_progress("④/⑥ 自动发布（3/6）")
+    aplog.write("④发布", "发布成功：《cs_并发片2》", level="OK", account="CSGO战神君", day_iso="2026-11-27")
+    aplog.write("④发布", "发布成功：《pg_并发片2》", level="OK", account="PUBG突围君", day_iso="2026-11-27")
+    app.processEvents()
+
+    check(len(bd._cards) == 3 and not bd._cards["CSGO战神君"].lab_outro.isHidden(),
+          "每号一张卡片全部渲染，且自动剪片尾角标正常显示")
+    check(w.ai_page.status_bar.isHidden() and not bd.b_stop_ap.isHidden(),
+          "全自动运行时全屏页砍掉底部重复停止条，仅保留右栏看板主停止按钮")
+
+    # 点击 CSGO 卡片 -> 现场流水只看 CSGO
+    bd.select_account("CSGO战神君")
+    log_cs = bd.ed_log.toPlainText()
+    check("cs_并发片2" in log_cs and "pg_并发片2" not in log_cs and not bd.b_acc_filter.isHidden(),
+          f"点击账号卡片后下方现场流水精准过滤为只看该号 -> {log_cs}")
+    bd.select_account("CSGO战神君")  # 再点取消过滤
+    check("pg_并发片2" in bd.ed_log.toPlainText() and bd.b_acc_filter.isHidden(),
+          "再次点击卡片恢复显示全部账号流水")
+
+    # 筛选胶囊：只看「已完成」
+    bd.set_filter("done")
+    check(not bd._cards["PUBG突围君"].isHidden() and bd._cards["CSGO战神君"].isHidden(),
+          "顶部「已完成」筛选胶囊准确过滤账号卡片")
+
+    aplog.remove_listener(w.ai_hub._aplog_listener)
+    w.ai_hub._live_active = False
+    w.ai_hub.live_changed.emit(w.ai_hub.live_info())
+    _wait(app, lambda: not w.api_tab.busy(), 5)
+    w.close()
+    apiacc.save([])
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -9090,6 +9217,7 @@ if __name__ == "__main__":
     test_autopilot(tmp)
     test_folder_intent_and_watch(tmp)
     test_autopilot_fixes_and_live(tmp)
+    test_autopilot_parallel_and_board(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

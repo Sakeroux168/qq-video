@@ -9,28 +9,28 @@ FONT = "'Microsoft YaHei UI','Microsoft YaHei'"
 
 THEMES = {
     "浅色": {
-        "desc": "白底、深色字、蓝色主按钮;白天用",
-        "bg": "#f6f7f9", "card": "#ffffff", "side": "#ffffff", "line": "#dfe2e8", "line2": "#eceef2",
-        "tx": "#111318", "tx2": "#2b303a", "mu": "#4b5260", "dim": "#6b7280",
-        "acc": "#0066d6", "acc_h": "#0057b8", "acc_bg": "#e3eeff",
-        "soft": "#eceef2", "soft_h": "#e2e5ea",
-        "ok": "#1a7a33", "ok_bg": "#e3f5e8", "warn": "#b42f00", "warn_bg": "#fff0e0",
-        "bad": "#c4231a", "bad_bg": "#fdeceb", "danger": "#d92d20", "danger_h": "#b42318",
-        "orange": "#e8590c", "green": "#1f9d4c", "sel": "#dce9ff", "alt": "#fafbfc",
-        "acc_btn": "#0066d6", "danger_btn": "#d92d20", "badge": "#e8590c", "track": "#dde1e8",
-        "rows": {"yellow": "#fffaf0", "red": "#fff4f2", "green": "#f3faf5", "orange": "#fff5e8", "ready": "#eef4ff"},
+        "desc": "清爽极简冷灰画布、纯白卡片、现代蓝主色;白天久看不累眼",
+        "bg": "#f3f6fb", "card": "#ffffff", "side": "#ffffff", "line": "#e2e8f0", "line2": "#eef2f7",
+        "tx": "#0f172a", "tx2": "#334155", "mu": "#526075", "dim": "#64748b",
+        "acc": "#2563eb", "acc_h": "#1d4ed8", "acc_bg": "#e8f0fe",
+        "soft": "#eef2f7", "soft_h": "#e2e8f0",
+        "ok": "#0f8a4b", "ok_bg": "#e6f7ee", "warn": "#c25700", "warn_bg": "#fff3e6",
+        "bad": "#dc2626", "bad_bg": "#feecec", "danger": "#e11d48", "danger_h": "#be123c",
+        "orange": "#ea580c", "green": "#16a34a", "sel": "#dbeafe", "alt": "#f8fafc",
+        "acc_btn": "#2563eb", "danger_btn": "#e11d48", "badge": "#ea580c", "track": "#e2e8f0",
+        "rows": {"yellow": "#fffbeb", "red": "#fef2f2", "green": "#f0fdf4", "orange": "#fff7ed", "ready": "#eff6ff"},
     },
     "深色": {
-        "desc": "深灰底、亮字;晚上用不刺眼",
-        "bg": "#141418", "card": "#1d1e24", "side": "#1a1b20", "line": "#30323b", "line2": "#272830",
-        "tx": "#f2f3f5", "tx2": "#dfe1e6", "mu": "#b4b8c2", "dim": "#9095a1",
-        "acc": "#3b8cff", "acc_h": "#5c9fff", "acc_bg": "#1c2c47",
-        "soft": "#2a2b33", "soft_h": "#33353e",
-        "ok": "#4ade80", "ok_bg": "#16321f", "warn": "#ffa94d", "warn_bg": "#3a2a14",
-        "bad": "#ff7b72", "bad_bg": "#3d1c1c", "danger": "#e5484d", "danger_h": "#f2555a",
-        "orange": "#ff922b", "green": "#40c463", "sel": "#22385c", "alt": "#202128",
-        "acc_btn": "#1f6fe0", "danger_btn": "#c9302c", "badge": "#d9480f", "track": "#3a3c47",
-        "rows": {"yellow": "#2c2717", "red": "#331d1d", "green": "#18291e", "orange": "#33261a", "ready": "#1c2a40"},
+        "desc": "柔和深蓝灰画布、高对比护眼亮字;晚上用不刺眼",
+        "bg": "#0f141e", "card": "#171f2e", "side": "#131926", "line": "#283347", "line2": "#20293b",
+        "tx": "#f1f5f9", "tx2": "#cbd5e1", "mu": "#94a3b8", "dim": "#7c8ea6",
+        "acc": "#4f8cff", "acc_h": "#6ca0ff", "acc_bg": "#1a2b4c",
+        "soft": "#202a3d", "soft_h": "#29364f",
+        "ok": "#34d399", "ok_bg": "#123226", "warn": "#fbbf24", "warn_bg": "#362912",
+        "bad": "#f87171", "bad_bg": "#3a1b1f", "danger": "#f43f5e", "danger_h": "#fb7185",
+        "orange": "#fb923c", "green": "#4ade80", "sel": "#1e3a5f", "alt": "#141c29",
+        "acc_btn": "#3b82f6", "danger_btn": "#e11d48", "badge": "#ea580c", "track": "#2c384e",
+        "rows": {"yellow": "#2a2515", "red": "#321a1e", "green": "#132920", "orange": "#302216", "ready": "#182942"},
     },
 }
 DEFAULT = "浅色"
@@ -58,9 +58,9 @@ QLabel {{ background:transparent; }}
 QFrame#sidebar {{ background:{t['side']}; border:none; border-right:1px solid {t['line']}; }}
 QLabel#brand {{ font-size:15px; font-weight:bold; color:{t['tx']}; }}
 QLabel#brandSub {{ font-size:12px; color:{t['dim']}; }}
-QPushButton#nav {{ text-align:left; padding:9px 12px; border:none; border-radius:10px; background:transparent;
+QPushButton#nav {{ text-align:left; padding:9px 13px; border:none; border-radius:11px; background:transparent;
     font-size:14px; color:{t['tx2']}; }}
-QPushButton#nav:hover {{ background:{t['soft']}; }}
+QPushButton#nav:hover {{ background:{t['soft']}; color:{t['tx']}; }}
 QPushButton#nav:checked {{ background:{t['acc_bg']}; color:{t['acc']}; font-weight:bold; }}
 QLabel#navBadge {{ background:{t['badge']}; color:#ffffff; border-radius:9px; padding:0 5px; font-size:11px; font-weight:bold; }}
 
@@ -193,11 +193,11 @@ QLabel#warnPill[tone="good"] {{ background:{t['ok_bg']}; color:{t['ok']}; }}
 QLabel#hint {{ background:{t['warn_bg']}; color:{t['warn']}; border:none; border-radius:10px; padding:9px 12px; font-weight:bold; }}
 QGroupBox {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:12px; margin-top:18px; padding:14px 12px 10px 12px; }}
 QGroupBox::title {{ subcontrol-origin:margin; left:12px; padding:0 4px; color:{t['tx']}; font-weight:bold; font-size:14px; }}
-QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }}
-QScrollBar::handle:vertical {{ background:{t['line']}; border-radius:4px; min-height:30px; }}
+QScrollBar:vertical {{ background:transparent; width:8px; margin:2px 1px; }}
+QScrollBar::handle:vertical {{ background:{t['line']}; border-radius:4px; min-height:28px; }}
 QScrollBar::handle:vertical:hover {{ background:{t['dim']}; }}
-QScrollBar:horizontal {{ background:transparent; height:10px; margin:2px; }}
-QScrollBar::handle:horizontal {{ background:{t['line']}; border-radius:4px; min-width:30px; }}
+QScrollBar:horizontal {{ background:transparent; height:8px; margin:1px 2px; }}
+QScrollBar::handle:horizontal {{ background:{t['line']}; border-radius:4px; min-width:28px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height:0; width:0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
 QToolTip {{ background:{t['card']}; color:{t['tx']}; border:1px solid {t['line']}; padding:6px; border-radius:6px; }}

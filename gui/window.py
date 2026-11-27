@@ -903,6 +903,8 @@ class MainWindow(QMainWindow):
             set_badge(self.nav, 5, "")
             if hasattr(self, "ai_drawer") and not self.ai_drawer.isHidden():
                 self.toggle_ai_drawer(False)
+            if hasattr(self, "ai_hub") and not self.ai_hub.is_busy():
+                self.ai_hub.refresh_board()
         if p is self.daily:
             self.daily.refresh()
         elif p is self.pages.get("records"):
