@@ -8,6 +8,7 @@
 发布永远要人点「发」确认(这个软件里没有自动发布)。
 """
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -2877,22 +2878,46 @@ class ApiTab(QWidget):
             except OSError:
                 continue
             paths = [os.path.join(d, x) for x in names]
-            if any(os.path.isdir(p) for p in paths) or any(os.path.splitext(x)[1].lower() in apisrc.VIDEO_EXTS for x in names):
-                continue                                  # 还有视频 / 子文件夹:没空
-            rest = [p for p in paths if os.path.basename(p).lower() not in self.JUNK]
+            if any(os.path.splitext(x)[1].lower() in apisrc.VIDEO_EXTS and os.path.isfile(os.path.join(d, x)) for x in names):
+                continue                                  # 还有视频:没空
+            # 子文件夹:只拦用户自己的非空子目录;下载器隐藏夹(.meowload)、软件建的原片备份夹(结尾原片等)和空子目录随手清掉
+            subdirs = [p for p in paths if os.path.isdir(p)]
+            keep_sub = False
+            for sp in subdirs:
+                sn = os.path.basename(sp)
+                if apisrc.is_removable_subdir(sn):
+                    continue
+                try:
+                    if os.listdir(sp):
+                        keep_sub = True
+                        break
+                except OSError:
+                    keep_sub = True
+                    break
+            if keep_sub:
+                continue
+            files = [p for p in paths if os.path.isfile(p)]
+            rest = [p for p in files if not apisrc.is_junk_file(os.path.basename(p))]
+            junk_files = [p for p in files if apisrc.is_junk_file(os.path.basename(p))]
             try:
                 dest = apisrc.archive_dir(self.st, "", acc)
                 for p in rest:
                     plan.move_noclobber(p, dest)          # 剩下的封面图挪进归档(同一天、同一个游戏文件夹),不删
-                for p in paths:
-                    if os.path.basename(p).lower() in self.JUNK and os.path.isfile(p):
-                        os.remove(p)                      # Thumbs.db 这种系统自己生成的,删
+                for p in junk_files:
+                    os.remove(p)                          # Thumbs.db / 临时文件删掉
+                for sp in subdirs:
+                    shutil.rmtree(sp)                     # .meowload / 结尾原片 等发完后的残留子目录清掉
                 os.rmdir(d)                               # 只删空的;里面又有了东西就删不掉,不硬删
             except OSError as e:
                 self.say(f"「{d}」发完了,但文件夹没删掉:{e.strerror or e}")
                 continue
             n += 1
-            self.say(f"「{d}」发完空了,删了" + (f"(剩下 {len(rest)} 个文件挪进了发布归档)" if rest else ""))
+            extra_s = []
+            if rest:
+                extra_s.append(f"剩下 {len(rest)} 个文件挪进了发布归档")
+            if subdirs:
+                extra_s.append(f"清了 {len(subdirs)} 个残留子夹")
+            self.say(f"「{d}」发完空了,删了" + (f"({', '.join(extra_s)})" if extra_s else ""))
             # 手选的文件夹删了:手选那条留着(这天这个号就没东西了),不回到自动找 —— 免得把别的日期文件夹(10.1)的视频列出来顺手发了
         return n
 
@@ -3837,7 +3862,8 @@ class ApiTab(QWidget):
         else:
             from PySide6.QtWidgets import QMessageBox
         picked = only is not None or bool(self.selected_rows())
-        self._pub_dirs = {}                              # 这次发出去的视频原来在哪个文件夹 → 号(发完看空没空,空了删)
+        if not hasattr(self, "_pub_dirs") or self._pub_dirs is None:
+            self._pub_dirs = {}                          # 这次发出去的视频原来在哪个文件夹 → 号(发完看空没空,空了删)
         raw_scope = self.target_rows(only)
         if not raw_scope:
             return

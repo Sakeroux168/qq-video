@@ -3659,7 +3659,10 @@ def test_title_date(tmp: Path):
         check(got == want, f"「{t}」-> {got}(应该 {want})")
     check(TD.bad_dates("1号的回放", date(2026, 12, 2)) == [] and TD.bad_dates("30号的回放", date(2026, 12, 1)) == [],
           "昨天跨月(12.1 那天,30 号算昨天)也认")
-    v = F.Video(path="x.mp4", title="我的世界27号又开始了", account="CSGO战神君", employee="", date="11.3")
+    from datetime import timedelta
+    from qe.config import bj_now
+    old_d = (bj_now() - timedelta(days=5)).day
+    v = F.Video(path="x.mp4", title=f"我的世界{old_d}号又开始了", account="CSGO战神君", employee="", date="11.3")
     v.checks = {"tags": []}
     TD.store().set(v.account, v.title, False)
     check(any("标题日期不对" in p for p in checks.problems(v)),
@@ -8213,12 +8216,14 @@ def test_ai_assistant(tmp: Path):
     rec.conn.commit()
     rows_by_title = {r["title"]: r for r in rec.rows(account="CSGO战神君")}
 
-    # 确认没有暴露任何发布 / 删除工具
+    # 确认没有暴露任何绕过确认的直接发布 / 删除线上作品工具
     tool_names = [t["function"]["name"] for t in A.TOOLS_SCHEMA]
     check(set(tool_names) == {
         "check_today_plan", "verify_backend", "check_black_covers",
-        "find_archived_videos", "pull_back_for_republish", "open_in_czgt"
-    }, f"仅暴露 6 个受控工具,无发布/删除工具 -> {tool_names}")
+        "find_archived_videos", "pull_back_for_republish", "open_in_czgt",
+        "scan_old_folders", "clean_old_folders", "prepare_autopilot",
+        "manage_watch", "read_autopilot_log",
+    }, f"仅暴露 11 个受控工具,无直接发布/删除线上工具 -> {tool_names}")
 
     opened_czgt = []
     exported_cov = []
@@ -8299,6 +8304,680 @@ def test_ai_assistant(tmp: Path):
     w.goto("ai")
     check(w.ai_drawer.isHidden(), "切到左侧全屏 AI 助手页时右侧抽屉自动收起")
     w.close()
+
+
+def test_old_folders_and_no_leftovers(tmp: Path):
+    print("[发完无残留(.meowload/结尾原片/带空格封面) + AI助手扫描清理过期文件夹]")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    import gui.api_tab as T
+    from qe import apiacc, apicover, apisrc, assistant as A, omapi
+    from qe.config import Settings
+    from qe.folders import Video
+    from qe.records import Records
+
+    # 1. 带末尾空格的同名封面也能配对并随视频一起挪走
+    d_cov = tmp / "cov_space"
+    d_cov.mkdir()
+    vp = d_cov / "怪物策划问答.mp4"
+    cp = d_cov / "怪物策划问答 .jpg"
+    vp.write_bytes(b"v")
+    cp.write_bytes(b"j")
+    check(os.path.normcase(apicover.find(str(vp))) == os.path.normcase(str(cp)), "apicover.find 匹配末尾带空格的封面")
+    dst_c = tmp / "cov_space_arc"
+    apisrc.move_published(str(vp), str(dst_c))
+    check(not vp.exists() and not cp.exists() and (dst_c / "怪物策划问答.jpg").is_file(),
+          f"move_published 一并挪走带空格封面不残留 -> {os.listdir(dst_c)}")
+
+    # 2. _clean_empty_dirs: 发完后清掉 .meowload + 结尾原片 + Thumbs.db + 残留封面并删目录; 保留未知非空子目录
+    root = tmp / "clean_root" / "游戏视频"
+    acc = root / "PUBG--PUBG突围君"
+    d_ok = acc / "11.25未改比例"
+    (d_ok / ".meowload").mkdir(parents=True)
+    (d_ok / "结尾原片").mkdir(parents=True)
+    (d_ok / "结尾原片" / "旧原片.mp4").write_bytes(b"old")
+    (d_ok / "吃鸡1.mp4").write_bytes(b"v1")
+    (d_ok / "吃鸡1 .jpg").write_bytes(b"j1")
+    (d_ok / "多余封面.jpg").write_bytes(b"j2")
+    (d_ok / "Thumbs.db").write_bytes(b"t")
+
+    d_keep_sub = acc / "11.24"
+    (d_keep_sub / "别删我的子夹").mkdir(parents=True)
+    (d_keep_sub / "别删我的子夹" / "说明.txt").write_bytes(b"hi")
+    (d_keep_sub / "吃鸡2.mp4").write_bytes(b"v2")
+
+    apiacc.save([{"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "c", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_nolef.json")
+    st["api_roots"] = [str(root)]
+    st["api_archive"] = str(tmp / "arc_nolef" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    st["quota_open"] = True
+
+    class FakeCl:
+        def __init__(self, *a, **k):
+            pass
+        def send(self, path, title, cat, before_publish=None, **k):
+            if before_publish:
+                before_publish("V")
+            return {"vid": "V", "article_id": "A" + title, "transaction_id": "P", "status": "成功"}
+
+    real = (omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning)
+    omapi.Client, T.ask = FakeCl, (lambda *a, **k: True)
+    QMessageBox.information = QMessageBox.warning = staticmethod(lambda *a, **k: 0)
+    try:
+        tab = T.ApiTab(st, Records(tmp / "rec_nolef.sqlite"), lambda _m: None)
+        tab.SHARP_CHECK = False
+        tab.COVER_CHECK = False
+        tab.set_day("11.25")
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 1)
+        tab.videos[0].checks = {"w": 1080, "h": 1920, "landscape": False, "bad_read": False}
+        tab._update_scope()
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy())
+        _wait(app, lambda: not d_ok.exists(), 8)
+        check(not d_ok.exists(), "发完后连同 .meowload / 结尾原片 / Thumbs.db / 多余封面一起清理并删空日期夹")
+
+        tab.set_day("11.24")
+        _wait(app, lambda: not tab.busy() and len(tab.videos) == 1)
+        tab.videos[0].checks = {"w": 1080, "h": 1920, "landscape": False, "bad_read": False}
+        tab._update_scope()
+        tab.run_publish()
+        _wait(app, lambda: not tab.busy())
+        check(d_keep_sub.is_dir() and (d_keep_sub / "别删我的子夹" / "说明.txt").is_file(),
+              "含未知非空子目录时不误删该目录")
+    finally:
+        omapi.Client, T.ask, QMessageBox.information, QMessageBox.warning = real
+
+    # 3. AI 助手 scan_old_folders + clean_old_folders
+    groot = tmp / "ai_old" / "游戏视频"
+    fps_acc = groot / "腾讯系FPS射击游戏-FPS射击游戏馆"
+    # 3a) 11.25未改比例: .meowload + Thumbs.db + 残留封面
+    f1 = fps_acc / "11.25未改比例"
+    (f1 / ".meowload").mkdir(parents=True)
+    (f1 / "Thumbs.db").write_bytes(b"t")
+    (f1 / "残留图 .jpg").write_bytes(b"j")
+    # 3b) 11.24: 1条已发未归档 + 1条已发且归档已有副本
+    f2 = fps_acc / "11.24"
+    f2.mkdir(parents=True)
+    v_sent_noarc = f2 / "已发没挪走.mp4"
+    v_sent_dup = f2 / "已发重复副本.mp4"
+    v_sent_noarc.write_bytes(b"s1")
+    v_sent_dup.write_bytes(b"s2")
+    arc_exist = tmp / "ai_old_arc" / "11.24" / "FPS"
+    arc_exist.mkdir(parents=True)
+    dup_in_arc = arc_exist / "已发重复副本.mp4"
+    dup_in_arc.write_bytes(b"s2-arc")
+    # 3c) 11.23: 1条已发 + 1条未发(绝不能删未发!)
+    f3 = fps_acc / "11.23"
+    f3.mkdir(parents=True)
+    v_mix_sent = f3 / "混杂里的已发.mp4"
+    v_mix_unsent = f3 / "混杂里的未发.mp4"
+    v_mix_sent.write_bytes(b"ms")
+    v_mix_unsent.write_bytes(b"mu")
+    # 3d) 11.27(今天): 不在 <=11.25 范围内
+    f_today = fps_acc / "11.27"
+    f_today.mkdir(parents=True)
+    (f_today / "今天的.mp4").write_bytes(b"td")
+
+    st2 = Settings(tmp / "st_oldai.json")
+    st2["api_roots"] = [str(groot)]
+    st2["api_archive"] = str(tmp / "ai_old_arc" / "{date}")
+    rec2 = Records(tmp / "rec_oldai.sqlite")
+    for vp_x, t_x, moved in (
+        (v_sent_noarc, "已发没挪走", ""),
+        (v_sent_dup, "已发重复副本", str(dup_in_arc)),
+        (v_mix_sent, "混杂里的已发", ""),
+    ):
+        rec2.manual_published(Video(str(vp_x), t_x, "FPS射击游戏馆", "接口", "11.24"), note="ok", at="2026-11-24 12:00:00")
+        if moved:
+            rec2.conn.execute("UPDATE posts SET moved_pkey=? WHERE title=?", (moved, t_x))
+    rec2.conn.commit()
+    apiacc.save([{"nick": "FPS射击游戏馆", "source_name": "FPS", "client_id": "x", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+
+    agent = A.AssistantAgent(st2, rec2, deps={"today_fn": lambda: "2026-11-27"})
+    sc = agent.tool_scan_old_folders(before_day="11.25", root_filter="游戏")
+    by_name = {x["folder_name"]: x for x in sc["folders"]}
+    check(set(by_name) == {"11.25未改比例", "11.24", "11.23"}, f"按 <=11.25 准确列出过期目录,不含 11.27 -> {list(by_name)}")
+    check(by_name["11.25未改比例"]["status"] == "empty_or_leftover" and by_name["11.24"]["status"] == "all_sent"
+          and by_name["11.23"]["status"] == "partial_sent",
+          f"分类准确 -> { {k: v['status'] for k, v in by_name.items()} }")
+
+    # 越权路径绝不被清理
+    outside = tmp / "outside_important"
+    outside.mkdir()
+    (outside / "keep.txt").write_bytes(b"k")
+    cl = agent.tool_clean_old_folders(folders_list=[str(f1), str(f2), str(f3), str(outside)])
+    check(outside.is_dir() and (outside / "keep.txt").is_file(), "配置目录之外的路径绝不碰")
+    check(not f1.exists() and not f2.exists(), f"纯残留夹与全已发夹清理并删空 -> removed={cl['removed_dirs_count']}")
+    check(cl["archived_sent_count"] == 2 and cl["deleted_dup_sent_count"] == 1,
+          f"未归档的2条已发挪进归档,归档已有副本的1条删重复 -> {cl['archived_sent_count']}/{cl['deleted_dup_sent_count']}")
+    check(f3.is_dir() and v_mix_unsent.is_file() and not v_mix_sent.exists() and cl["kept_unsent_count"] == 1,
+          "混杂目录仅归档已发视频,未发视频与目录完整保留")
+    check(f_today.is_dir() and (f_today / "今天的.mp4").is_file(), "今天目录丝毫未动")
+
+    # 快捷入口「查过期/残留文件夹」+ 按钮执行
+    f_extra = fps_acc / "11.20"
+    f_extra.mkdir(parents=True)
+    rq = agent.run_quick("old_folders")
+    check("11.20" in rq["reply"] and any(a["kind"] == "clean_old_folders" for a in rq["actions"]),
+          f"快捷按钮扫出旧空夹并附带一键清理按钮 -> {rq['actions']}")
+    r_act = agent.execute_action(next(a for a in rq["actions"] if a["kind"] == "clean_old_folders"))
+    check(not f_extra.exists() and "删除空/残留目录 1 个" in r_act["reply"], f"点一键清理按钮删掉 11.20 -> {r_act['reply']}")
+    apiacc.save([])
+
+
+def test_autopilot(tmp: Path):
+    print("[16个号全链路自动驾驶:按设置开关检查 + 转竖屏/改标题 + 发布清残留 + 查漏自动补发1轮 + 黑封面 + 卡片同步]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    import gui.window as W
+    from gui.assistant_panel import _AutopilotConfirmCard, _AutopilotReportCard
+    from qe import apiacc, autopilot as AP
+    from qe.config import Settings
+    from qe.folders import Video
+    from qe.records import Records
+
+    groot = tmp / "ap_root" / "游戏视频"
+    csgo_d = groot / "CSGO--CSGO战神君" / "11.27未改比例"
+    (csgo_d / ".meowload").mkdir(parents=True)
+    (csgo_d / "Thumbs.db").write_bytes(b"t")
+    # 5 条视频: 1) 正常横屏+多话题(自动转竖+改标题+发布), 2) 模糊但关了sharp_check(应放行发布),
+    # 3) 无声(audio_check开->跳过), 4) 超10分钟(long_check开->跳过), 5) 普通可发(模拟首次后台漏发->自动拎回补发1轮)
+    f_land = csgo_d / "横屏多话题 #CSGO #激励计划.mp4"
+    f_blur = csgo_d / "略模糊但关了检查.mp4"
+    f_mute = csgo_d / "无声视频.mp4"
+    f_long = csgo_d / "超长视频.mp4"
+    f_miss = csgo_d / "漏发要补.mp4"
+    for f in (f_land, f_blur, f_mute, f_long, f_miss):
+        f.write_bytes(b"vid-bytes")
+
+    # PUBG 今日已发满(done), DNF 无今日文件夹(missing)
+    (groot / "PUBG--PUBG突围君" / "11.27").mkdir(parents=True)
+    (groot / "PUBG--PUBG突围君" / "11.27" / "满额片.mp4").write_bytes(b"p")
+    (groot / "地下城与勇士--DNF连招档案馆").mkdir(parents=True)
+
+    accs = [
+        {"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c1", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "c2", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "DNF连招档案馆", "source_name": "DNF", "client_id": "c3", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+    ]
+    apiacc.save(accs)
+
+    st = Settings(tmp / "st_ap.json")
+    st["api_roots"] = [str(groot)]
+    st["api_archive"] = str(tmp / "ap_arc" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    st["sharp_check"] = False        # 用户没勾「视频模糊」-> 彻底不跑也不拦!
+    st["crop_check"] = False
+    st["outro_check"] = False
+    st["audio_check"] = True
+    st["long_check"] = True
+    st["game_ai_check"] = False
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 10, "PUBG突围君": 1, "DNF连招档案馆": 10}}]
+
+    rec = Records(tmp / "rec_ap.sqlite")
+    rec.manual_published(Video(str(tmp / "old_pubg.mp4"), "旧吃鸡", "PUBG突围君", "接口", "11.27"), note="ok", at="2026-11-27 08:00:00")
+
+    sent_log = []
+    vert_log = []
+    sharp_calls = []
+    exported_cov = []
+
+    class FakeClient:
+        def send(self, path, title, cat, stop=None, before_publish=None, cover="", cover_upload=None, **_k):
+            if before_publish:
+                before_publish("VID_" + title)
+            sent_log.append(title)
+            return {"article_id": "AID_" + title, "vid": "VID_" + title, "status": "成功"}
+
+    def fake_check_one(v, words=None, ff=""):
+        t = v.title
+        return {
+            "w": 1920 if "横屏" in t else 1080,
+            "h": 1080 if "横屏" in t else 1920,
+            "dur": 650.0 if "超长" in t else 60.0,
+            "has_audio": False if "无声" in t else True,
+            "landscape": "横屏" in t,
+            "squarish": False,
+            "tags": ["CSGO", "激励计划"] if "多话题" in t else [],
+            "platform": [],
+            "bad_read": False,
+        }
+
+    def fake_sharp(path, ff):
+        sharp_calls.append(path)
+        return {"hits": [{"t": 1.0, "score": 5.0}]}
+
+    def fake_audio(path, ff, has_audio=None, dur=None):
+        return {"hits": [{"kind": "none"}]} if has_audio is False else {"hits": []}
+
+    def fake_to_vert(path, ff, stop=None, keep_orig=False):
+        vert_log.append(os.path.basename(path))
+        return path, ""
+
+    def fake_verify(_cl, r_db, nick, day):
+        rows = [r for r in r_db.rows(account=nick) if r["status"] == "已发" and r["title"] == "漏发要补"]
+        miss = [dict(rows[0], why="企鹅号上是「发布失败」—— 没发上", sure=True)] if rows else []
+        return {"nick": nick, "ours": len(rows), "live": 2, "ok": 2, "review": 0, "missing": miss, "extra": []}
+
+    def fake_scan_black(acc, s, e, **_k):
+        return ([{"nick": acc["nick"], "title": "略模糊但关了检查", "time": f"{s} 10:00:00", "kind": "黑封面", "aid": "B1"}], 0)
+
+    def fake_export_cov(items, _st, **_k):
+        exported_cov.extend(items)
+        return len(items)
+
+    deps = {
+        "today_fn": lambda: "2026-11-27",
+        "api_accounts_fn": lambda: accs,
+        "accounts_fn": lambda: [(a, False) for a in accs],
+        "make_client": lambda _a: FakeClient(),
+        "check_one_fn": fake_check_one,
+        "sharp_check_fn": fake_sharp,
+        "audio_check_fn": fake_audio,
+        "to_vertical_fn": fake_to_vert,
+        "topic_pick_fn": lambda body, tags: tags[0],
+        "check_account_fn": fake_verify,
+        "scan_one_fn": fake_scan_black,
+        "export_covers_fn": fake_export_cov,
+        "api_interval": 0,
+    }
+
+    # 1. prepare 只读预演
+    prep = AP.prepare(st, rec, deps=deps)
+    check(prep["can_start"] and prep["ready_count"] == 1 and prep["total_estimated"] == 5,
+          f"prepare 准确识别 1 个就绪号(5条) -> {prep['ready_count']}/{prep['total_estimated']}")
+    check(prep["missing_accounts"] == ["DNF连招档案馆"] and [x["account"] for x in prep["done_accounts"]] == ["PUBG突围君"],
+          f"准确分出无今日夹(DNF)和今日已发满(PUBG) -> {prep['missing_accounts']} / {prep['done_accounts']}")
+    check("视频模糊" in prep["checks"]["disabled"] and "无声音检查" in prep["checks"]["enabled"] and "超过10分钟" in prep["checks"]["enabled"],
+          f"确认卡片反映设置里勾选的检查项 -> {prep['checks']}")
+
+    # 2. run 全链路执行
+    rep = AP.run(st, rec, deps=deps)
+    check(not sharp_calls, f"关掉视频模糊检查后彻底不调用 sharp_check -> {sharp_calls}")
+    check(rep["converted_count"] == 1 and len(vert_log) == 1, f"横屏自动转竖屏 1 条 -> {vert_log}")
+    check(rep["renamed_count"] == 1 and "横屏多话题 #CSGO" in sent_log, f"多话题自动整理成单话题并发布 -> {sent_log}")
+    check("略模糊但关了检查" in sent_log, "未勾选模糊检查的略模糊片正常放行发布")
+    check(rep["published_count"] == 3 and rep["retried_count"] == 1,
+          f"首轮发 3 条 + 查出漏发自动拎回补发 1 轮(1 条) -> pub={rep['published_count']}, ret={rep['retried_count']}")
+    skip_titles = {x["title"] for x in rep["skipped_items"]}
+    check(skip_titles == {"无声视频", "超长视频"}, f"勾选开启的无声与超10分钟被拦入待拍板清单 -> {rep['skipped_items']}")
+    check(len(rep["black_covers"]) == 1 and rep["exported_covers_count"] == 1 and len(exported_cov) == 1,
+          f"发后自动扫描黑封面并导出清晰图 -> {rep['black_covers']} / {rep['exported_covers_count']}")
+    # 混着 2 条被拦视频，所以日期夹里应保留这 2 条未发视频不误删
+    check(f_mute.is_file() and f_long.is_file(), "被拦下的未发视频完整保留在原目录")
+
+    # 3. 界面集成：确认卡片 + 取消同步 + 战报卡片双入口渲染
+    w = W.MainWindow(st, rec)
+    w.ai_hub.agent.deps.update(deps)
+    w.ai_hub.quick("autopilot", "🚀 今日全自动")
+    _wait(app, lambda: not w.ai_hub.is_busy() and len(w.ai_hub.messages) >= 2)
+    b_page = w.ai_page._bubbles[-1]
+    b_draw = w.ai_drawer._bubbles[-1]
+    check(isinstance(b_page.card_widget, _AutopilotConfirmCard) and isinstance(b_draw.card_widget, _AutopilotConfirmCard),
+          "左侧全屏页与右侧抽屉均渲染出全自动确认卡片")
+    w.ai_hub.cancel_card(b_page.msg["card"])
+    check(b_page.card_widget.lab_state.text() == "已取消" and b_draw.card_widget.lab_state.text() == "已取消",
+          "取消卡片状态在全屏页与抽屉同步更新")
+
+    # 验证战报卡片渲染
+    w.ai_hub._append("assistant", rep["summary"], [], card={"kind": "autopilot_report", "report": rep})
+    check(isinstance(w.ai_page._bubbles[-1].card_widget, _AutopilotReportCard)
+          and isinstance(w.ai_drawer._bubbles[-1].card_widget, _AutopilotReportCard),
+          "全屏页与右侧抽屉均正确渲染最终战报卡片")
+    w.close()
+    apiacc.save([])
+
+
+def test_folder_intent_and_watch(tmp: Path):
+    print("[文件夹备注理解(规则+AI缓存) + 落稳30秒 + 数量等2轮 + 无日期发现 + 全天值守 + 仅密钥失效红点 + 中途指挥]")
+    import time
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    import gui.window as W
+    from qe import apiacc, assistant as A, autopilot as AP, folder_intent as FI
+    from qe.config import Settings
+    from qe.omapi import ApiError
+    from qe.records import Records
+
+    # 1. 规则层 + AI 兜底 + 缓存
+    r1 = FI.interpret_folder("11.27未改比例")
+    check(r1["action"] == "ready" and r1["needs_vertical_hint"] and r1["source"] == "rule", f"未改比例 -> ready: {r1}")
+    r2 = FI.interpret_folder("11.27（正在处理）")
+    check(r2["action"] == "wait" and r2["source"] == "rule", f"正在处理 -> wait: {r2}")
+    r3 = FI.interpret_folder("11.27(15)")
+    check(r3["action"] == "ready" and r3["expected_count"] == 15 and r3["source"] == "rule", f"(15) -> ready/15: {r3}")
+    r4 = FI.interpret_folder("11.27不能用")
+    check(r4["action"] == "ignore" and r4["source"] == "rule", f"不能用 -> ignore: {r4}")
+
+    ai_calls = []
+    def fake_remark_ai(fname, rem):
+        ai_calls.append(rem)
+        return {"action": "wait", "reason": "等老板过目后再发"}
+    r5 = FI.interpret_folder("11.27（等老板点头）", ask_fn=fake_remark_ai)
+    r5b = FI.interpret_folder("11.27（等老板点头）", ask_fn=fake_remark_ai)
+    check(r5["action"] == "wait" and r5["source"] == "ai" and r5b["source"] == "cache" and len(ai_calls) == 1,
+          f"新备注问一次 AI 后命中本地缓存不重复问 -> {r5} / {r5b} / calls={ai_calls}")
+    # 无 Key / AI 失败 -> 保守 wait
+    r6 = FI.interpret_folder("11.27（奇怪备注XYZ）", ask_fn=lambda f, r: (_ for _ in ()).throw(RuntimeError("net")))
+    check(r6["action"] == "wait" and r6["source"] == "fallback", f"AI 失败保守判 wait -> {r6}")
+
+    # 2. 文件落稳检测（30 秒 + .part 临时文件）
+    d_st = tmp / "stab"
+    d_st.mkdir()
+    vf = d_st / "新片.mp4"
+    vf.write_bytes(b"abc")
+    now_t = time.time()
+    os.utime(vf, (now_t - 5, now_t - 5))
+    check(not FI.check_folder_stability(str(d_st), min_age_sec=30.0, now=now_t)["stable"], "5秒前刚写入 -> 未落稳")
+    os.utime(vf, (now_t - 45, now_t - 45))
+    check(FI.check_folder_stability(str(d_st), min_age_sec=30.0, now=now_t)["stable"], "45秒前写入 -> 已落稳")
+    (d_st / "另一条.mp4.part").write_bytes(b"p")
+    check(not FI.check_folder_stability(str(d_st), min_age_sec=30.0, now=now_t)["stable"], "含 .part 下载临时文件 -> 未落稳")
+    (d_st / "另一条.mp4.part").unlink()
+
+    # 3. 全天值守完整场景
+    groot = tmp / "wt_root" / "游戏视频"
+    csgo_root = groot / "CSGO--CSGO战神君"
+    # 3a) 正在处理文件夹 -> 先不动
+    d_wait = csgo_root / "11.27（正在处理）"
+    d_wait.mkdir(parents=True)
+    (d_wait / "处理中视频.mp4").write_bytes(b"w")
+    os.utime(d_wait / "处理中视频.mp4", (now_t - 120, now_t - 120))
+    # 3b) 标明 (3) 但目前只有 2 条 -> 第 1、2 轮等，第 3 轮(连续 2 次不涨)先发并记提醒
+    d_cnt = csgo_root / "11.27(3)"
+    d_cnt.mkdir(parents=True)
+    for nm in ("数量片1.mp4", "数量片2.mp4"):
+        p = d_cnt / nm
+        p.write_bytes(b"v")
+        os.utime(p, (now_t - 120, now_t - 120))
+    # 3c) 无日期夹「周末存货」今天刚有新片 -> 不擅自发，只提示一键加入按钮
+    d_und = csgo_root / "周末存货"
+    d_und.mkdir(parents=True)
+    p_und = d_und / "存货新片.mp4"
+    p_und.write_bytes(b"u")
+    os.utime(p_und, (now_t - 120, now_t - 120))
+
+    # 3d) 另一账号模拟密钥失效 -> 触发 key_errors 强提醒
+    pubg_d = groot / "PUBG--PUBG突围君" / "11.27"
+    pubg_d.mkdir(parents=True)
+    p_badk = pubg_d / "吃鸡钥匙坏了.mp4"
+    p_badk.write_bytes(b"k")
+    os.utime(p_badk, (now_t - 120, now_t - 120))
+
+    accs = [
+        {"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c1", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "c2", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+    ]
+    apiacc.save(accs)
+    st = Settings(tmp / "st_wt.json")
+    st["api_roots"] = [str(groot)]
+    st["api_archive"] = str(tmp / "wt_arc" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    for k in ("sharp_check", "crop_check", "outro_check", "audio_check", "long_check", "game_ai_check"):
+        st[k] = False
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 10, "PUBG突围君": 10}}]
+    rec = Records(tmp / "rec_wt.sqlite")
+
+    sent_titles = []
+
+    class FakeOk:
+        def send(self, path, title, cat, before_publish=None, **_k):
+            if before_publish:
+                before_publish("V_" + title)
+            sent_titles.append(title)
+            return {"article_id": "A_" + title, "vid": "V_" + title, "status": "成功"}
+
+    class FakeBadKey:
+        def send(self, *a, **k):
+            e = ApiError("token invalid")
+            e.fatal = True
+            raise e
+
+    now_hm_box = ["10:00"]
+    today_s = FI.time.strftime("%Y-%m-%d", FI.time.localtime(now_t))
+    today_md = f"{int(today_s[5:7])}.{int(today_s[8:10])}"
+    # 把日期文件夹重命名成真正的 today_md，让 datetime.fromtimestamp(mtime, BJ) 对齐 day_iso
+    d_wait2 = csgo_root / f"{today_md}（正在处理）"
+    d_cnt2 = csgo_root / f"{today_md}(3)"
+    pubg_d2 = groot / "PUBG--PUBG突围君" / today_md
+    os.rename(d_wait, d_wait2)
+    os.rename(d_cnt, d_cnt2)
+    os.rename(pubg_d, pubg_d2)
+
+    deps = {
+        "today_fn": lambda: today_s,
+        "now_ts": now_t,
+        "now_hm_fn": lambda: now_hm_box[0],
+        "api_accounts_fn": lambda: accs,
+        "accounts_fn": lambda: [(a, False) for a in accs],
+        "make_client": lambda a: FakeBadKey() if a["nick"] == "PUBG突围君" else FakeOk(),
+        "check_one_fn": lambda v, words=None, ff="": {"w": 1080, "h": 1920, "dur": 30.0, "has_audio": True, "landscape": False, "tags": [], "platform": [], "bad_read": False},
+        "check_account_fn": lambda cl, r_db, nick, d: {"nick": nick, "ours": 0, "live": 0, "ok": 0, "review": 0, "missing": [], "extra": []},
+        "scan_one_fn": lambda acc, s, e, **_k: ([], 0),
+        "api_interval": 0,
+    }
+
+    agent = A.AssistantAgent(st, rec, deps=deps)
+    # 启动全天值守（第 1 轮）：CSGO 的「正在处理」和「(3)目前2条」都等待，周末存货被发现但不擅自发，PUBG 报密钥失效
+    r_start = agent.execute_action({
+        "kind": "run_autopilot",
+        "payload": {"day": today_s, "watch": True, "interval_min": 10, "cutoff_hm": "22:30"},
+    })
+    check(agent.watch is not None and agent.watch.active, "全天值守已启动")
+    check("处理中视频" not in sent_titles and "数量片1" not in sent_titles and "存货新片" not in sent_titles,
+          f"正在处理 / 数量未凑齐 / 无日期存货 均未擅自发布 -> {sent_titles}")
+    check(any(e["account"] == "PUBG突围君" for e in (r_start.get("key_errors") or [])),
+          f"检测到 PUBG 密钥失效并上报强提醒 -> {r_start.get('key_errors')}")
+    check(any(a["kind"] == "add_watch_folder" and "周末存货" in a["label"] for a in (r_start.get("actions") or [])),
+          f"发现无日期文件夹「周末存货」并附带一键加入按钮 -> {r_start.get('actions')}")
+
+    # 中途一句话指挥：跳过 PUBG、改巡检为 5 分钟、把周末存货加入值守
+    check(agent.tool_manage_watch("skip_account", account="PUBG")["ok"], "中途指令跳过 PUBG")
+    check(agent.tool_manage_watch("set_interval", interval_min=5)["ok"] and agent.watch.interval_min == 5, "中途改巡检间隔为 5 分钟")
+    check(agent.tool_manage_watch("add_folder", account="CSGO", folder="周末存货")["ok"], "中途把无日期「周末存货」加入今天值守")
+
+    # 第 2 轮巡检：「周末存货」里的存货新片被发布；「(3)」第 1 次停滞仍在等；「正在处理」仍在等
+    tk2 = agent.run_watch_tick_result()
+    check("存货新片" in sent_titles and "数量片1" not in sent_titles and "处理中视频" not in sent_titles,
+          f"第 2 轮仅发布刚加入的存货新片，(3)与正在处理继续等 -> {sent_titles}")
+
+    # 第 3 轮巡检：「(3)」连续 2 次巡检数量未涨 -> 先行发布 2 条并带数量提示；且同事把「正在处理」删备注改名后立刻接手！
+    os.rename(d_wait2, csgo_root / f"{today_md}第二批")
+    tk3 = agent.run_watch_tick_result()
+    check({"数量片1", "数量片2", "处理中视频"}.issubset(set(sent_titles)),
+          f"第 3 轮数量等待超时先行发布 + 删掉「正在处理」后立刻自动接手 -> {sent_titles}")
+    check(any("标 3 条实际 2 条" in n for n in (tk3.get("card", {}).get("report", {}).get("count_notes") or [])),
+          f"战报里附带「标 3 条实际 2 条」提示 -> {tk3.get('card', {}).get('report', {}).get('count_notes')}")
+
+    # 空轮次安静不刷屏
+    tk4 = agent.run_watch_tick_result()
+    check(tk4.get("quiet") is True and tk4.get("reply") == "", f"没新片时静默不发废话气泡 -> {tk4}")
+
+    # 到 22:30 自动收工
+    now_hm_box[0] = "22:30"
+    tk5 = agent.run_watch_tick_result()
+    check(not agent.watch.active and "自动收工" in tk5["reply"], f"到 22:30 自动收工 -> {tk5['reply']}")
+
+    # 留痕日志落盘与过滤验证（每一步可追溯 + 只看异常 + AI 读取 + 弹窗打开）
+    from qe import aplog
+    from gui.assistant_panel import AutopilotLogDialog
+    full_log = agent.tool_read_autopilot_log(day=today_s)
+    err_log = agent.tool_read_autopilot_log(day=today_s, errors_only=True)
+    check(full_log["total_lines"] >= 8 and "值守启动" in full_log["text"] and "发布成功" in full_log["text"]
+          and "中途指挥" in full_log["text"] and "值守收工" in full_log["text"],
+          f"全自动全流程每一步均落盘留痕 -> {full_log['total_lines']} 行")
+    check(err_log["matched_lines"] >= 1 and "密钥失效" in err_log["text"] and "值守启动" not in err_log["text"],
+          f"只看异常/失败/跳过精准过滤出密钥失效等异常 -> {err_log['lines'][:3]}")
+    dlg_log = AutopilotLogDialog(day_iso=today_s)
+    check(dlg_log.ed_log.toPlainText().strip() != "" and today_s in dlg_log.c_day.currentText(), "留痕日志查看窗口正常加载")
+    dlg_log.k_err.setChecked(True)
+    check("密钥失效" in dlg_log.ed_log.toPlainText(), "弹窗勾选「只看异常」实时生效")
+    dlg_log.close()
+
+    # UI 密钥失效红点测试
+    w = W.MainWindow(st, rec)
+    w._on_ai_key_alert("PUBG 密钥失效")
+    check(w.nav.badges[5].text() == "!" and not w.nav.badges[5].isHidden(), "密钥失效亮左侧 AI 助手红点「!」")
+    w.goto("ai")
+    check(w.nav.badges[5].isHidden(), "点进 AI 助手页后红点自动清除")
+    _wait(app, lambda: not w.api_tab.busy(), 5)
+    w.close()
+    apiacc.save([])
+
+
+def test_autopilot_fixes_and_live(tmp: Path):
+    print("[全自动回归: 真实check_one参数顺序 + 横屏转竖屏 + 自动剪头像片尾抽检组 + 实时动态卡 + 弹窗实时刷新]")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    import gui.window as W
+    from gui.assistant_panel import AutopilotLogDialog, _AutopilotReportCard
+    from qe import apiacc, aplog, autopilot as AP, checks, outrocheck, vertical
+    from qe.config import Settings
+    from qe.records import Records
+
+    # 1. outrocheck PROMPT 严格口径：覆盖头像片尾(居中/角落/无红勾点我关注) + 剪映/抖音/快手等平台片尾 + 二维码，纯文字放行
+    check("头像" in outrocheck.PROMPT and "点我关注" in outrocheck.PROMPT and "右上角" in outrocheck.PROMPT
+          and "剪映" in outrocheck.PROMPT and "记录美好生活" in outrocheck.PROMPT
+          and "只有文字或账号名字" in outrocheck.PROMPT and "found=false" in outrocheck.PROMPT,
+          "outrocheck.PROMPT 已覆盖头像片尾(居中/角落/点我关注)与剪映/抖音/快手等标准片尾，且纯文字不误杀")
+
+    # 2. 真实 checks.check_one 回归（传入含「手/助/f/g/2」的 ffmpeg 路径，绝不能被当成平台词误拦）
+    groot = tmp / "fix_root" / "游戏视频"
+    csgo_d = groot / "CSGO--CSGO战神君" / "11.27"
+    csgo_d.mkdir(parents=True)
+    f_land = csgo_d / "让我们为中国大陆赛区加油助威！2026CFS世界总决赛SSG.mp4"
+    f_outro = csgo_d / "带头像片尾 #CSGO #多余话题.mp4"
+    f_land.write_bytes(b"land-video")
+    f_outro.write_bytes(b"outro-video")
+    shot_p = tmp / "outro_shot.jpg"
+    shot_p.write_bytes(b"fake-jpg")
+
+    accs = [
+        {"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "c1", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+    ]
+    apiacc.save(accs)
+    st = Settings(tmp / "st_fix.json")
+    st["api_roots"] = [str(groot)]
+    st["api_archive"] = str(tmp / "fix_arc" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    st["sharp_check"] = False
+    st["crop_check"] = False
+    st["outro_check"] = True
+    st["audio_check"] = False
+    st["long_check"] = False
+    st["game_ai_check"] = False
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏总发布量", "accounts": {"CSGO战神君": 10}}]
+    rec = Records(tmp / "rec_fix.sqlite")
+
+    sent_titles = []
+    vert_called = []
+    cut_called = []
+
+    class FakeClient:
+        def send(self, path, title, cat, before_publish=None, **_k):
+            if before_publish:
+                before_publish("VID_" + title)
+            sent_titles.append(title)
+            return {"article_id": "AID_" + title, "vid": "VID_" + title, "status": "成功"}
+
+    orig_probe = vertical.probe
+    def fake_probe(path, ff=""):
+        if "赛区加油助威" in str(path):
+            return {"w": 1280, "h": 720, "dur": 45.0, "has_audio": True}
+        return {"w": 1080, "h": 1920, "dur": 28.0, "has_audio": True}
+
+    def fake_to_vert(path, ff, stop=None, keep_orig=False):
+        vert_called.append(os.path.basename(path))
+        return path, ""
+
+    def fake_outro_check(path, cfg, ff="", **_k):
+        if "带头像片尾" in str(path):
+            return {"hits": [{"start": 25.0, "end": 28.0, "kind": "头像片尾卡片", "reason": "居中圆形头像片尾卡片"}], "shot": str(shot_p)}
+        return {"hits": []}
+
+    def fake_outro_cut(path, start, ff="", stop=None, **_k):
+        cut_called.append((os.path.basename(path), float(start)))
+        return path, "", 3.0
+
+    vertical.probe = fake_probe
+    try:
+        deps = {
+            "today_fn": lambda: "2026-11-27",
+            "api_accounts_fn": lambda: accs,
+            "accounts_fn": lambda: [(a, False) for a in accs],
+            "make_client": lambda _a: FakeClient(),
+            "ffmpeg_path": r"E:\软件\百家号发布软件\企鹅号发布助手\ffmpeg.exe",
+            "check_one_fn": checks.check_one,   # 真实 check_one！
+            "to_vertical_fn": fake_to_vert,
+            "outro_check_fn": fake_outro_check,
+            "outro_cut_fn": fake_outro_cut,
+            "topic_pick_fn": lambda body, tags: tags[0],
+            "check_account_fn": lambda cl, r_db, nick, d: {"nick": nick, "ours": 2, "live": 2, "ok": 2, "review": 0, "missing": [], "extra": []},
+            "scan_one_fn": lambda acc, s, e, **_k: ([], 0),
+            "api_interval": 0,
+        }
+        rep = AP.run(st, rec, deps=deps)
+    finally:
+        vertical.probe = orig_probe
+
+    check(rep["skipped_count"] == 0 and rep["published_count"] == 2,
+          f"真实 check_one 不误杀含助/2/f/g的标题，且头像片尾自动剪掉后正常发布 -> pub={rep['published_count']}, skip={rep['skipped_items']}")
+    check(rep["converted_count"] == 1 and len(vert_called) == 1,
+          f"横屏视频成功进入阶段③转竖屏 -> {vert_called}")
+    check(rep["outro_cut_count"] == 1 and len(cut_called) == 1 and abs(cut_called[0][1] - 25.0) < 0.01,
+          f"头像片尾卡片自动从 25.0s 剪掉并发布 -> {cut_called}")
+    oc_items = rep.get("outro_cut_items") or []
+    check(len(oc_items) == 1 and oc_items[0]["title"] == "带头像片尾 #CSGO" and abs(oc_items[0]["cut_sec"] - 3.0) < 0.01,
+          f"战报记录自动剪片尾条目（含改名后最终标题与剪掉秒数） -> {oc_items}")
+
+    # 3. 战报卡片渲染「自动剪过头像片尾」抽检卡片组 + 按钮回调
+    clicked_acts = []
+    rc = _AutopilotReportCard({"kind": "autopilot_report", "report": rep}, compact=False, on_action=clicked_acts.append)
+    check(rc.outro_group is not None and len(rc._outro_cards) == 1 and len(rc._outro_btns) == 1,
+          "战报卡片正确渲染「自动剪过头像片尾」抽检卡片组与「去罐头定位」按钮")
+    rc._outro_btns[0].click()
+    check(len(clicked_acts) == 1 and clicked_acts[0]["kind"] == "open_czgt"
+          and clicked_acts[0]["payload"]["title"] == "带头像片尾 #CSGO",
+          f"点「去罐头定位」携带正确账号与最终标题 -> {clicked_acts}")
+
+    # 4. 实时动态卡片（全屏页 + 右侧抽屉同步）与留痕弹窗实时刷新
+    w = W.MainWindow(st, rec)
+    w.ai_hub._live_active = True
+    w.ai_hub._live_stage = 1
+    w.ai_hub._live_headline = "正在启动全自动"
+    w.ai_hub._live_lines = []
+    aplog.add_listener(w.ai_hub._aplog_listener)
+    w.ai_hub.live_changed.emit(w.ai_hub.live_info())
+    app.processEvents()
+    check(not w.ai_page.live_card.isHidden() and not w.ai_drawer.live_card.isHidden(),
+          "启动全自动时全屏页与右侧抽屉同时展开实时动态卡片")
+    aplog.write("③转竖屏", "开始转竖屏：《实时测试横屏》", level="INFO", account="CSGO战神君", day_iso="2026-11-27")
+    app.processEvents()
+    check(w.ai_page.live_card._stage == 3 and "实时测试横屏" in w.ai_page.live_card.lab_feed.text()
+          and "实时测试横屏" in w.ai_drawer.live_card.lab_feed.text(),
+          f"aplog 实时推送驱动动态卡片高亮第③步并显示正在转的视频 -> {w.ai_page.live_card.lab_feed.text()}")
+    aplog.remove_listener(w.ai_hub._aplog_listener)
+    w.ai_hub._live_active = False
+    w.ai_hub.live_changed.emit(w.ai_hub.live_info())
+    app.processEvents()
+    check(w.ai_page.live_card.isHidden() and w.ai_drawer.live_card.isHidden(),
+          "任务结束后实时动态卡片自动收起")
+
+    dlg = AutopilotLogDialog(day_iso="2026-11-27")
+    check(dlg.k_live.isChecked() and dlg._live_timer.isActive(), "留痕弹窗默认开启实时刷新定时器")
+    aplog.write("④发布", "发布成功：《弹窗新日志测试》", level="OK", account="CSGO战神君", day_iso="2026-11-27")
+    dlg.reload(force=False)
+    check("弹窗新日志测试" in dlg.ed_log.toPlainText(), "留痕弹窗实时刷新自动拉取新写入的日志行")
+    dlg.close()
+
+    _wait(app, lambda: not w.api_tab.busy(), 5)
+    w.close()
+    apiacc.save([])
 
 
 if __name__ == "__main__":
@@ -8407,6 +9086,10 @@ if __name__ == "__main__":
     test_long_check_and_toggles(tmp)
     test_quick_import_and_drop(tmp)
     test_ai_assistant(tmp)
+    test_old_folders_and_no_leftovers(tmp)
+    test_autopilot(tmp)
+    test_folder_intent_and_watch(tmp)
+    test_autopilot_fixes_and_live(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

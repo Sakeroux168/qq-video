@@ -15,22 +15,46 @@ MAX_BYTES = 20 * 1024 * 1024
 
 
 def find(video_path: str) -> str:
-    """视频旁边同名的封面图;没有给 ""。jpg 优先,其次 png / webp(大小写都认)。"""
+    """视频旁边同名的封面图;没有给 ""。jpg 优先,其次 png / webp(大小写都认;先精准匹配,再忽略末尾空格)。"""
     d, base = os.path.split(video_path)
     stem = os.path.splitext(base)[0]
     try:
         names = os.listdir(d or ".")
     except OSError:
         return ""
-    got = {}
+    exact, stripped = {}, {}
     for n in names:
         s, e = os.path.splitext(n)
-        if s == stem and e.lower() in IMG_EXT:
-            got.setdefault(e.lower(), n)
-    for e in IMG_EXT:
-        if e in got:
-            return os.path.join(d, got[e])
+        el = e.lower()
+        if el not in IMG_EXT:
+            continue
+        if s == stem:
+            exact.setdefault(el, n)
+        elif s.strip() == stem.strip():
+            stripped.setdefault(el, n)
+    for bucket in (exact, stripped):
+        for e in IMG_EXT:
+            if e in bucket:
+                return os.path.join(d, bucket[e])
     return ""
+
+
+def find_all(video_path: str) -> list[str]:
+    """视频旁边所有同名封面图(含末尾空格差异、多后缀如同时有 .jpg 和 .png),发完一并挪走不留残余。"""
+    d, base = os.path.split(video_path)
+    stem = os.path.splitext(base)[0].strip()
+    if not stem:
+        return []
+    try:
+        names = os.listdir(d or ".")
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        s, e = os.path.splitext(n)
+        if e.lower() in IMG_EXT and s.strip() == stem and os.path.isfile(os.path.join(d or ".", n)):
+            out.append(os.path.join(d or ".", n))
+    return out
 
 
 def crop_box(w: int, h: int, ratio) -> tuple[int, int, int, int]:

@@ -24,6 +24,24 @@ VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".flv", ".wmv")
 DEFAULT_ROOTS = [r"X:\知乎视频\游戏视频", r"X:\知乎视频\动漫视频"]
 DEFAULT_ARCHIVE = r"X:\知乎视频\内容查看\{month}月发布视频\企鹅号\企鹅号软件发布"
 
+JUNK_FILES = frozenset({"thumbs.db", "desktop.ini", ".ds_store"})
+JUNK_DIR_NAMES = frozenset({".meowload", "__pycache__", "@eadir", ".trash", ".tmp"})
+BACKUP_DIR_NAMES = frozenset({"横屏原片", "结尾原片", "水印原片", "广告原片", "重复删除"})
+
+
+def is_junk_file(name: str) -> bool:
+    """系统缓存 / 下载器临时文件(发完直接删,不挪进归档也不拦删目录)。"""
+    low = (name or "").lower()
+    return low in JUNK_FILES or low.startswith("._") or low.endswith((".tmp", ".part", ".crdownload"))
+
+
+def is_removable_subdir(name: str) -> bool:
+    """发空日期文件夹后可随手删掉的附属子目录:软件建的各类原片备份夹 + 点开头的隐藏缓存夹(如 .meowload)。"""
+    n = (name or "").strip()
+    if not n:
+        return False
+    return n in BACKUP_DIR_NAMES or n.lower() in JUNK_DIR_NAMES or n.startswith(".")
+
 
 @dataclass
 class ApiVideo:
@@ -171,16 +189,16 @@ def game_folder(acc: dict) -> str:
 
 
 def move_published(path: str, dest_dir: str) -> str:
-    """发完把视频挪到「X月发布视频 / 企鹅号 / 企鹅号软件发布 / 日期 / 游戏名」,同名封面跟着挪(用户 2026-10-17:「视频和封面」)。
+    """发完把视频挪到「X月发布视频 / 企鹅号 / 企鹅号软件发布 / 日期 / 游戏名」,所有同名封面跟着挪(含末尾空格差异)。
     重名加 (2)(封面跟视频用同一个新名字)。返回视频的新位置。
     走 fsops.safe_move_file:被占着就报错留在原处,不会原处和归档各一份;封面挪不动不算失败(视频已经挪了)。"""
-    from .apicover import find
+    from .apicover import find_all
     from .fsops import safe_move_file, unique
     os.makedirs(dest_dir, exist_ok=True)
-    cover = find(path)
+    covers = find_all(path)
     new = safe_move_file(path, unique(os.path.join(dest_dir, os.path.basename(path))))
-    if cover:
-        stem = os.path.splitext(os.path.basename(new))[0]
+    stem = os.path.splitext(os.path.basename(new))[0]
+    for cover in covers:
         try:
             safe_move_file(cover, unique(os.path.join(dest_dir, stem + os.path.splitext(cover)[1])))
         except Exception:

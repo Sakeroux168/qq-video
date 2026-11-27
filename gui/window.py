@@ -841,6 +841,7 @@ class MainWindow(QMainWindow):
         from gui.assistant_panel import AssistantHub, AssistantView
         self.ai_hub = AssistantHub(self.st, self.rec, owner=self)
         self.ai_hub.data_changed.connect(self._on_ai_data_changed)
+        self.ai_hub.key_alert.connect(self._on_ai_key_alert)
         self.ai_page = AssistantView(self.ai_hub, compact=False, parent=self)
         self.ai_drawer = AssistantView(self.ai_hub, compact=True, on_close=lambda: self.toggle_ai_drawer(False), parent=self)
         self.pages = {"today": self.today, "edu": w, "api": self.api_tab, "daily": self.daily, "records": r, "ai": self.ai_page}
@@ -857,6 +858,11 @@ class MainWindow(QMainWindow):
         self.api_tab._update_sum()
         self._black_cards(blackcover.load(self._black_day()))
 
+    def _on_ai_key_alert(self, _msg: str):
+        """只有「账号密钥失效」这种硬故障才亮左侧「AI 助手」导航红点提醒用户。"""
+        from gui.widgets import set_badge
+        set_badge(self.nav, 5, "!")
+
     def toggle_ai_drawer(self, show: bool | None = None):
         """展开 / 收起右侧 AI 助手抽屉；如果当前正停在全屏 AI 助手页，则自动收起抽屉避免重复。"""
         if show is None:
@@ -864,6 +870,9 @@ class MainWindow(QMainWindow):
         if show and self.stack.currentWidget() is self.ai_page:
             show = False
         self.ai_drawer.setVisible(bool(show))
+        if show:
+            from gui.widgets import set_badge
+            set_badge(self.nav, 5, "")
         btn = getattr(self.nav, "drawer_btn", None)
         if btn is not None:
             btn.blockSignals(True)
@@ -889,8 +898,11 @@ class MainWindow(QMainWindow):
     def _page_changed(self, _i: int):
         from gui.widgets import fade_in
         p = self.stack.currentWidget()
-        if p is self.ai_page and hasattr(self, "ai_drawer") and not self.ai_drawer.isHidden():
-            self.toggle_ai_drawer(False)
+        if p is self.ai_page:
+            from gui.widgets import set_badge
+            set_badge(self.nav, 5, "")
+            if hasattr(self, "ai_drawer") and not self.ai_drawer.isHidden():
+                self.toggle_ai_drawer(False)
         if p is self.daily:
             self.daily.refresh()
         elif p is self.pages.get("records"):
@@ -3999,22 +4011,28 @@ class MainWindow(QMainWindow):
             dlg.close()
         rs = self.api_tab.running_jobs() if getattr(self, "api_tab", None) and hasattr(self.api_tab, "running_jobs") else (
             [self.api_tab.job] if getattr(getattr(self, "api_tab", None), "job", None) and self.api_tab.job.isRunning() else [])
-        if rs:
+        loud_rs = [j for j in rs if not getattr(j, "quiet", False)]
+        if loud_rs:
             if QMessageBox.question(self, "企鹅号发布助手", "接口那边还在做(发布 / 转竖屏 / 改话题),要停下来关掉吗?") \
                     != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
+        if rs:
             for j in rs:
                 j.stop()
-            from PySide6.QtWidgets import QApplication, QProgressDialog
-            dlg = QProgressDialog("正在停:手上这条做完就关(上传大文件可能要一会儿)…", None, 0, 0, self)
-            dlg.setWindowTitle("请稍等")
-            dlg.setMinimumDuration(0)
-            dlg.setValue(0)
-            dlg.show()
-            while any(not j.wait(200) for j in rs):
-                QApplication.processEvents()
-            dlg.close()
+            if loud_rs:
+                from PySide6.QtWidgets import QApplication, QProgressDialog
+                dlg = QProgressDialog("正在停:手上这条做完就关(上传大文件可能要一会儿)…", None, 0, 0, self)
+                dlg.setWindowTitle("请稍等")
+                dlg.setMinimumDuration(0)
+                dlg.setValue(0)
+                dlg.show()
+                while any(not j.wait(200) for j in rs):
+                    QApplication.processEvents()
+                dlg.close()
+            else:
+                for j in rs:
+                    j.wait(5000)
         if hasattr(self, "ai_hub"):
             self.ai_hub.shutdown()
         lansync.stop()
