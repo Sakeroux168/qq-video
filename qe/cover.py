@@ -329,23 +329,18 @@ def crop_fit(img_w: float, img_h: float, plan: dict):
 
 
 def wide_mode(img_w: float, img_h: float, plan: dict) -> tuple[str, float | None]:
-    """2.35:1 怎么办:
-    "manual" 人手动拖过;"drag" 挪框就躲开标题区;"crop" 切掉一点头顶(办法一);"ai" AI 扩图做专用图(办法三);
-    "none" 没脸,不管标题区。人在预览里点了「AI 扩图」(plan["ai235"])就直接 "ai"。返回 (怎么办, 框上沿 y)。"""
+    """2.35:1 怎么办(用户 2026-11-26 彻底取消 AI 扩图,只走挪框/切头顶):
+    "manual" 人手动拖过;"drag" 挪框就躲开标题区;"crop" 切掉一点头顶;"none" 没脸,不管标题区。返回 (怎么办, 框上沿 y)。"""
     plan = plan or {}
     if plan.get("manual", {}).get(rkey(WIDE)):
         return "manual", None
     if not plan.get("faces"):
         return "none", None
-    if plan.get("ai235"):
-        return "ai", None
     ok, ty = title_fit(img_w, img_h, plan)
     if ok:
         return "drag", ty
-    ok, ty2 = crop_fit(img_w, img_h, plan)
-    if ok or plan.get("no_ai"):                           # 人点了「不用 AI」:切头顶能切多少切多少
-        return "crop", ty2
-    return "ai", None
+    _ok2, ty2 = crop_fit(img_w, img_h, plan)
+    return "crop", ty2
 
 
 def needs_wide(img_w: float, img_h: float, plan: dict) -> bool:

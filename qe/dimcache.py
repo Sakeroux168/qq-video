@@ -50,17 +50,33 @@ def get(path: str):
         return None
     with _LOCK:
         v = _load().get(k)
-    return tuple(v) if v else None
+    return (int(v[0]), int(v[1])) if v and len(v) >= 2 else None
 
 
-def put(path: str, w: int, h: int) -> None:
+def get_dur(path: str) -> float | None:
+    """缓存的视频时长(秒),没存过返回 None。"""
+    try:
+        k = _key(path)
+    except OSError:
+        return None
+    with _LOCK:
+        v = _load().get(k)
+    if v and len(v) >= 3 and v[2] is not None:
+        try:
+            return float(v[2])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def put(path: str, w: int, h: int, dur: float | None = None) -> None:
     try:
         k = _key(path)
     except OSError:
         return
     with _LOCK:
         d = _load()
-        val = [int(w), int(h)]
+        val = [int(w), int(h)] + ([round(float(dur), 2)] if dur is not None else [])
         d[k] = val
         _PENDING[k] = val
         if len(d) > 20000:                                 # 太多了清掉老的一半
@@ -79,8 +95,8 @@ def merge_remote(entries: dict) -> None:
     with _LOCK:
         d = _load()
         for k, v in entries.items():
-            if isinstance(v, (list, tuple)) and len(v) == 2:
-                d[k] = [int(v[0]), int(v[1])]
+            if isinstance(v, (list, tuple)) and len(v) >= 2:
+                d[k] = [int(v[0]), int(v[1])] + ([round(float(v[2]), 2)] if len(v) >= 3 and v[2] is not None else [])
         if len(d) > 20000:
             for x in list(d)[:10000]:
                 d.pop(x, None)

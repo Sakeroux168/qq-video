@@ -73,8 +73,13 @@ DEFAULTS = {
     "api_archive_by_game": True,   # 发完挪走时按游戏分子文件夹(CSGO / DNF …,用户的习惯)         # 每条之间歇几秒(旧软件「间隔 5 秒」)
     "api_picked": {},          # 手动给号选的文件夹:{日期: {号: 文件夹}}(像旧软件的「选择」)
     "topic_model": "qwen-plus",
+    "sharp_check": True,       # 发布前查清晰度(只提醒,不拦发布)
+    "crop_check": True,        # 发布前查字幕被裁
     "outro_check": True,       # 发布前查结尾求关注 / 别人账号 / 二维码
     "audio_check": True,       # 发布前查有没有声音(没音轨 / 整条静音;只提醒,不拦发布)
+    "long_check": True,        # 发布前查超过 10 分钟的视频(标黄先不发,右键放行)
+    "game_ai_check": True,     # 串游戏 AI 判断(标题看不出哪个游戏时问 AI)
+    "ai_cover": False,         # 已取消 AI 看封面(保留键兼容旧配置)
     "bad_cover_auto": True,    # 查出黑封面 / 模糊封面后自动从视频挑一帧清晰封面放进指定文件夹
     "bad_cover_dir": r"E:\图片\企鹅号",
     "theme": "浅色",            # 界面风格(gui/theme.py 里的名字:浅色 / 深色;用户 2026-10-18 选的「G 一键驾驶舱」)

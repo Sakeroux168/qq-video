@@ -201,6 +201,57 @@ class _SayBox:
     warning = information
 
 
+class _DropTree(QTreeWidget):
+    """支持直接把资源管理器里的文件夹拖到某个账号行松手导入(用户 2026-11-26 方向 C)。"""
+    folderDropped = Signal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    @staticmethod
+    def _first_dir(mime) -> str:
+        if not mime or not mime.hasUrls():
+            return ""
+        for u in mime.urls():
+            p = u.toLocalFile()
+            if p and os.path.isdir(p):
+                return os.path.normpath(p)
+        return ""
+
+    def _nick_at(self, pos) -> str:
+        it = self.itemAt(pos)
+        if it is None:
+            return ""
+        if it.data(0, ROW) == -1:
+            return str(it.data(0, NICK) or "")
+        p = it.parent()
+        return str(p.data(0, NICK) or "") if p is not None else ""
+
+    def dragEnterEvent(self, e):
+        if self._first_dir(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        if self._first_dir(e.mimeData()) and self._nick_at(pos):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        d = self._first_dir(e.mimeData())
+        nick = self._nick_at(pos)
+        if d and nick:
+            e.acceptProposedAction()
+            self.folderDropped.emit(nick, d)
+        else:
+            e.ignore()
+
+
 class ApiTab(QWidget):
     _unsure_got = Signal(list)                    # 后台查「结果不明」的回来了:[(记录, 企鹅号上那篇 或 None, 出错原因)]
     AUTO_UNSURE = True                            # 自动去企鹅号查「结果不明」(测试里关掉,免得拿假钥匙去调真接口)
@@ -226,8 +277,9 @@ class ApiTab(QWidget):
         self._blocked: dict[str, int] = {}        # 这天可能整批放错了的号(像别的游戏的条数),人确认前整批不发
         self._dups: dict[int, str] = {}           # 重复的(发过同名的 / 同一天同名的):不发
         self._sent_keys: dict = {}
-        from qe import gamecheck
+        from qe import gamecheck, longcheck
         gamecheck.configure(st)
+        longcheck.configure(st)
         self._build()
         from gui.schedule import Scheduler
         self.sched = Scheduler(self.st, "api", self.say, self._sched_fire, self._sched_changed, self, problem=self._sched_note)
@@ -488,11 +540,13 @@ class ApiTab(QWidget):
         panel.setObjectName("panel")
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(1, 1, 1, 1)
-        self.tree = QTreeWidget()
+        self.tree = _DropTree()
+        self.tree.folderDropped.connect(self._apply_pick)
         self.tree.setColumnCount(len(COLS))
         self.tree.setHeaderLabels(COLS)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setToolTip("点号前面的小三角(或双击号)展开 / 收起;按住 Ctrl / Shift 多选;选中号 = 选中这个号的全部视频。\n"
+                             "点账号后面的「导入 ▾」快速选文件夹,或直接把文件夹拖到对应账号行松手导入。\n"
                              "双击一条视频:打开它所在的文件夹。右键:检查 / 整理标题 / 改标题 / 发布 / 换文件夹。")
         self.tree.itemDoubleClicked.connect(self._double)
         self.tree.itemExpanded.connect(lambda it: self._remember(it, True))
@@ -1540,10 +1594,28 @@ class ApiTab(QWidget):
             if g.childCount():
                 g.setExpanded(nick in self.open_accounts)
                 self._fill_group(nick)
+            self._attach_import_btn(g, nick)
         self.tree.blockSignals(False)
         self._reorder()
         self._apply_filter()
         self._busy(self.busy())
+
+    def _attach_import_btn(self, g: QTreeWidgetItem, nick: str):
+        """在每个账号分组行第 1 列放一个紧凑「导入 ▾」按钮(不挤占标题/状态列)。"""
+        w = QWidget()
+        w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(0)
+        b = QPushButton("导入 ▾")
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setFixedHeight(24)
+        b.setStyleSheet("padding:1px 8px;font-size:12px;")
+        pk = self.picked(self.day()).get(nick) or ""
+        b.setToolTip((f"已手选:{pk}\n" if pk else "") + f"点一下列出「{nick}」目录下的子文件夹快速导入(也支持直接把文件夹拖到这一行)")
+        b.clicked.connect(lambda _c=False, n=nick, btn=b: self._open_import_menu(n, btn))
+        lay.addWidget(b, 0, Qt.AlignmentFlag.AlignCenter)
+        self.tree.setItemWidget(g, 1, w)
 
     def _is_today(self) -> bool:
         return self.day() == f"{bj_now().month}.{bj_now().day}"
@@ -1582,6 +1654,7 @@ class ApiTab(QWidget):
             for g in want:
                 self.tree.addTopLevelItem(g)
                 g.setExpanded(g.data(0, NICK) in opened and not done[g.data(0, NICK)])
+                self._attach_import_btn(g, str(g.data(0, NICK) or ""))
             for i in sel:
                 if i in self.items:
                     self.items[i].setSelected(True)
@@ -1931,19 +2004,100 @@ class ApiTab(QWidget):
         if self.busy(nick):
             QMessageBox.information(self, "给号选文件夹", f"「{nick}」正在后台干活,做完或点「停」以后再换文件夹。")
             return
-        start = self.picked(d).get(nick) or apisrc.account_folders(self.roots(), {nick}).get(nick) or (self.roots() or [""])[0]
+        start = apisrc.account_folders(self.roots(), {nick}).get(nick) or self.picked(d).get(nick) or (self.roots() or [""])[0]
         f = QFileDialog.getExistingDirectory(self, f"{nick}:{d} 要发的视频在哪个文件夹", start)
         if not f:
             return
+        self._apply_pick(nick, f)
+
+    def _apply_pick(self, nick: str, f: str) -> bool:
+        """统一入口:行内菜单、系统选框、拖拽文件夹都走这里(带防串号保护)。"""
+        if self._quiet_only():
+            self._stop_quiet()
+        d = self.day()
+        if not d:
+            QMessageBox.information(self, "给号选文件夹", "先在左上角选是哪天的。")
+            return False
+        if self.busy(nick):
+            QMessageBox.information(self, "给号选文件夹", f"「{nick}」正在后台干活,做完或点「停」以后再换文件夹。")
+            return False
         f = os.path.normpath(f)
         why = self._bad_pick(d, nick, f)
         if why:
             QMessageBox.warning(self, "给号选文件夹", why)
-            return
+            return False
         self._set_pick(d, nick, f)
         n = len(apisrc._videos_in(f, nick, d))
         self.say(f"{d}「{nick}」只发这个文件夹里的 {n} 条:{os.path.basename(f)}")
         self._refresh_accounts({nick})
+        return True
+
+    _SKIP_SUB = ("横屏原片", "水印原片", "广告原片", "结尾原片", "重复删除", "打回视频")
+
+    def _candidate_folders(self, nick: str) -> list[tuple[str, str, int]]:
+        """列出该作者根目录下的可选文件夹:[(显示名, 绝对路径, 视频数)],最新日期与最近修改排前面。"""
+        from gui.widgets import newest_first
+        roots = apisrc.account_folder_list(self.roots(), {nick}).get(nick) or []
+        d = self.day() or ""
+        out: list[tuple[str, str, int]] = []
+        seen: set[str] = set()
+        for r in roots:
+            kr = pkey(r)
+            if kr not in seen:
+                n_root = len(apisrc._videos_in(r, nick, d))
+                if n_root > 0:
+                    seen.add(kr)
+                    out.append((f"本作者根目录 ({os.path.basename(r)})", r, n_root))
+            subs = []
+            for x in apisrc._subdirs(r):
+                if x in self._SKIP_SUB or any(w in x for w in ("已发", "不能用", "脏话", "不行")):
+                    continue
+                full = os.path.join(r, x)
+                kf = pkey(full)
+                if kf in seen:
+                    continue
+                seen.add(kf)
+                subs.append((x, full))
+            dated = [x for x, _ in subs if apisrc.date_key(x)]
+            order_d = {name: idx for idx, name in enumerate(newest_first(dated))}
+            def _key(item):
+                nm, full = item
+                if nm in order_d:
+                    return (0, order_d[nm], 0.0)
+                try:
+                    mt = -os.path.getmtime(full)
+                except OSError:
+                    mt = 0.0
+                return (1, 0, mt)
+            for nm, full in sorted(subs, key=_key)[:16]:
+                out.append((nm, full, len(apisrc._videos_in(full, nick, d))))
+        return out
+
+    def _open_import_menu(self, nick: str, btn: QPushButton):
+        """点账号行「导入 ▾」弹出该作者子文件夹快捷清单(2 下搞定,附「其它目录…」和「恢复自动」)。"""
+        d = self.day()
+        if not d:
+            QMessageBox.information(self, "导入文件夹", "先在左上角选是哪天的。")
+            return
+        if self.busy(nick):
+            QMessageBox.information(self, "导入文件夹", f"「{nick}」正在后台干活,做完或点「停」以后再换文件夹。")
+            return
+        m = QMenu(self)
+        cur = self.picked(d).get(nick) or ""
+        cur_k = pkey(cur) if cur else ""
+        cands = self._candidate_folders(nick)
+        if cands:
+            for label, path, cnt in cands:
+                mark = "✓ " if cur_k and pkey(path) == cur_k else ""
+                m.addAction(f"{mark}{label}  ({cnt} 条)", lambda p=path, n=nick: self._apply_pick(n, p))
+        else:
+            a = m.addAction("(该作者目录下暂无子文件夹)")
+            a.setEnabled(False)
+        m.addSeparator()
+        m.addAction("选择其它文件夹…", lambda n=nick: self.pick_folder(n))
+        if cur:
+            m.addAction("恢复自动识别（取消手选）", lambda n=nick: self.unpick(n))
+        m.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _bad_pick(self, d: str, nick: str, f: str) -> str:
         """这个文件夹不能给这个号:返回原因;能用返回 ""。"""
@@ -2061,6 +2215,14 @@ class ApiTab(QWidget):
                 elif titledate.bad_dates(v0.title):
                     m.addSeparator()
                     m.addAction("标题日期没问题(不是日期 / 就要发),能发", lambda: self.set_title_date_ok(i, True)).setEnabled(not acc_busy)
+                from qe import longcheck
+                dur0 = (v0.checks or {}).get("dur")
+                if longcheck.is_long(dur0):
+                    m.addSeparator()
+                    if longcheck.store().ok(v0.account, v0.title):
+                        m.addAction(f"超10分钟({longcheck.fmt_dur(dur0)}):先不发", lambda: self.set_long_ok(i, False)).setEnabled(not acc_busy)
+                    elif self.st.get("long_check", True):
+                        m.addAction(f"时长没问题({longcheck.fmt_dur(dur0)}),能发", lambda: self.set_long_ok(i, True)).setEnabled(not acc_busy)
             ad = (self.videos[i].checks or {}).get("ads") if i != -1 else None
             if ad and ad.get("hits") and not self._sent(i):
                 m.addSeparator()
@@ -2812,6 +2974,8 @@ class ApiTab(QWidget):
                     quiet=quiet, kind="quiet" if quiet else ("deep" if deep else "check"), accounts=accs)
 
     def _ai_games_vs(self, vs_list, emit, stopped) -> int:
+        if not self.st.get("game_ai_check", True):
+            return 0
         from qe import aiconf, gamecheck
         key = aiconf.text(self.st)                    # 填了「自己的模型」就问它
         if not key.key:
@@ -3183,6 +3347,18 @@ class ApiTab(QWidget):
             titledate.store().set(v.account, v.title, ok)
             self._fill(r)
         self.say(f"{len(rows)} 条标题日期标成" + ("「没问题,能发」" if ok else "「过期了,先不发」"))
+        self._update_sum()
+        self._update_scope()
+
+    def set_long_ok(self, i: int, ok: bool):
+        """超过 10 分钟的视频人确认能发 / 改回先不发;选了好几条就一起标。"""
+        from qe import longcheck
+        rows = [r for r in (self.selected_rows() or [i]) if longcheck.is_long((self.videos[r].checks or {}).get("dur"))] or [i]
+        for r in rows:
+            v = self.videos[r]
+            longcheck.store().set(v.account, v.title, ok)
+            self._fill(r)
+        self.say(f"{len(rows)} 条超长视频标成" + ("「时长没问题,能发」" if ok else "「超10分钟,先不发」"))
         self._update_sum()
         self._update_scope()
 
@@ -4439,7 +4615,7 @@ class ApiTab(QWidget):
                 v.audio = audiocheck.STORE.get(v.path)
                 self._attach_wm(v)
                 changed_rows.append(i)
-        if "gamecheck" in kinds or "titledate" in kinds or "titleclean" in kinds:
+        if "gamecheck" in kinds or "titledate" in kinds or "titleclean" in kinds or "longcheck" in kinds:
             self._refresh_blocked()
             changed_rows = list(range(len(self.videos)))
         for i in changed_rows:

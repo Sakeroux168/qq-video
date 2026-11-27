@@ -14,7 +14,8 @@ GLYPH = {"today": "", "school": "", "game": "", "chart": "", "table"
          "warn": "", "done": "", "check": "", "history": "", "clock": "", "calendar": "",
          "send": "", "settings": "", "refresh": "", "search": "", "down": "", "up": "",
          "right": "", "more": "", "folder": "", "video": "", "rotate": "", "tag": "",
-         "scan": "", "stop": "", "error": "", "help": "", "movie": "", "eye": ""}
+         "scan": "", "stop": "", "error": "", "help": "", "movie": "", "eye": "",
+         "chat": "\ue8bd", "drawer": "\ue700"}
 ICON_FONT = "Segoe MDL2 Assets"
 
 
@@ -637,7 +638,8 @@ class PillDelegate(QStyledItemDelegate):
 
 
 # ---------------- 左边导航 + 右边一页一页换 ----------------
-def shell(pages: list[tuple[str, str, QWidget]], on_settings, version: str = "") -> tuple[QWidget, "QButtonGroup", object]:
+def shell(pages: list[tuple[str, str, QWidget]], on_settings, version: str = "",
+          drawer: QWidget | None = None, on_toggle_drawer=None) -> tuple[QWidget, "QButtonGroup", object]:
     """左边导航 + 右边一页一页换(QStackedWidget)。pages = [(图标名, 名字, 页面)]。
     返回 (整个外壳, 导航按钮组, stack)。group.badges[k] = 那个导航后面的小红点数字(setText;空就藏起来)。"""
     from PySide6.QtWidgets import QStackedWidget
@@ -702,6 +704,18 @@ def shell(pages: list[tuple[str, str, QWidget]], on_settings, version: str = "")
     stack.currentChanged.connect(lambda i: group.button(i).setChecked(True))
     group.button(0).setChecked(True)
     sv.addStretch(1)
+    if on_toggle_drawer is not None:
+        bd = QPushButton("右侧 AI 抽屉")
+        bd.setObjectName("nav")
+        bd.setCheckable(True)
+        bd.setProperty("glyph", "chat")
+        bd.setIcon(glyph_icon("chat", t["mu"], t["acc"], 16))
+        bd.setIconSize(QSize(16, 16))
+        bd.setCursor(Qt.CursorShape.PointingHandCursor)
+        bd.setToolTip("在右侧展开 / 收起 AI 助手抽屉，边看其它页面边让 AI 查后台")
+        bd.clicked.connect(lambda checked: on_toggle_drawer(checked))
+        sv.addWidget(bd)
+        group.drawer_btn = bd
     b = QPushButton("设置")
     b.setObjectName("nav")
     b.setProperty("glyph", "settings")
@@ -720,9 +734,14 @@ def shell(pages: list[tuple[str, str, QWidget]], on_settings, version: str = "")
     h.addWidget(side)
     body = QWidget()
     body.setObjectName("page")
-    bv = QVBoxLayout(body)
-    bv.setContentsMargins(0, 0, 0, 0)
-    bv.addWidget(stack)
+    bh = QHBoxLayout(body)
+    bh.setContentsMargins(0, 0, 0, 0)
+    bh.setSpacing(0)
+    bh.addWidget(stack, 1)
+    if drawer is not None:
+        drawer.setFixedWidth(380)
+        drawer.hide()
+        bh.addWidget(drawer, 0)
     h.addWidget(body, 1)
     return root, group, stack
 

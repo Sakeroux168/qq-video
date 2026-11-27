@@ -240,7 +240,9 @@ class AdOk:
     def __init__(self, path=None):
         self.path = str(path or (data_dir() / "标题广告处理过.json"))
         fn = os.path.basename(self.path)
-        self._kind = "titledate" if "日期" in fn else ("titleclean" if "广告" in fn else "")
+        self._kind = ("titledate" if "日期" in fn else
+                      "longcheck" if "超长" in fn else
+                      "titleclean" if "广告" in fn else "")
         self.reload()
 
     def reload(self):

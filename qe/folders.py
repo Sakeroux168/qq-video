@@ -39,6 +39,7 @@ class Video:
     warn: bool = False         # 要人看一眼(没认出人 / 缺封面)
     wm: dict | None = None     # 查水印的结果(wmstore.get;没查过 None)
     skip: str = ""             # 不摆它的原因(同号同名只发一条 / 0 字节 / 打不开 / 这个号发过同名的);空 = 正常
+    dur: float | None = None   # 视频时长(秒,DimWorker / dimcache 填)
 
 
 def list_dates(root: str) -> list[str]:

@@ -5,9 +5,11 @@
 """
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget)
 
 from qe import cover as C
+
+_SYNC_RATIOS = frozenset({C.rkey(3 / 4), C.rkey(9 / 16), C.rkey(1.0)})
 
 
 class CropCanvas(QWidget):
@@ -223,6 +225,10 @@ class CoverDialog(QDialog):
         note = QLabel("(有的号只用前两个比例)")
         note.setObjectName("muted")
         side.addWidget(note)
+        self.k_sync = QCheckBox("同步调整 (9:16 / 3:4 / 1:1)")
+        self.k_sync.setChecked(True)
+        self.k_sync.setToolTip("勾上(默认):拖 9:16、3:4、1:1 中任意一个,同底图的另外两个按同一中心点同步移动(2.35:1 保持独立)。\n取消勾选:只调当前这一个比例。")
+        side.addWidget(self.k_sync)
         side.addStretch(1)
         mid.addWidget(sidef)
         self.canvas = CropCanvas()
@@ -230,16 +236,9 @@ class CoverDialog(QDialog):
         mid.addWidget(self.canvas, 1)
         v.addLayout(mid, 1)
 
-        # ---------- 下面:改封面 / AI 扩图 / 上一条 下一条 ----------
+        # ---------- 下面:改封面 / 上一条 下一条 ----------
         bar = QHBoxLayout()
         bar.setSpacing(8)
-        self.b_ai = QPushButton("2.35:1 用 AI 扩图")
-        self.b_ai.setCheckable(True)
-        self.b_ai.setToolTip("大头照:2.35:1 下面的标题区会挡脸。按下 = 用 AI 把画面往两边、下面扩出来(脸在标题区上面);"
-                             "不按 = 切掉一点头顶。AI 一张几毛钱,偶尔会画歪,不满意点「重新扩一张」。")
-        self.b_ai.clicked.connect(self.toggle_ai)
-        self.b_again = QPushButton("重新扩一张")
-        self.b_again.clicked.connect(self.ai_again)
         self.b_okc = QPushButton("✓ 这张没问题")
         self.b_okc.setObjectName("okBtn")
         self.b_okc.setToolTip("这条封面标黄(软件拿不准):你看过了、框得没问题 → 点这个,不再标黄,自动发布 / 定时发布不会再为它停下来")
@@ -266,9 +265,6 @@ class CoverDialog(QDialog):
         bar.addWidget(self.b_pick)
         bar.addWidget(self.b_unpick)
         bar.addWidget(self.b_auto)
-        bar.addSpacing(14)
-        bar.addWidget(self.b_ai)
-        bar.addWidget(self.b_again)
         bar.addStretch(1)
         for b in (self.b_prev, self.b_next):
             bar.addWidget(b)
@@ -346,27 +342,10 @@ class CoverDialog(QDialog):
         self.refresh()
 
     def pix_for(self, k, make: bool = True) -> QPixmap:
-        """这个比例用哪张图:竖的比例有竖屏图用竖屏图;2.35:1 要专用图就用专用图;别的用横图。
-        make=False:专用图还没做就先用横图(左边小图用;老手试用:原来一打开就去 AI 扩图,要等还花钱,点到 2.35:1 才做)。"""
+        """这个比例用哪张图:竖的比例有竖屏图用竖屏图;别的用横图(2026-11-26 取消 2.35:1 AI 扩图)。"""
         _tag, r = C.RATIOS[k]
         if r < 1 and not self._vpm.isNull():
             return self._vpm
-        if r >= 2 and not self.pm.isNull() and C.needs_wide(self.pm.width(), self.pm.height(), self.v.plan):
-            if self._wide is None and not make:
-                return self.pm
-            if self._wide is None:
-                from PySide6.QtWidgets import QApplication, QMessageBox
-                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                try:
-                    self._wide = QPixmap(C.wide_cover(self.v.cover, self.v.plan))
-                except Exception as e:
-                    self._wide = QPixmap()
-                    QApplication.restoreOverrideCursor()
-                    QMessageBox.warning(self, "AI 扩图", f"AI 扩图没成:{e}。先用原图显示;摆的时候会改成切掉一点头顶。")
-                else:
-                    QApplication.restoreOverrideCursor()
-            if not self._wide.isNull():
-                return self._wide
         return self.pm
 
     @staticmethod
@@ -467,11 +446,6 @@ class CoverDialog(QDialog):
             wide = pm is not self.pm and pm is not self._vpm
             self.canvas.setEnabled(not wide)
             self.lab_why.setText(self.v.cover_why)
-        mode = C.wide_mode(self.pm.width() or 1, self.pm.height() or 1, self.v.plan)[0] if not self.pm.isNull() else "none"
-        has_face = bool((self.v.plan or {}).get("faces"))
-        self.b_ai.setEnabled(has_face and mode != "manual")
-        self.b_ai.setChecked(mode == "ai")
-        self.b_again.setEnabled(mode == "ai")
         self.show_src()
 
     def pick_ratio(self, k):
@@ -488,10 +462,18 @@ class CoverDialog(QDialog):
         _tag, r = C.RATIOS[self.ratio_i]
         v = self.v
         vert = pm is self._vpm
-        self.adj.set_box(v.path, v.vcover if vert else v.cover, C.rkey(r), cx, cy, title=v.title)
+        rk = C.rkey(r)
+        # 同步调整(用户 2026-11-26):9:16 / 3:4 / 1:1 双向联动(仅同底图),2.35:1 独立不动
+        targets = [rk]
+        if self.k_sync.isChecked() and rk in _SYNC_RATIOS:
+            targets = [C.rkey(r2) for k2, (_t2, r2) in enumerate(C.RATIOS)
+                       if C.rkey(r2) in _SYNC_RATIOS and self.pix_for(k2, make=False) is pm]
+        cover_path = v.vcover if vert else v.cover
         key = "vplan" if vert else "plan"
         man = dict((getattr(v, key) or {}).get("manual", {}))
-        man[C.rkey(r)] = [cx, cy]
+        for trk in targets:
+            self.adj.set_box(v.path, cover_path, trk, cx, cy, title=v.title)
+            man[trk] = [cx, cy]
         setattr(v, key, dict(getattr(v, key) or {}, manual=man))
         v.warn = False
         if "手动" not in v.cover_why:
@@ -500,34 +482,11 @@ class CoverDialog(QDialog):
         self.refresh()
         self.changed.emit(self.i)
 
-    def toggle_ai(self, on: bool):
-        v = self.v
-        self.adj.set_ai235(v.path, bool(on), title=v.title)
-        self.adj.apply(v)
-        C.note_wide(v)
-        self._wide = None
-        self.pick_ratio(2)                          # 跳到 2.35:1 看效果
-        self.changed.emit(self.i)
-
-    def ai_again(self):
-        """AI 扩的不满意:删掉这张,再扩一张。"""
-        try:
-            C.cache_file("2.35专用封面", self.v.cover, "_2.35_AI.jpg").unlink(missing_ok=True)
-        except OSError:
-            pass
-        self._wide = None
-        self.pick_ratio(2)
-
     def reset(self):
         v = self.v
         self.adj.reset(v.path)
         v.cover_kind = ""
         C.decide(v)
-        try:
-            from qe import aicover
-            aicover.reapply(v)                      # AI 挪过的框还算(恢复的是「自动」,AI 那轮也是自动的)
-        except Exception:
-            pass
         C.note_wide(v)
         self.show_video()
         self.changed.emit(self.i)

@@ -40,7 +40,7 @@ LOCAL_ONLY_KEYS = frozenset({
 SHARED_SETTING_KEYS = frozenset({
     "accounts", "daily_plan", "quota_extra", "quota_open", "redo_room",
     "api_cover", "api_interval", "api_archive_by_game",
-    "batch_size", "topic_model", "outro_check", "sharp_check", "crop_check", "audio_check",
+    "batch_size", "topic_model", "outro_check", "sharp_check", "crop_check", "audio_check", "long_check", "game_ai_check",
     "ai_cover", "ai_cover_trust", "bad_cover_auto", "game_words",
     "ai_key",
     "api_last_topic",
@@ -58,6 +58,7 @@ STORE_FILES = {
     "audio": "音频检查.json",
     "gamecheck": "游戏判断.json",
     "titledate": "标题日期放行.json",
+    "longcheck": "超长视频放行.json",
     "titleclean": "标题广告处理过.json",
     "dimcache": "视频尺寸.json",
     "adjust": "封面调整.json",
@@ -276,6 +277,9 @@ def _reload_store(kind: str) -> None:
     elif kind == "titledate":
         from . import titledate
         titledate.store().reload()
+    elif kind == "longcheck":
+        from . import longcheck
+        longcheck.store().reload()
     elif kind == "titleclean":
         from . import titleclean
         titleclean.store().reload()
@@ -332,6 +336,10 @@ def _exec_store_op(kind: str, op: str, kw: dict, adj=None):
     elif kind == "titledate":
         from . import titledate
         titledate.store().set(kw["account"], kw["title"], bool(kw.get("on", True)))
+        return True
+    elif kind == "longcheck":
+        from . import longcheck
+        longcheck.store().set(kw["account"], kw["title"], bool(kw.get("on", True)))
         return True
     elif kind == "titleclean":
         from . import titleclean

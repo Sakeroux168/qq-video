@@ -61,55 +61,48 @@ def pair(v, worker, crop: dict | None, sent: bool, need_crop: bool, sharp_on: bo
     return res
 
 
+_TABLES = (_SHARP, _CROP, _OUTRO, _AUDIO)
+_NAMES = ("清晰度", "字幕被裁", "结尾求关注", "声音")
+
+
 def cell(p: tuple) -> str:
-    """表格里那一格。各项一样(或只剩一个词)就写一个词。"""
-    if len(p) >= 4:
-        s, c, o, a = p[:4]
-        if s == c == o == a and s in _SAME:
-            return _SAME[s]
-        return f"{_SHARP[s]}  {_CROP[c]}  {_OUTRO[o]}  {_AUDIO[a]}"
-    if len(p) >= 3:
-        s, c, o = p[:3]
-        if s == c == o and s in _SAME:
-            return _SAME[s]
-        return f"{_SHARP[s]}  {_CROP[c]}  {_OUTRO[o]}"
-    s, c = p
-    if s == c and s in _SAME:
-        return _SAME[s]
-    return f"{_SHARP[s]}  {_CROP[c]}"
+    """表格里那一格。设置里关掉(OFF)的项隐藏不显示;剩下各项一样(在 _SAME 里)就写一个词。"""
+    active = [(tbl, st) for tbl, st in zip(_TABLES, p) if st != OFF]
+    if not active:
+        return ""
+    states = [st for _tbl, st in active]
+    if len(set(states)) == 1 and states[0] in _SAME:
+        return _SAME[states[0]]
+    return "  ".join(tbl[st] for tbl, st in active)
 
 
 def tip(p: tuple) -> str:
-    lines = [f"清晰度:{_TIP[p[0]]}", f"字幕被裁:{_TIP[p[1]]}"]
-    if len(p) >= 3:
-        lines.append(f"结尾求关注:{_TIP[p[2]]}")
-    if len(p) >= 4:
-        lines.append(f"声音:{_TIP[p[3]]}")
-    return "\n".join(lines)
+    lines = [f"{nm}:{_TIP[st]}" for nm, st in zip(_NAMES, p) if st != OFF]
+    return "\n".join(lines) if lines else "自动检查已全部在设置里关闭"
 
 
 def _part(name: str, states: list[str]) -> str:
     use = [s for s in states if s != NA]
-    if not use:
+    if not use or all(s == OFF for s in use):
         return ""
-    if all(s == OFF for s in use):
-        return f"{name}关了"
     if all(s == NOKEY for s in use):
         return f"{name}没填 Key"
     return f"{name} {sum(s in DONE for s in use)}/{len(use)}"
 
 
 def progress(pairs: list[tuple]) -> str:
-    """顶上一行。pairs:这一页没发的。"""
+    """顶上一行。pairs:这一页没发的。设置里全部关掉时返回 ""。"""
     if not pairs:
         return ""
-    flat = [s for p in pairs for s in p]
     parts = [_part("清晰度", [p[0] for p in pairs]), _part("字幕", [p[1] for p in pairs])]
     if any(len(p) >= 3 for p in pairs):
         parts.append(_part("结尾", [p[2] for p in pairs if len(p) >= 3]))
     if any(len(p) >= 4 for p in pairs):
         parts.append(_part("声音", [p[3] for p in pairs if len(p) >= 4]))
     parts = [x for x in parts if x]
+    if not parts:
+        return ""
+    flat = [s for p in pairs for s in p if s != OFF]
     fail = sum(FAIL in p for p in pairs)
     head = "正在检查" if BUSY in flat else "检查"
     done = not any(s in LEFT for s in flat)
@@ -132,8 +125,8 @@ def found(pairs: list[tuple]) -> str:
 
 
 def group_text(pairs: list[tuple]) -> str:
-    """号那一行:这个号没发的查到哪了 + 查到了几条不对的(查完了没问题写「查完了 · 没问题」)。"""
-    if not pairs:
+    """号那一行:这个号没发的查到哪了 + 查到了几条不对的(查完了没问题写「查完了 · 没问题」;全关了给 "")。"""
+    if not pairs or not any(s not in (OFF, NA) for p in pairs for s in p):
         return ""
     left = sum(any(s in LEFT for s in p) for p in pairs)
     fail = sum(FAIL in p for p in pairs)

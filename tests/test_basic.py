@@ -2498,11 +2498,11 @@ def test_title_zone(tmp: Path):
     x, y, w, h = C.crop_rect(1600, 900, 2.35, big)
     chin = (0.15 + 0.63 * 1.03) * 900
     check(y + h * C.TITLE_TEXT >= chin - 1 and y <= (0.40 - 0.63 * 0.22) * 900, "切完:下巴不碰标题字,眼睛眉毛都在")
-    # 脸在图最下面:切头顶也躲不开 → AI 扩图(办法三)
+    # 脸在图最下面:已移除 AI 扩图,一律本地切头顶(不再走 AI)
     low2 = {"cx": 0.5, "cy": 0.9, "faces": [[0.4, 0.7, 0.12, 0.25, 0.8]]}
-    check(C.wide_mode(1600, 900, low2)[0] == "ai" and C.needs_wide(1600, 900, low2), "脸贴着图片底下:要 AI 扩图")
-    check(C.wide_mode(1600, 900, dict(low2, no_ai=True))[0] == "crop", "人点了「不用 AI」:改成切头顶")
-    check(C.wide_mode(1600, 900, dict(big, ai235=True))[0] == "ai", "人点了「用 AI 扩」:就用 AI")
+    check(C.wide_mode(1600, 900, low2)[0] == "crop" and not C.needs_wide(1600, 900, low2), "已取消 AI 扩图:脸贴底下也走本地切框")
+    check(C.wide_mode(1600, 900, dict(low2, no_ai=True))[0] == "crop", "no_ai=True 同样走切框")
+    check(C.wide_mode(1600, 900, dict(big, ai235=True))[0] == "crop", "即使传 ai235=True 也不再走 AI 扩图")
     check(C.wide_mode(1600, 900, dict(big, manual={C.rkey(2.35): [0.5, 0.5]}))[0] == "manual", "人手动拖过 2.35:1:按人的来")
     check(C.wide_mode(1600, 900, {"cx": 0.5, "cy": 0.5})[0] == "none", "没人:不管标题区")
     # AI 画布:脸落在标题区上面,原图该往上推就往上推
@@ -6539,12 +6539,12 @@ def test_check_status(tmp: Path):
         gate[0] = None
         settle(idle1)
         check("清糊.mp4" in calls and "字糊.mp4" in calls and "尾糊.mp4" in calls and "声糊.mp4" in calls and not tab._recheck_paths, f"接着把人点的查完 -> {calls}")
-        # 字幕关了
+        # 字幕关了:关掉的项彻底隐藏,不再显示「关了」
         st["crop_check"] = False
         tab.videos[i].crop = None
         tab.videos[i].checks.pop("crop", None)
         tab._check_refresh()
-        check(tab.items[i].text(4) == "清晰 放行  字幕 关了  结尾 ✓  声音 ✓", f"设置关了:写关了 -> {tab.items[i].text(4)}")
+        check(tab.items[i].text(4) == "清晰 放行  结尾 ✓  声音 ✓", f"设置关了:彻底隐藏该检查项 -> {tab.items[i].text(4)}")
         st["crop_check"] = True
         # 多的时候问一声
         seen = []
@@ -7964,6 +7964,343 @@ def test_audiocheck(tmp: Path):
         apiacc.save([])
 
 
+def test_cover_sync_and_no_ai(tmp: Path):
+    print("[封面 9:16/3:4/1:1 同步调整 + 彻底去掉 AI 看封面/扩图]")
+    from PySide6.QtWidgets import QApplication
+    from gui.cover_dialog import CoverDialog
+    import gui.window as W
+    from qe import cover as C
+    from qe.adjust import Adjustments
+    from qe.config import Settings
+    from qe.folders import Video
+    from qe.records import Records
+    app = QApplication.instance() or QApplication([])
+    d = tmp / "cov_sync"
+    d.mkdir()
+    _img(d / "a.png", 1600, 900)
+    (d / "a.mp4").write_bytes(b"x")
+    adj = Adjustments(tmp / "adj_sync.json")
+    v = Video(path=str(d / "a.mp4"), title="a", account="号", employee="员", date="11.26", png=str(d / "a.png"))
+    C.decide(v)
+    adj.apply(v)
+    dlg = CoverDialog([v], 0, adj)
+    check(hasattr(dlg, "k_sync") and dlg.k_sync.isChecked(), "默认勾选「同步调整 (9:16 / 3:4 / 1:1)」")
+    check(not hasattr(dlg, "b_ai") and not hasattr(dlg, "b_again"), "已移除 2.35:1 AI 扩图按钮")
+
+    def _drag_to(cx_norm: float):
+        _x, y, w, h = dlg.canvas.rect_img
+        pw = dlg.canvas.pm.width()
+        dlg.canvas.rect_img = (max(0.0, min(pw - w, cx_norm * pw - w / 2)), y, w, h)
+        dlg._dragged()
+
+    # 切到 9:16 拖动 -> 3:4、1:1 同步更新,2.35:1 不受影响
+    dlg.pick_ratio(1)
+    _drag_to(0.72)
+    man = v.plan.get("manual") or {}
+    k916, k34, k11, k235 = C.rkey(9 / 16), C.rkey(3 / 4), C.rkey(1.0), C.rkey(2.35)
+    check(abs(man.get(k916, [0])[0] - 0.72) < 0.01 and man.get(k34) == man.get(k916) and man.get(k11) == man.get(k916),
+          f"调 9:16 时 3:4 和 1:1 同步更新 -> {man}")
+    check(k235 not in man, f"2.35:1 保持独立不被同步 -> {man}")
+
+    # 反向:切到 3:4 拖动 -> 9:16 和 1:1 也同步
+    dlg.pick_ratio(0)
+    _drag_to(0.31)
+    man = v.plan.get("manual") or {}
+    check(abs(man.get(k34, [0])[0] - 0.31) < 0.01 and man.get(k916) == man.get(k34) and man.get(k11) == man.get(k34),
+          f"双向同步:调 3:4 时 9:16 和 1:1 也同步 -> {man}")
+
+    # 手动关闭同步开关 -> 只改当前比例
+    dlg.k_sync.setChecked(False)
+    dlg.pick_ratio(3)  # 1:1
+    _drag_to(0.70)
+    man = v.plan.get("manual") or {}
+    check(abs(man.get(k11, [0])[0] - 0.70) < 0.02 and abs(man.get(k916, [0])[0] - 0.31) < 0.01 and abs(man.get(k34, [0])[0] - 0.31) < 0.01,
+          f"关闭同步后只调当前 1:1 -> {man}")
+    dlg.close()
+
+    # MainWindow 不再触发 AI 看封面
+    st = Settings(tmp / "st_noai.json")
+    st["ai_key"] = "fake"
+    w = W.MainWindow(st, Records(tmp / "rec_noai.sqlite"))
+    check(not w.AI_COVER and not st.get("ai_cover", False), "主窗口已关闭 AI 看封面")
+    w._ai_covers()
+    check(getattr(w, "ai_worker", None) is None, "_ai_covers 为空操作,不启动 AiCoverWorker")
+    w.close()
+
+
+def test_long_check_and_toggles(tmp: Path):
+    print("[超过10分钟标记与放行 + 设置6项开关彻底隐藏/停用]")
+    from PySide6.QtWidgets import QApplication
+    import gui.api_tab as T
+    import gui.window as W
+    from qe import apiacc, checkline, checks, dimcache, folders as F, lansync, longcheck as LC
+    from qe.config import Settings
+    from qe.records import Records
+    app = QApplication.instance() or QApplication([])
+
+    # 1. longcheck 单元逻辑
+    LC.ENABLED = True
+    check(LC.fmt_dur(605) == "10分05秒" and LC.is_long(601) and not LC.is_long(600), "600秒以内不标,超过600秒标")
+    p1 = LC.problem("CSGO战神君", "超长局", 615.0)
+    check("超过10分钟(10分15秒)" in p1, f"默认拦截超10分钟 -> {p1}")
+    LC.store().set("CSGO战神君", "超长局", True)
+    check(LC.problem("CSGO战神君", "超长局", 615.0) == "", "放行后不再拦截")
+    LC.store().set("CSGO战神君", "超长局", False)
+    check(bool(LC.problem("CSGO战神君", "超长局", 615.0)), "取消放行恢复拦截")
+    LC.ENABLED = False
+    check(LC.problem("CSGO战神君", "超长局", 615.0) == "", "关闭总开关后不触发")
+    LC.ENABLED = True
+
+    # 2. dimcache 缓存 dur
+    vp = tmp / "dc_vid.mp4"
+    vp.write_bytes(b"12345")
+    dimcache.put(str(vp), 1080, 1920, dur=625.5)
+    check(dimcache.get(str(vp)) == (1080, 1920) and abs((dimcache.get_dur(str(vp)) or 0) - 625.5) < 0.01,
+          "dimcache 持久化宽高和时长")
+
+    # 3. 16 个号 & 教育号界面标黄放行 + game_ai_check 开关 + checkline 全关彻底隐藏
+    root = tmp / "lc_root" / "游戏视频" / "CSGO--CSGO战神君" / "11.26"
+    root.mkdir(parents=True)
+    vfile = root / "超长测试视频.mp4"
+    vfile.write_bytes(b"abc")
+    apiacc.save([{"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}])
+    st = Settings(tmp / "st_lc.json")
+    st["api_roots"] = [str(tmp / "lc_root" / "游戏视频")]
+    st["game_ai_check"] = False
+    rec = Records(tmp / "rec_lc.sqlite")
+    tab = T.ApiTab(st, rec, lambda _s: None)
+    tab.SHARP_CHECK = False
+    tab.COVER_CHECK = False
+    tab.set_day("11.26")
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 1)
+    tab.videos[0].checks = {"w": 1080, "h": 1920, "dur": 725.0, "landscape": False, "tags": [], "platform": []}
+    tab._fill(0)
+    check(tab.items[0].text(3) == "要处理" and "超过10分钟(12分05秒)" in tab.items[0].text(2),
+          f"16个号状态与备注标出超10分钟 -> {tab.items[0].text(3)} / {tab.items[0].text(2)}")
+    tab.set_long_ok(0, True)
+    check(tab.items[0].text(3) == "能发" and not tab.items[0].text(2),
+          f"右键放行后可发 -> {tab.items[0].text(3)} / {tab.items[0].text(2)}")
+    tab.set_long_ok(0, False)
+    check(tab.items[0].text(3) == "要处理" and "超过10分钟" in tab.items[0].text(2), "取消放行后恢复标黄")
+    check(tab._ai_games_vs([tab.videos[0]], lambda _s: None, lambda: False) == 0, "game_ai_check=False 时不调 AI 查串游戏")
+
+    # checkline 全部关闭 -> 单元格和进度栏均为空
+    for k in ("sharp_check", "crop_check", "outro_check", "audio_check"):
+        st[k] = False
+    tab._check_refresh()
+    check(tab.items[0].text(4) == "" and tab.lab_check.text() == "",
+          f"四项检查全关:检查列与顶部进度均隐藏 -> {tab.items[0].text(4)!r} / {tab.lab_check.text()!r}")
+    for k in ("sharp_check", "crop_check", "outro_check", "audio_check"):
+        st[k] = True
+
+    # 教育号页同样支持超10分钟标黄与放行
+    st2 = Settings(tmp / "st_lc2.json")
+    w = W.MainWindow(st2, Records(tmp / "rec_lc2.sqlite"))
+    w.videos = [F.Video(str(vfile), "超长课", "家长研习空间", "张", "11.26", dur=650.0)]
+    w.table.setRowCount(1)
+    w._fill_row(0)
+    check("超过10分钟(10分50秒)" in w.table.item(0, 4).text() and bool(w._title_block(w.videos[0])),
+          f"教育号页超10分钟标黄拦截 -> {w.table.item(0, 4).text()}")
+    w.table.selectRow(0)
+    w.set_long_ok(True)
+    check(w.table.item(0, 4).text() == "还没发" and not w._title_block(w.videos[0]), f"教育号页放行成功 -> {w.table.item(0, 4).text()}")
+    w.set_long_ok(False)
+    check("long_check" in lansync.SHARED_SETTING_KEYS and "game_ai_check" in lansync.SHARED_SETTING_KEYS
+          and "longcheck" in lansync.STORE_FILES, "局域网同步已包含超长放行与新开关")
+    w.close()
+    apiacc.save([])
+
+
+def test_quick_import_and_drop(tmp: Path):
+    print("[16个号:账号行「导入 ▾」快捷菜单 + 拖拽文件夹导入]")
+    from PySide6.QtWidgets import QApplication
+    import gui.api_tab as T
+    from qe import apiacc
+    from qe.config import Settings
+    from qe.records import Records
+    app = QApplication.instance() or QApplication([])
+
+    root = tmp / "imp_root" / "游戏视频"
+    csgo = root / "CSGO--CSGO战神君"
+    (csgo / "11.25").mkdir(parents=True)
+    (csgo / "11.25" / "老片.mp4").write_bytes(b"1")
+    (csgo / "11.26").mkdir(parents=True)
+    (csgo / "11.26" / "今天片.mp4").write_bytes(b"2")
+    (csgo / "周末存货").mkdir(parents=True)
+    (csgo / "周末存货" / "存货1.mp4").write_bytes(b"3")
+    (csgo / "11.26已发").mkdir(parents=True)
+    (csgo / "11.26已发" / "已发片.mp4").write_bytes(b"4")
+    (csgo / "横屏原片").mkdir(parents=True)
+    (csgo / "横屏原片" / "原片.mp4").write_bytes(b"5")
+
+    pubg = root / "PUBG--PUBG突围君" / "11.26"
+    pubg.mkdir(parents=True)
+    (pubg / "吃鸡.mp4").write_bytes(b"6")
+
+    apiacc.save([
+        {"nick": "CSGO战神君", "source_name": "CSGO", "client_id": "a", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+        {"nick": "PUBG突围君", "source_name": "PUBG", "client_id": "b", "secret": apiacc.seal("s"), "category": 1604, "enabled": True},
+    ])
+    st = Settings(tmp / "st_imp.json")
+    st["api_roots"] = [str(root)]
+    rec = Records(tmp / "rec_imp.sqlite")
+    tab = T.ApiTab(st, rec, lambda _s: None)
+    tab.SHARP_CHECK = False
+    tab.COVER_CHECK = False
+    tab.set_day("11.26")
+    _wait(app, lambda: not tab.busy() and len(tab.videos) == 2)
+
+    # 每个账号行 col 1 都有导入按钮,重排后仍在
+    check(tab.tree.itemWidget(tab.groups["CSGO战神君"], 1) is not None, "账号行第 1 列挂有「导入 ▾」按钮")
+    tab._reorder()
+    check(tab.tree.itemWidget(tab.groups["CSGO战神君"], 1) is not None, "_reorder 重排后按钮仍存在")
+
+    # 候选子文件夹列表:包含日期与存货,过滤已发与横屏原片
+    cands = tab._candidate_folders("CSGO战神君")
+    names = [n for n, _p, _cnt in cands]
+    check("11.26" in names and "11.25" in names and "周末存货" in names, f"列出候选文件夹 -> {names}")
+    check("11.26已发" not in names and "横屏原片" not in names, f"过滤掉已发和原片文件夹 -> {names}")
+    check(names.index("11.26") < names.index("11.25"), f"最新日期排在前面 -> {names}")
+
+    # 通过快捷导入 / 拖拽应用文件夹
+    check(tab._apply_pick("CSGO战神君", str(csgo / "周末存货")), "快捷导入「周末存货」返回 True")
+    _wait(app, lambda: not tab.busy())
+    csgo_titles = [v.title for v in tab.videos if v.account == "CSGO战神君"]
+    check(csgo_titles == ["存货1"], f"快捷导入「周末存货」立刻切换为该目录视频 -> {csgo_titles}")
+
+    # 拖错别家账号目录被 _bad_pick 防呆拦住
+    check(not tab._apply_pick("CSGO战神君", str(pubg)), "拖错别家目录返回 False 被拦截")
+    check(os.path.normcase(st.get("api_picked", {}).get("11.26", {}).get("CSGO战神君", "")) == os.path.normcase(str(csgo / "周末存货")),
+          "拦住后保持原手选")
+    apiacc.save([])
+
+
+def test_ai_assistant(tmp: Path):
+    print("[内置 AI 助手:6 个工具 + 安全红线 + 左侧页/右侧抽屉同步]")
+    import json
+    from PySide6.QtWidgets import QApplication
+    import gui.window as W
+    from qe import assistant as A, apiacc
+    from qe.config import Settings
+    from qe.folders import Video
+    from qe.records import Records
+    app = QApplication.instance() or QApplication([])
+
+    # 准备素材与归档文件
+    st = Settings(tmp / "st_ai.json")
+    st["ai_key"] = "fake-key"
+    api_root = tmp / "ai_root" / "游戏视频"
+    csgo_day = api_root / "CSGO--CSGO战神君" / "11.26"
+    csgo_day.mkdir(parents=True)
+    arc_dir = tmp / "ai_arc" / "11.26" / "CSGO"
+    arc_dir.mkdir(parents=True)
+    st["api_roots"] = [str(api_root)]
+    st["api_archive"] = str(tmp / "ai_arc" / "{date}")
+
+    # 两条已发且归档的视频:一条确定没发上(sure=True),一条被审核打回(sure=False)
+    f_miss = arc_dir / "漏发视频A.mp4"
+    f_miss.write_bytes(b"video-miss")
+    f_rej = arc_dir / "打回视频B.mp4"
+    f_rej.write_bytes(b"video-rej")
+
+    rec = Records(tmp / "rec_ai.sqlite")
+    v_miss = Video(path=str(csgo_day / "漏发视频A.mp4"), title="漏发视频A", account="CSGO战神君", employee="接口", date="11.26")
+    v_rej = Video(path=str(csgo_day / "打回视频B.mp4"), title="打回视频B", account="CSGO战神君", employee="接口", date="11.26")
+    rec.manual_published(v_miss, note="article_id=A1", at="2026-11-26 10:00:00")
+    rec.manual_published(v_rej, note="article_id=A2", at="2026-11-26 10:05:00")
+    rec.conn.execute("UPDATE posts SET moved_pkey=? WHERE title=?", (str(f_miss), "漏发视频A"))
+    rec.conn.execute("UPDATE posts SET moved_pkey=? WHERE title=?", (str(f_rej), "打回视频B"))
+    rec.conn.commit()
+    rows_by_title = {r["title"]: r for r in rec.rows(account="CSGO战神君")}
+
+    # 确认没有暴露任何发布 / 删除工具
+    tool_names = [t["function"]["name"] for t in A.TOOLS_SCHEMA]
+    check(set(tool_names) == {
+        "check_today_plan", "verify_backend", "check_black_covers",
+        "find_archived_videos", "pull_back_for_republish", "open_in_czgt"
+    }, f"仅暴露 6 个受控工具,无发布/删除工具 -> {tool_names}")
+
+    opened_czgt = []
+    exported_cov = []
+
+    def fake_check_acc(_cl, _rec, nick, day):
+        return {
+            "nick": nick, "ours": 2, "live": 0, "ok": 0, "review": 0,
+            "missing": [
+                dict(rows_by_title["漏发视频A"], why="企鹅号上是「发布失败」—— 没发上", sure=True),
+                dict(rows_by_title["打回视频B"], why="被审核打回了", sure=False),
+            ],
+            "extra": [],
+        }
+
+    def fake_scan_one(acc, s, e, **_kw):
+        return ([{"nick": acc["nick"], "title": "黑封面视频C", "time": f"{s} 11:00:00", "kind": "黑封面", "aid": "BLK1"}], 0)
+
+    def fake_export(items, _st, **_kw):
+        exported_cov.extend(items)
+        return len(items)
+
+    deps = {
+        "today_fn": lambda: "2026-11-26",
+        "accounts_fn": lambda: [({"nick": "CSGO战神君", "client_id": "c", "secret": "s"}, False)],
+        "make_client": lambda _a: object(),
+        "check_account_fn": fake_check_acc,
+        "scan_one_fn": fake_scan_one,
+        "export_covers_fn": fake_export,
+        "open_czgt_fn": lambda acc, title, day="": opened_czgt.append((acc, title, day)) or f"已定位 {acc}《{title}》",
+    }
+
+    # 1. 离线模拟多轮工具调用:用户只问「帮我查漏发」-> 返回汇总 + 一键拎回按钮(不自动挪文件)
+    turns = iter([
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "verify_backend", "arguments": "{}"}}
+        ]},
+        {"role": "assistant", "content": "查完了：CSGO战神君有 1 条确定没发上（漏发视频A），1 条被打回（打回视频B）。"},
+    ])
+    agent = A.AssistantAgent(st, rec, chat_fn=lambda _ai, _m, _t, _to: next(turns), deps=deps)
+    res1 = agent.ask("去后台查一下今天有没有漏发")
+    check("漏发视频A" in res1["reply"] and f_miss.exists(), "只查不挪:回复正常且归档原文件未被擅自移动")
+    check(len(res1["actions"]) == 1 and res1["actions"][0]["kind"] == "pull_back"
+          and len(res1["actions"][0]["payload"]["items"]) == 1,
+          f"只给「确定没发上」的生成一键拎回按钮 -> {res1['actions']}")
+
+    # 2. 安全红线:尝试批量拎回两条(含 sure=False 的打回视频B) -> 只挪漏发视频A,跳过打回视频B!
+    pb = agent.tool_pull_back_for_republish([
+        {"row_id": rows_by_title["漏发视频A"]["id"]},
+        {"row_id": rows_by_title["打回视频B"]["id"]},
+    ], confirmed_only=True)
+    check(pb["moved_count"] == 1 and pb["skipped_count"] == 1, f"批量只挪确定没发上、跳过打回项 -> {pb}")
+    check((csgo_day / "漏发视频A.mp4").is_file() and not f_miss.exists() and f_rej.is_file(),
+          "确定没发上的已拎回今天待发目录,打回的原地不动")
+    check(rec.status_by_id(rows_by_title["漏发视频A"]["id"]) == "没发成"
+          and rec.status_by_id(rows_by_title["打回视频B"]["id"]) == "已发",
+          "数据库仅改回已拎回那条为没发成")
+
+    # 3. 查黑封面 + 截清晰图 + 去罐头定位
+    rb = agent.run_quick("black")
+    check("黑封面视频C" in rb["reply"] and any(a["kind"] == "export_covers" for a in rb["actions"])
+          and any(a["kind"] == "open_czgt" for a in rb["actions"]),
+          f"快捷查黑封面附带截封面与罐头定位按钮 -> {rb['actions']}")
+    r_exp = agent.execute_action(next(a for a in rb["actions"] if a["kind"] == "export_covers"))
+    r_cz = agent.execute_action(next(a for a in rb["actions"] if a["kind"] == "open_czgt"))
+    check(len(exported_cov) == 1 and "已截取清晰封面：1 / 1" in r_exp["reply"], f"一键截清晰封面执行成功 -> {r_exp}")
+    check(opened_czgt == [("CSGO战神君", "黑封面视频C", "2026-11-26")] and "已定位" in r_cz["reply"], f"去罐头定位执行成功 -> {opened_czgt}")
+
+    # 4. 界面集成:左侧全屏 AI 助手页 + 右侧抽屉共用同一对话历史,切到全屏页时抽屉自动收起
+    w = W.MainWindow(st, rec)
+    w.ai_hub.agent.deps.update(deps)
+    check("ai" in w.pages and w.ai_page.hub is w.ai_drawer.hub, "全屏页与右侧抽屉共用同一个 AssistantHub")
+    w.toggle_ai_drawer(True)
+    check(not w.ai_drawer.isHidden(), "点抽屉开关可展开右侧抽屉")
+    w.ai_hub.quick("plan", "查今天发完没")
+    _wait(app, lambda: not w.ai_hub.is_busy() and len(w.ai_hub.messages) >= 2)
+    check(len(w.ai_page._bubbles) == len(w.ai_drawer._bubbles) and len(w.ai_page._bubbles) >= 2,
+          f"全屏页与抽屉实时同步气泡数量 -> {len(w.ai_page._bubbles)} / {len(w.ai_drawer._bubbles)}")
+    w.goto("ai")
+    check(w.ai_drawer.isHidden(), "切到左侧全屏 AI 助手页时右侧抽屉自动收起")
+    w.close()
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -8066,6 +8403,10 @@ if __name__ == "__main__":
     test_portable_bundle(tmp)
     test_lan_sync(tmp)
     test_audiocheck(tmp)
+    test_cover_sync_and_no_ai(tmp)
+    test_long_check_and_toggles(tmp)
+    test_quick_import_and_drop(tmp)
+    test_ai_assistant(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

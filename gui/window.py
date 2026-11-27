@@ -206,7 +206,10 @@ class DimWorker(QThread):
                 return
             v = self.videos[i]
             wh = dimcache.get(v.path)
-            if wh is None and ff:
+            dur = dimcache.get_dur(v.path)
+            p_st = getattr(self.parent(), "st", None)
+            need_dur = dur is None and (p_st is None or p_st.get("long_check", True))
+            if (wh is None or need_dur) and ff:
                 try:
                     info = vertical.probe(v.path, ff)
                 except Exception:
@@ -214,12 +217,14 @@ class DimWorker(QThread):
                 if not info.get("w"):
                     return
                 wh = (info["w"], info["h"])
-                dimcache.put(v.path, *wh)
-                p_st = getattr(self.parent(), "st", None)
+                dur = float(info.get("dur") or 0)
+                dimcache.put(v.path, *wh, dur=dur)
                 if info.get("has_audio") is False and (p_st is None or p_st.get("audio_check", True)) and audiocheck.STORE.get(v.path) is None:
                     v.audio = audiocheck.STORE.put(v.path, {"hits": [{"kind": "none"}]})
             if wh and not self.stop:
                 v.dims, v.shape = wh, dimcache.shape(*wh)
+                if dur is not None:
+                    v.dur = float(dur)
                 self.one.emit(i)
         with ThreadPoolExecutor(3) as ex:
             list(ex.map(one, self.rows))
@@ -433,6 +438,8 @@ class MainWindow(QMainWindow):
         self._sched_tries = 0             # 一整批出错(罐头没开 / 掉登录 …)连着重试了几次
         self._chain_stop = False          # 人点了「停」:连发(自动发布 / 定时)手上这批做完不再接着摆
         C.AI_KEY = st.ai_key() if hasattr(st, "ai_key") else ""
+        from qe import longcheck
+        longcheck.configure(st)
         self.setWindowTitle(f"企鹅号发布助手(第{APP_VERSION}版)")
         self.resize(1280, 820)
         self._build()
@@ -831,10 +838,18 @@ class MainWindow(QMainWindow):
         self.daily = DailyTab(self.st, self.rec, self)
         from gui.today_tab import TodayTab
         self.today = TodayTab(self.st, self.rec, self)
-        self.pages = {"today": self.today, "edu": w, "api": self.api_tab, "daily": self.daily, "records": r}
-        root, self.nav, self.stack = shell([("today", "今天", self.today), ("school", "教育 / 影视", w), ("game", "游戏 / 动漫", self.api_tab),
-                                            ("chart", "每日汇总", self.daily), ("table", "数据记录", r)],
-                                           self.edit_settings, f"第 {APP_VERSION} 版")
+        from gui.assistant_panel import AssistantHub, AssistantView
+        self.ai_hub = AssistantHub(self.st, self.rec, owner=self)
+        self.ai_hub.data_changed.connect(self._on_ai_data_changed)
+        self.ai_page = AssistantView(self.ai_hub, compact=False, parent=self)
+        self.ai_drawer = AssistantView(self.ai_hub, compact=True, on_close=lambda: self.toggle_ai_drawer(False), parent=self)
+        self.pages = {"today": self.today, "edu": w, "api": self.api_tab, "daily": self.daily, "records": r, "ai": self.ai_page}
+        root, self.nav, self.stack = shell(
+            [("today", "今天", self.today), ("school", "教育 / 影视", w), ("game", "游戏 / 动漫", self.api_tab),
+             ("chart", "每日汇总", self.daily), ("table", "数据记录", r), ("chat", "AI 助手", self.ai_page)],
+            self.edit_settings, f"第 {APP_VERSION} 版",
+            drawer=self.ai_drawer, on_toggle_drawer=self.toggle_ai_drawer,
+        )
         self.setCentralWidget(root)
         self.stack.currentChanged.connect(self._page_changed)
         from gui.widgets import set_badge
@@ -842,8 +857,31 @@ class MainWindow(QMainWindow):
         self.api_tab._update_sum()
         self._black_cards(blackcover.load(self._black_day()))
 
+    def toggle_ai_drawer(self, show: bool | None = None):
+        """展开 / 收起右侧 AI 助手抽屉；如果当前正停在全屏 AI 助手页，则自动收起抽屉避免重复。"""
+        if show is None:
+            show = self.ai_drawer.isHidden()
+        if show and self.stack.currentWidget() is self.ai_page:
+            show = False
+        self.ai_drawer.setVisible(bool(show))
+        btn = getattr(self.nav, "drawer_btn", None)
+        if btn is not None:
+            btn.blockSignals(True)
+            btn.setChecked(bool(show))
+            btn.blockSignals(False)
+
+    def _on_ai_data_changed(self):
+        """AI 助手拎回视频修改了目录 / 记录后，刷新各页数据。"""
+        if hasattr(self, "today"):
+            self.today.refresh(animate_=False)
+        if hasattr(self, "daily"):
+            self.daily.refresh()
+        if hasattr(self, "api_tab"):
+            self.api_tab.refresh()
+        self.refresh_records()
+
     def goto(self, key: str):
-        """跳到某一页(「今天」页的「下一步」点了用):today / edu / api / daily / records。"""
+        """跳到某一页(「今天」页的「下一步」点了用):today / edu / api / daily / records / ai。"""
         p = self.pages.get(key)
         if p is not None:
             self.stack.setCurrentWidget(p)
@@ -851,6 +889,8 @@ class MainWindow(QMainWindow):
     def _page_changed(self, _i: int):
         from gui.widgets import fade_in
         p = self.stack.currentWidget()
+        if p is self.ai_page and hasattr(self, "ai_drawer") and not self.ai_drawer.isHidden():
+            self.toggle_ai_drawer(False)
         if p is self.daily:
             self.daily.refresh()
         elif p is self.pages.get("records"):
@@ -922,7 +962,10 @@ class MainWindow(QMainWindow):
             self.daily.refresh()
         elif cur is self.pages.get("records"):
             self.refresh_records()
-        if "rec" in kinds or "settings" in kinds or "adjust" in kinds or any(k in kinds for k in ("sharp", "audio", "crop", "outro", "wm")):
+        if "settings" in kinds:
+            from qe import longcheck
+            longcheck.configure(self.st)
+        if "rec" in kinds or "settings" in kinds or "adjust" in kinds or any(k in kinds for k in ("sharp", "audio", "crop", "outro", "wm", "longcheck", "titledate", "titleclean")):
             if not (self.worker and self.worker.isRunning()):
                 if any(k in kinds for k in ("sharp", "audio", "crop", "outro", "wm")):
                     from qe import wmstore
@@ -1347,8 +1390,7 @@ class MainWindow(QMainWindow):
             self.cover_worker = CoverWorker(self.videos, self.adj, self)
             self.cover_worker.one.connect(self._fill_row)
             self.cover_worker.finished.connect(self._update_scope)     # 认完了:「这次摆几条」重算
-            self.cover_worker.finished.connect(self._ai_covers)        # 软件裁完第一轮:AI 接着看第二轮
-            self.cover_worker.finished.connect(self._sharp_start)      # 查清晰度(只提醒)
+            self.cover_worker.finished.connect(self._sharp_start)      # 查清晰度 / 字幕 / 结尾 / 声音
             self.cover_worker.start()
         rows = [i for i, v in enumerate(self.videos) if not self.rec.status_of(v.path)]
         if rows:                                       # 看哪些是横屏 / 偏方(读过的直接用)
@@ -1645,26 +1687,11 @@ class MainWindow(QMainWindow):
         self.say(f"剪结尾做完了(原片在各自文件夹的「{outrocheck.ORIG_DIR}」里)")
         self._sharp_start()
 
-    AI_ASKER = None                                  # 测试里换掉(绝不真问 AI)
-    AI_COVER = True                                  # 测试里关掉(这台电脑上有真的百炼 Key)
+    AI_ASKER = None
+    AI_COVER = False                                 # 用户 2026-11-26:彻底取消 AI 看封面
 
     def _ai_covers(self):
-        """软件裁完第一轮,AI 看第二轮(设置里「AI 看封面」开着、有百炼 Key 才看)。"""
-        if not self.AI_COVER or not self.st.get("ai_cover", True) or (self.cover_worker and self.cover_worker.stop):
-            return
-        from qe import aiconf
-        key = aiconf.vision(self.st)                  # 自己的模型认得图才用它
-        if not key.key and self.AI_ASKER is None:
-            return
-        if self.ai_worker and self.ai_worker.isRunning():
-            return
-        w = AiCoverWorker(self.videos, self.adj, key, bool(self.st.get("ai_cover_trust", False)),
-                          lambda v: bool(self.rec.status_of(v.path)), self, asker=self.AI_ASKER)
-        w.one.connect(self._fill_row)
-        w.finished.connect(lambda w=w: self._ai_covers_done(w))
-        self.ai_worker = w
-        self.say("AI 在看封面(第二轮)…")
-        w.start()
+        return
 
     def _ai_covers_done(self, w):
         if w.stop:
@@ -1894,6 +1921,14 @@ class MainWindow(QMainWindow):
             elif titledate.bad_dates(v0.title):
                 m.addSeparator()
                 m.addAction("标题日期没问题(不是日期 / 就要发),能摆", lambda: self.set_title_date_ok(True))
+        from qe import longcheck
+        if v0 is not None and not self.rec.status_of(v0.path) and longcheck.is_long(getattr(v0, "dur", 0)):
+            dur0 = getattr(v0, "dur", 0)
+            m.addSeparator()
+            if longcheck.store().ok(v0.account, v0.title):
+                m.addAction(f"超10分钟({longcheck.fmt_dur(dur0)}):先不摆", lambda: self.set_long_ok(False))
+            elif self.st.get("long_check", True):
+                m.addAction(f"时长没问题({longcheck.fmt_dur(dur0)}),能摆", lambda: self.set_long_ok(True))
         wm = self.videos[row].wm if row < len(self.videos) else None
         if wm and wm.get("hits"):
             m.addSeparator()
@@ -2048,11 +2083,26 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _title_block(v) -> str:
-        """这条先不摆:标题有广告词(人没说剪好了)/ 写的日期不是今天昨天(用户 2026-11-03,人没放行)/ 字幕被裁(11-07,打回重找)/ 结尾求关注(11-16,剪掉能摆)。"""
-        from qe import titleclean, titledate, wmstore
+        """这条先不摆:标题有广告词 / 标题日期过期 / 超 10 分钟(2026-11-26)/ 字幕被裁 / 结尾求关注。"""
+        from qe import longcheck, titleclean, titledate, wmstore
         return titleclean.ad_problem(v.account, v.title) or titledate.problem(v.account, v.title) or \
+            longcheck.problem(v.account, v.title, getattr(v, "dur", 0)) or \
             (cropcheck.TEXT if wmstore.blocks(getattr(v, "crop", None)) else "") or \
             (outrocheck.TEXT if wmstore.blocks(getattr(v, "outro", None)) else "")
+
+    def set_long_ok(self, ok: bool):
+        """超过 10 分钟的视频确认能摆 / 改回先不摆(选中的一起标)。"""
+        from qe import longcheck
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()})
+        rows = [r for r in rows if r < len(self.videos) and longcheck.is_long(getattr(self.videos[r], "dur", 0))]
+        for r in rows:
+            v = self.videos[r]
+            longcheck.store().set(v.account, v.title, ok)
+            self._fill_row(r)
+        if rows:
+            self.say(f"{len(rows)} 条超长视频标成" + ("「时长没问题,能摆」" if ok else "「超10分钟,先不摆」"))
+        self._update_sum()
+        self._update_scope()
 
     def set_title_date_ok(self, ok: bool):
         """标题日期认错了 / 就要发 → 能摆(选中的一起标)。"""
@@ -3552,27 +3602,30 @@ class MainWindow(QMainWindow):
         f.addRow("", prev)
         f.addRow("号和缩写", e_acc)
         f.addRow("一批几条", sp)
-        from PySide6.QtWidgets import QCheckBox
-        k_aic = QCheckBox("AI 看封面(第二轮):软件裁好以后,AI 再看一遍主角在不在框里、脸有没有被切,要调的标黄")
-        k_aic.setChecked(bool(self.st.get("ai_cover", True)))
-        k_trust = QCheckBox("AI 说没问题的直接去黄(不用我再看第三轮)")
-        k_trust.setChecked(bool(self.st.get("ai_cover_trust", False)))
-        k_trust.setToolTip("前期先别勾:你自己再过一遍,看 AI 挑得准不准。觉得它靠谱了再勾上。")
-        f.addRow("", k_aic)
-        k_sharp = QCheckBox("发布前查清晰度:疑似低清放大、很糊的标出来(只提醒,不拦发布)")
-        k_sharp.setChecked(bool(self.st.get("sharp_check", True)))
-        f.addRow("", k_sharp)
-        k_crop = QCheckBox("发布前查字幕被裁:满屏的视频 AI 看 7 帧,被裁的先不发,打回让同事重新处理")
-        k_crop.setChecked(bool(self.st.get("crop_check", True)))
-        f.addRow("", k_crop)
-        k_outro = QCheckBox("发布前查结尾求关注:看最后几秒有没有别人头像 / 求关注 / 抖音号 / 二维码,查到了可以剪掉再发")
-        k_outro.setChecked(bool(self.st.get("outro_check", True)))
-        f.addRow("", k_outro)
-        k_audio = QCheckBox("发布前查有没有声音:没音轨或整条静音的标出来(只提醒,不拦发布)")
-        k_audio.setChecked(bool(self.st.get("audio_check", True)))
-        f.addRow("", k_audio)
-        f.addRow("", k_trust)
         outer.addWidget(g1)
+
+        from PySide6.QtWidgets import QCheckBox
+        g_chk = QGroupBox("发布前自动检查（两边共用，取消勾选后不触发）")
+        f_chk = QFormLayout(g_chk)
+        k_sharp = QCheckBox("查清晰度：疑似低清放大、很糊的标出来（只提醒，不拦发布）")
+        k_sharp.setChecked(bool(self.st.get("sharp_check", True)))
+        f_chk.addRow("", k_sharp)
+        k_crop = QCheckBox("查字幕被裁：满屏的视频 AI 看帧，被裁的先不发，打回让同事重新处理")
+        k_crop.setChecked(bool(self.st.get("crop_check", True)))
+        f_chk.addRow("", k_crop)
+        k_outro = QCheckBox("查结尾求关注：看最后几秒有没有别人头像 / 求关注 / 抖音号 / 二维码，查到了可以剪掉再发")
+        k_outro.setChecked(bool(self.st.get("outro_check", True)))
+        f_chk.addRow("", k_outro)
+        k_audio = QCheckBox("查有没有声音：没音轨或整条静音的标出来（只提醒，不拦发布）")
+        k_audio.setChecked(bool(self.st.get("audio_check", True)))
+        f_chk.addRow("", k_audio)
+        k_long = QCheckBox("查超过 10 分钟的视频：超过 10 分钟默认先不发，觉得可以发右键「时长没问题」放行")
+        k_long.setChecked(bool(self.st.get("long_check", True)))
+        f_chk.addRow("", k_long)
+        k_game_ai = QCheckBox("串游戏 AI 判断：标题看不出是哪个游戏时问 AI 防止放错号（16 个号）")
+        k_game_ai.setChecked(bool(self.st.get("game_ai_check", True)))
+        f_chk.addRow("", k_game_ai)
+        outer.addWidget(g_chk)
 
         g2 = QGroupBox("接口发(16 个游戏 / 动漫号)")
         f2 = QFormLayout(g2)
@@ -3866,8 +3919,9 @@ class MainWindow(QMainWindow):
             material_root=e_root.text().strip() or self.st["material_root"],
             archive_root=arc_get() or self.st["archive_root"], accounts=accs or self.st["accounts"],
             batch_size=sp.value(), ai_key=e_key.text().strip(),
-            ai_cover=k_aic.isChecked(), ai_cover_trust=k_trust.isChecked(), sharp_check=k_sharp.isChecked(),
+            sharp_check=k_sharp.isChecked(),
             crop_check=k_crop.isChecked(), outro_check=k_outro.isChecked(), audio_check=k_audio.isChecked(),
+            long_check=k_long.isChecked(), game_ai_check=k_game_ai.isChecked(),
             bad_cover_auto=k_bad_cov.isChecked(),
             bad_cover_dir=e_bad_dir.text().strip() or DEFAULTS["bad_cover_dir"],
             api_threads=sp_thr.value(), api_per_acc=sp_per.value(), quota_open=k_gate.isChecked(),
@@ -3897,8 +3951,19 @@ class MainWindow(QMainWindow):
         retheme_shell(self)                              # 换颜色当场生效(原来要关掉重开,设计师 / 买家试用)
         if hasattr(self, "today"):
             self.today.retheme()
-        from qe import gamecheck as GC2
+        if hasattr(self, "ai_page"):
+            self.ai_page.retheme()
+        if hasattr(self, "ai_drawer"):
+            self.ai_drawer.retheme()
+        from qe import gamecheck as GC2, longcheck as LC2
         GC2.configure(self.st)
+        LC2.configure(self.st)
+        self._check_refresh()
+        for r in range(len(self.videos)):
+            self._fill_row(r)
+        self.api_tab._check_refresh()
+        for i in list(self.api_tab.items):
+            self.api_tab._fill(i)
         self.api_tab._update_sum()
         self._load_dates()
 
@@ -3950,5 +4015,7 @@ class MainWindow(QMainWindow):
             while any(not j.wait(200) for j in rs):
                 QApplication.processEvents()
             dlg.close()
+        if hasattr(self, "ai_hub"):
+            self.ai_hub.shutdown()
         lansync.stop()
         super().closeEvent(e)

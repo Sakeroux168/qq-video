@@ -78,6 +78,10 @@ def problems(v) -> list[str]:
     td = titledate.problem(getattr(v, "account", ""), v.title)
     if td:
         out.append(td)
+    from . import longcheck                          # 超过 10 分钟的视频先标出来,人右键放行(用户 2026-11-26)
+    lg = longcheck.problem(getattr(v, "account", ""), v.title, c.get("dur"))
+    if lg:
+        out.append(lg)
     clean_b = titleclean.clean(v.title) or v.title
     if len(c.get("tags") or []) > 1:
         out.append(f"{len(c['tags'])} 个话题")
