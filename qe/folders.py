@@ -424,6 +424,8 @@ def _emp_of(parts: list[str], stem: str) -> str:
 
 # 封面工具出的文件:横屏16x9.png、横屏16x9 (2).png、竖屏9x16.png、横屏.png、修改 (1).png、原图.png、_thumb.jpg
 _TOOL_FILE = re.compile(r"^(横屏|竖屏|修改|原图|图片修改需求|图片修改)\s*(\d+\s*[x×X:：]\s*\d+)?\s*([(（]\s*\d+\s*[)）])?$|^_thumb$")
+# Windows 重复复制/合并时自动追加的副本后缀:「xxx (2)」「xxx（2）」
+_COPY_SUFFIX_RE = re.compile(r"\s*[（(]\s*\d{1,2}\s*[）)]\s*$")
 
 
 def _is_tool_dir(files: list[str]) -> bool:
@@ -514,6 +516,14 @@ def scan_account(acc_dir: str, account: str, date: str, report: list | None = No
         p = _pick([c for c in same if c[0].lower().endswith((".png", ".webp"))], path, stem, emp, crowded)
         j = _pick([c for c in same if c[0].lower().endswith((".jpg", ".jpeg"))], path, stem, emp, crowded)
         t = _pick(tools.get(n, []), path, stem, emp, crowded)
+        if not p and not t:
+            # 兜底:视频名末尾带了 Windows 副本后缀「 (2)」但封面文件夹没带「 (2)」,且没有另一条不带「 (2)」的视频抢这张封面
+            base_stem = _COPY_SUFFIX_RE.sub("", stem).strip()
+            base_n = norm_name(base_stem) if base_stem and base_stem != stem else ""
+            if base_n and crowd.get(base_n, 0) == 0:
+                same2 = imgs.get(base_n, [])
+                p = _pick([c for c in same2 if c[0].lower().endswith((".png", ".webp"))], path, base_stem, emp, False)
+                t = _pick(tools.get(base_n, []), path, base_stem, emp, False)
         png, jpg, vpng = (p[0] if p else ""), (j[0] if j else ""), ""
         if t and not (p and p[1] == emp and t[1] != emp):      # 工具文件夹优先;但它是别处(没分人)的、同名 png 就在本人这里,用本人的
             h, vv = covers_from_dir(t[0])

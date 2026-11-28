@@ -39,7 +39,7 @@ SYSTEM_PROMPT = """你是「企鹅号发布助手」内置的 AI 助手，用简
 7. scan_old_folders：扫描软件配置的游戏视频 / 动漫视频目录里某个日期及以前的旧日期文件夹，检查里面是否有未发视频、已发残留视频、残留封面、原片备份夹或 .meowload / Thumbs.db 等垃圾文件。
 8. clean_old_folders：安全清理过期/残留日期文件夹——已发过的视频归档或去重删除、残留封面挪进归档、清掉 .meowload / Thumbs.db / 结尾原片等残留后删空目录；绝不删未发过的视频。
 9. prepare_autopilot：当用户想让你帮他全自动处理并发布今天的 16 个号（游戏 / 动漫）时调用，生成一份简洁的「今日全自动确认卡片」（不会直接发，等用户在卡片上点一次「确认启动全自动」才会真正执行，卡片上支持一键勾选「全天每 10 分钟值守巡检」）。
-10. manage_watch：全天值守运行期间，响应用户一句话动态调整值守规则——如查询当前值守状态（status）、临时跳过某个号（skip_account）、取消跳过（unskip_account）、把某个无日期夹加入今天值守（add_folder）、修改巡检间隔分钟数（set_interval）、修改晚上收工时间（set_cutoff）、结束今天值守（stop）。
+10. manage_watch：全天值守与拦截放行控制——查询当前值守状态（status）、临时跳过某个号（skip_account）、取消跳过（unskip_account）、把某个无日期夹加入今天值守（add_folder）、放行并立刻补发刚才被拦下的待拍板/失败视频（release_skipped）、修改巡检间隔分钟数（set_interval）、修改晚上收工时间（set_cutoff）、结束今天值守（stop）。
 11. read_autopilot_log：查看某天（默认今天）全自动与全天值守的完整留痕日志，可筛选只看异常/失败/跳过或按账号过滤，用于复盘今天全自动都做了什么、具体哪一步出了错。
 
 必须遵守的安全规则：
@@ -48,6 +48,7 @@ SYSTEM_PROMPT = """你是「企鹅号发布助手」内置的 AI 助手，用简
 - 当用户只是让你「查一下 / 列出来看看」时，只调用查询工具，不要擅自调用清理或拎回工具；查完清楚汇报结果即可（界面会自动附带一键操作按钮）。
 - 当用户明确下达执行指令（如「把这些过期残留文件夹清理掉」「把今天没发上但挪到已发里的都拿出来重发」「顺手截清晰封面」）时，可以直接调用对应执行工具，并逐条汇报结果。
 - 当用户说「某某号可以了 / 可以发了 / 放行某某 / 发某某的某某夹」时（通常指该号有备注等待中的目录或刚发现的无日期目录），先调 `manage_watch(action="status")` 查看 `waiting` 和 `undated` 列表，确认该号对应的文件夹后调 `manage_watch(action="add_folder", account=..., folder=...)` 放行并立刻触发巡检。
+- 当用户说「把某某号刚才拦下的视频放行发了 / 暗区突围没放错全部放行补发」时，直接调 `manage_watch(action="release_skipped", account=..., folder=可选标题关键词)` 一键写放行标记并立刻补发。
 - 回答尽量简明清晰，先说结论，再列关键清单，不要编造工具里没返回的数据。"""
 
 TOOLS_SCHEMA: list[dict[str, Any]] = [
@@ -239,11 +240,11 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["status", "skip_account", "unskip_account", "add_folder", "set_interval", "set_cutoff", "stop"],
-                        "description": "要执行的值守控制动作。",
+                        "enum": ["status", "skip_account", "unskip_account", "add_folder", "release_skipped", "set_interval", "set_cutoff", "stop"],
+                        "description": "要执行的值守控制或放行补发动作。",
                     },
-                    "account": {"type": "string", "description": "账号名（支持简称），用于 skip_account / unskip_account / add_folder。"},
-                    "folder": {"type": "string", "description": "子文件夹名（如 '周末存货'）或完整路径，用于 add_folder。"},
+                    "account": {"type": "string", "description": "账号名（支持简称），用于 skip_account / unskip_account / add_folder / release_skipped。"},
+                    "folder": {"type": "string", "description": "子文件夹名（用于 add_folder）或视频标题关键词（用于 release_skipped，可留空放行该号全部待拍板视频）。"},
                     "interval_min": {"type": "integer", "description": "巡检间隔（分钟，1~60），用于 set_interval。"},
                     "cutoff_hm": {"type": "string", "description": "晚上自动收工时间（如 '22:30'），用于 set_cutoff。"},
                 },
@@ -385,11 +386,13 @@ class AssistantAgent:
         self.history: list[dict[str, Any]] = []
         # 缓存最近一次后台核对每条记录的 sure 判定：{row_id: {"sure": bool, "why": str, "redone": bool, ...}}
         self._last_verify_map: dict[int, dict[str, Any]] = {}
+        self._pending_issue_items: dict[str, dict[str, Any]] = {}
         self.watch: autopilot.WatchState | None = None
 
     def reset(self) -> None:
         self.history.clear()
         self._last_verify_map.clear()
+        self._pending_issue_items.clear()
 
     def ai_config(self) -> aiconf.AI:
         model = str(self.st.get("topic_model") or aiconf.TEXT_MODEL)
@@ -977,6 +980,38 @@ class AssistantAgent:
             if w is None or not w.active:
                 return {"active": False, "message": "当前没有正在运行的全天值守。点「🚀 今日全自动」并勾选全天值守即可启动。"}
             return {"active": True, **w.snapshot(self.st, self.rec)}
+
+        if act == "release_skipped":
+            nk = self._resolve_api_nick(account) if (account or "").strip() else ""
+            kw = (folder or "").strip().casefold()
+            cands = []
+            for it in list(self._pending_issue_items.values()):
+                if nk and it.get("account") != nk:
+                    continue
+                if kw and kw not in str(it.get("title") or "").casefold():
+                    continue
+                if autopilot.is_overridable_item(it) and os.path.isfile(str(it.get("path") or "")):
+                    cands.append(it)
+            if not cands:
+                who = f"「{nk}」" if nk else "当前"
+                return {"ok": False, "error": f"{who}没有可一键放行补发的待拍板/失败视频（若已改好原文件，直接点「立即巡检」即可）。"}
+            rep = autopilot.override_and_publish(
+                self.st, self.rec, cands,
+                day=(w.day_iso if w is not None else ""),
+                watch=w,
+                deps=self.deps,
+            )
+            for it in cands:
+                if not os.path.isfile(str(it.get("path") or "")):
+                    self._pending_issue_items.pop(pkey(str(it.get("path") or "")), None)
+            return {
+                "ok": True,
+                "message": rep["summary"],
+                "published_count": rep["published_count"],
+                "failed_count": rep["failed_count"],
+                "report": rep,
+                "mutated": bool(rep["published_count"]),
+            }
 
         if w is None or not w.active:
             return {"ok": False, "error": "当前没有开启全天值守，请先通过「🚀 今日全自动」卡片启动值守。"}
@@ -1676,6 +1711,23 @@ class AssistantAgent:
         if kind == "watch_tick":
             return self.run_watch_tick_result(on_progress=on_progress, stopped=stopped, is_first=False)
 
+        if kind == "override_publish":
+            items = list(payload.get("items") or [])
+            day_arg = str(payload.get("day") or (self.watch.day_iso if self.watch is not None else ""))
+            rep = autopilot.override_and_publish(
+                self.st, self.rec, items,
+                day=day_arg,
+                watch=self.watch,
+                on_progress=on_progress,
+                stopped=stopped,
+                deps=self.deps,
+            )
+            for it in items:
+                p_it = str(it.get("path") or "")
+                if p_it and not os.path.isfile(p_it):
+                    self._pending_issue_items.pop(pkey(p_it), None)
+            return self._wrap_autopilot_report(rep)
+
         if kind == "add_watch_folder":
             nk = str(payload.get("account") or "")
             fp = str(payload.get("path") or "")
@@ -1695,6 +1747,11 @@ class AssistantAgent:
         watch_changed: bool = False,
         ended_msg: str = "",
     ) -> dict[str, Any]:
+        # 记住待拍板与失败条目，支持在聊天框一句话「把某某号拦下的放行发了」
+        for it in (rep.get("skipped_items") or []) + (rep.get("failed_items") or []):
+            p_it = str(it.get("path") or "").strip()
+            if p_it:
+                self._pending_issue_items[pkey(p_it)] = dict(it)
         acts: list[dict[str, Any]] = list(extra_actions or [])
         acts.append({"label": "查看留痕日志", "kind": "open_aplog", "tone": "normal", "payload": {"day": rep["day_iso"]}})
         if rep.get("skipped_items") or rep.get("missing_accounts"):

@@ -9214,6 +9214,132 @@ def test_urgent_sunday_and_log_ui(tmp: Path):
     apiacc.save([])
 
 
+def test_multidash_override_and_waitdone(tmp: Path):
+    print("[多横杠账号夹(三角洲---) + wait_done 90秒与子状态推送 + 战报一键放行补发 + 聊天放行]")
+    import inspect
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from gui.assistant_panel import _AutopilotReportCard
+    from qe import apiacc, apisrc, assistant as A, autopilot as AP, omapi
+    from qe.config import Settings
+    from qe.records import Records
+
+    # 1. 多横杠账号夹匹配
+    check(apisrc.nick_of_folder("三角洲---三角洲密探君") == "三角洲密探君", "三横杠「三角洲---三角洲密探君」准确识别账号名")
+    check(apisrc.nick_of_folder("CSGO----CSGO战神君") == "CSGO战神君", "四横杠同样准确识别")
+    groot = tmp / "md_root" / "游戏视频"
+    d_sjz = groot / "三角洲---三角洲密探君" / "11.28（70）未改比例"
+    d_sjz.mkdir(parents=True)
+    f_long = d_sjz / "超长误拦片.mp4"
+    f_mute = d_sjz / "无声误拦片.mp4"
+    f_dup = d_sjz / "历史重名片.mp4"
+    for f in (f_long, f_mute, f_dup):
+        f.write_bytes(b"v")
+    accs = [{"nick": "三角洲密探君", "source_name": "三角洲", "client_id": "c1", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}]
+    apiacc.save(accs)
+    got_dirs = apisrc.account_folder_list([str(groot)], {"三角洲密探君"})
+    check("三角洲密探君" in got_dirs and len(got_dirs["三角洲密探君"]) == 1, f"account_folder_list 准确配上三横杠文件夹 -> {got_dirs}")
+
+    # 2. wait_done 默认超时降为 90 秒
+    sig = inspect.signature(omapi.Client.wait_done)
+    check(sig.parameters["timeout"].default == 90, f"omapi.wait_done 默认超时已缩短为 90 秒 -> {sig.parameters['timeout'].default}")
+
+    # 3. 战报一键放行补发 + 子阶段事件 + 聊天 release_skipped
+    st = Settings(tmp / "st_ovr.json")
+    st["api_roots"] = [str(groot)]
+    st["api_archive"] = str(tmp / "ovr_arc" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    st["long_check"] = True
+    st["audio_check"] = True
+    for k in ("sharp_check", "crop_check", "outro_check", "game_ai_check"):
+        st[k] = False
+    st["daily_plan"] = [{"cat": "游戏", "label": "游戏", "accounts": {"三角洲密探君": 10}}]
+    rec = Records(tmp / "rec_ovr.sqlite")
+    # 写入一条历史已发同名记录制造硬防重发拦截
+    from qe.folders import Video
+    rec.manual_published(Video(str(tmp / "old_dup.mp4"), "历史重名片", "三角洲密探君", "接口", "11.27"), note="ok", at="2026-11-27 10:00:00")
+
+    sent_titles = []
+    sub_stages = []
+
+    class SubLogClient:
+        def send(self, path, title, cat, before_publish=None, log=None, **_k):
+            if log:
+                log("等平台处理中")
+            if before_publish:
+                before_publish("V_" + title)
+            sent_titles.append(title)
+            return {"article_id": "A_" + title, "vid": "V_" + title, "status": "成功"}
+
+    deps = {
+        "today_fn": lambda: "2026-11-28",
+        "api_accounts_fn": lambda: accs,
+        "accounts_fn": lambda: [(a, False) for a in accs],
+        "make_client": lambda _a: SubLogClient(),
+        "check_one_fn": lambda v, words=None, ff="": {
+            "w": 1080, "h": 1920,
+            "dur": 680.0 if "超长" in v.title else 40.0,
+            "has_audio": False if "无声" in v.title else True,
+            "landscape": False, "tags": [], "platform": [], "bad_read": False,
+        },
+        "audio_check_fn": lambda p, ff, has_audio=None, dur=None: {"hits": [{"kind": "none"}]} if has_audio is False else {"hits": []},
+        "check_account_fn": lambda cl, r_db, nick, d: {"nick": nick, "ours": 2, "live": 2, "ok": 2, "review": 0, "missing": [], "extra": []},
+        "scan_one_fn": lambda acc, s, e, **_k: ([], 0),
+        "on_account_event": lambda ev: sub_stages.append(ev.get("stage")) if ev.get("stage") else None,
+        "api_interval": 0,
+    }
+
+    rep1 = AP.run(st, rec, day="2026-11-28", deps=deps)
+    check(rep1["published_count"] == 0 and rep1["skipped_count"] == 3, f"首轮 3 条均被拦截 -> {rep1['skipped_items']}")
+
+    # 战报卡片：只给可放行的 2 条提供「没问题，放行补发」和「全部放行补发 (2)」，硬防重发的「历史重名片」不提供放行
+    acts_clicked = []
+    rc = _AutopilotReportCard({"kind": "autopilot_report", "report": rep1}, compact=False, on_action=acts_clicked.append)
+    check(rc.issue_group is not None and rc.b_release_all is not None and "2" in rc.b_release_all.text(),
+          f"战报卡片渲染待拍板卡片组并排除硬重名片，提供「全部放行补发 (2)」 -> {rc.b_release_all.text() if rc.b_release_all else None}")
+    rc.b_release_all.click()
+    check(len(acts_clicked) == 1 and acts_clicked[0]["kind"] == "override_publish"
+          and len(acts_clicked[0]["payload"]["items"]) == 2 and not rc.b_release_all.isEnabled(),
+          f"点击全部放行补发触发 override_publish 并禁用防连点 -> {acts_clicked}")
+
+    # 执行放行补发：2 条全部自动放行并发布，且子阶段「等平台处理中」推到账号卡片
+    agent = A.AssistantAgent(st, rec, deps=deps)
+    res_ovr = agent.execute_action(acts_clicked[0])
+    check(set(sent_titles) == {"超长误拦片", "无声误拦片"}, f"一键放行后超长/无声两条全部成功补发 -> {sent_titles}")
+    check("等平台处理中" in sub_stages, f"上传子阶段实时推送给账号卡片 -> {sub_stages}")
+
+    # 验证硬防重发红线：即使强传历史重名片也坚决拒绝
+    dup_item = next(x for x in rep1["skipped_items"] if x["title"] == "历史重名片")
+    rep_rej = AP.override_and_publish(st, rec, [dup_item], day="2026-11-28", deps=deps)
+    check(rep_rej["published_count"] == 0 and len(rep_rej.get("rejected_overrides") or []) == 1,
+          f"硬防重发红线不可绕过放行 -> {rep_rej.get('rejected_overrides')}")
+
+    # 验证聊天框 release_skipped
+    f_chat = d_sjz / "聊天放行超长片.mp4"
+    f_chat.write_bytes(b"v2")
+    agent._pending_issue_items["chat_k"] = {
+        "account": "三角洲密探君", "title": "聊天放行超长片", "path": str(f_chat), "reasons": ["超过10分钟"],
+    }
+    r_rel = agent.tool_manage_watch("release_skipped", account="三角洲")
+    check(r_rel.get("ok") and r_rel.get("published_count") == 1 and "聊天放行超长片" in sent_titles,
+          f"聊天一句话「把三角洲拦下的放行发了」成功补发 -> {r_rel}")
+    apiacc.save([])
+
+    # 4. 教育号视频带「 (2)」副本后缀时自动匹配无后缀封面工具文件夹
+    edu_d = tmp / "edu_copy2" / "研习社"
+    cov_d = edu_d / "0-6_岁养育开销居高不下"
+    cov_d.mkdir(parents=True)
+    (edu_d / "0-6 岁养育开销居高不下 (2).mp4").write_bytes(b"v")
+    (edu_d / "0-6 岁养育开销居高不下 (2).jpg").write_bytes(b"j")
+    from PIL import Image
+    Image.new("RGB", (1280, 720), (10, 20, 30)).save(cov_d / "横屏16x9.png")
+    from qe import folders as F
+    vs_edu = F.scan_account(str(edu_d), "家长研习空间", "11.29")
+    check(len(vs_edu) == 1 and vs_edu[0].png.endswith("横屏16x9.png"),
+          f"带「 (2)」后缀的教育视频自动配上无后缀封面工具文件夹 -> {vs_edu[0].png if vs_edu else None}")
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -9326,6 +9452,7 @@ if __name__ == "__main__":
     test_autopilot_fixes_and_live(tmp)
     test_autopilot_parallel_and_board(tmp)
     test_urgent_sunday_and_log_ui(tmp)
+    test_multidash_override_and_waitdone(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

@@ -238,8 +238,8 @@ class Client:
             body["cover_pic"] = cover_pic
         return self._call("POST", "/articlev2/clientpubvideo", "发布", json=body)
 
-    def wait_done(self, tid: str, timeout: float = 600, stop=None) -> str:
-        """轮询发布事务:返回 "成功";平台明确说失败抛 ApiError(带原因);等太久 / 停了返回 "处理中"。"""
+    def wait_done(self, tid: str, timeout: float = 90, stop=None) -> str:
+        """轮询发布事务:返回 "成功";平台明确说失败抛 ApiError(带原因);等太久(默认 90 秒) / 停了返回 "处理中"。"""
         end = time.time() + timeout
         while time.time() < end:
             d = self.transaction(tid)
@@ -265,6 +265,7 @@ class Client:
         say = log or self.log
         say("上传中")
         tid = self.upload(path, on_progress=on_progress, stop=stop)
+        say("等企鹅号拿vid")
         vid = self.wait_vid(tid, stop=stop)
         if stop and stop():
             raise Stopped("停下了")
@@ -304,6 +305,7 @@ class Client:
             ptid = aid = ""
         st = "处理中"
         if ptid:
+            say("等平台处理中")
             try:
                 st = self.wait_done(ptid, stop=stop)
             except ApiError as e:

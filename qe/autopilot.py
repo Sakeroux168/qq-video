@@ -863,9 +863,15 @@ def _publish_batch(
                 cimg = ""
 
             try:
+                def _sub_log(sub_msg: str, _nk=nick, _v=v):
+                    s = str(sub_msg or "").strip()
+                    if not s:
+                        return
+                    _upd_acc(_nk, status="running", stage=s[:8], detail=f"{s}：《{_v.title[:20]}》")
+
                 r = cl.send(
                     v.path, v.title.strip(), cat,
-                    stop=stopped, before_publish=begin,
+                    stop=stopped, before_publish=begin, log=_sub_log,
                     cover=cimg, cover_upload=cover_upload_fn,
                 )
             except omapi.Stopped:
@@ -880,7 +886,7 @@ def _publish_batch(
                 apicover.cleanup(cimg, src)
                 lan_broken.set()
                 with slock:
-                    failed.append({"account": nick, "title": v.title, "error": f"连不上局域网主机({e})"})
+                    failed.append({"account": nick, "title": v.title, "path": v.path, "error": f"连不上局域网主机({e})"})
                 _upd_acc(nick, status="error", stage="网络异常", detail=f"连不上局域网主机({e})", fail_delta=1)
                 return "stop"
             except _Taken:
@@ -894,7 +900,7 @@ def _publish_batch(
                 else:
                     rec.api_result(v, "结果不明", keep + str(e))
                 with slock:
-                    unsure.append({"account": nick, "title": v.title, "error": str(e)[:80]})
+                    unsure.append({"account": nick, "title": v.title, "path": v.path, "error": str(e)[:80]})
                 aplog.write("④发布", f"结果不明：《{v.title}》—— {str(e)[:80]}", level="WARN", account=nick, day_iso=day_iso)
                 _upd_acc(nick, detail=f"结果不明：《{v.title[:20]}》")
                 return "unsure"
@@ -907,7 +913,7 @@ def _publish_batch(
                     rec.api_result(v, "没发成", raw)
                 is_fatal = bool(getattr(e, "fatal", False))
                 with slock:
-                    failed.append({"account": nick, "title": v.title, "error": raw[:80]})
+                    failed.append({"account": nick, "title": v.title, "path": v.path, "error": raw[:80]})
                     if is_fatal:
                         key_errors.append({"account": nick, "error": raw[:100]})
                 aplog.write(
@@ -1014,6 +1020,7 @@ def run(
     deps: dict | None = None,
     explicit_videos: list[apisrc.ApiVideo] | None = None,
     watch: WatchState | None = None,
+    ignore_platform_words: bool = False,
 ) -> dict[str, Any]:
     """执行 16 个号全链路自动驾驶（6 阶段），返回结构化战报 dict。"""
     deps = deps or {}
@@ -1146,7 +1153,7 @@ def run(
 
     # ②/⑥ 发前检查（严格按设置 6 项开关）
     ff = deps.get("ffmpeg_path") or vertical.ffmpeg_path()
-    words = st.get("api_platform_words") or None
+    words = [] if ignore_platform_words else (st.get("api_platform_words") or None)
     skipped_items: list[dict[str, Any]] = []
     clean_vs: list[apisrc.ApiVideo] = []
     needs_vert_ids: set[int] = set()
@@ -1522,6 +1529,118 @@ def run(
         "enabled_checks": chk["enabled"],
         "summary": summary,
     }
+
+
+HARD_SKIP_KEYWORDS = ("视频打不开", "文件损坏", "以前发过同名", "本批里有同名", "密钥失效")
+
+
+def is_overridable_item(item: dict[str, Any]) -> bool:
+    """判断一条待拍板/失败视频是否允许用户一键放行补发（硬防重发与损坏片绝不允许误放行）。"""
+    path = str(item.get("path") or "").strip()
+    if not path:
+        return False
+    reasons = list(item.get("reasons") or [])
+    if item.get("error"):
+        reasons.append(str(item["error"]))
+    joined = " ".join(str(r) for r in reasons)
+    if any(k in joined for k in HARD_SKIP_KEYWORDS):
+        return False
+    return True
+
+
+def override_and_publish(
+    st,
+    rec,
+    items: list[dict[str, Any]],
+    *,
+    day: str = "",
+    watch: WatchState | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    stopped: Callable[[], bool] | None = None,
+    deps: dict | None = None,
+) -> dict[str, Any]:
+    """用户看过待拍板/失败视频确认没问题后，一键写入对应检查放行记录并立刻走全自动补发闭环。"""
+    deps = deps or {}
+    from .assistant import day_to_md, parse_day
+    day_iso = parse_day(day, deps.get("today_fn"))
+    md = day_to_md(day_iso)
+
+    override_vs: list[apisrc.ApiVideo] = []
+    rejected: list[dict[str, Any]] = []
+    seen_p: set[str] = set()
+    for it in items or []:
+        nick = str(it.get("account") or "").strip()
+        path = str(it.get("path") or "").strip()
+        title = str(it.get("title") or (os.path.splitext(os.path.basename(path))[0] if path else "")).strip()
+        if not nick or not path:
+            rejected.append({"account": nick, "title": title, "why": "缺少账号或文件路径"})
+            continue
+        if not is_overridable_item(it):
+            rejected.append({"account": nick, "title": title, "why": "属于防重发或文件损坏红线，不可直接放行"})
+            continue
+        if not os.path.isfile(path):
+            rejected.append({"account": nick, "title": title, "why": "原视频文件已不在原目录（可能已发或被移走）"})
+            continue
+        pk = pkey(path)
+        if pk in seen_p:
+            continue
+        seen_p.add(pk)
+
+        reasons_txt = " ".join(str(r) for r in (it.get("reasons") or []))
+        # 写入各类检查放行标记（仅影响这条视频，下次扫描也不再重复拦）
+        try:
+            gamecheck.store().set_ok(nick, title, True)
+            if "整批" in reasons_txt or "放错" in reasons_txt:
+                gamecheck.store().set_batch_ok(nick, md, True)
+        except Exception:
+            pass
+        for store_obj, args in (
+            (titledate.store(), (nick, title, True)),
+            (longcheck.store(), (nick, title, True)),
+            (titleclean.store(), (nick, title, True)),
+        ):
+            try:
+                store_obj.set(*args)
+            except Exception:
+                pass
+        for s_store in (audiocheck.STORE, sharp.STORE, wmstore.CROP, wmstore.OUTRO, wmstore.WM, wmstore.ADS):
+            try:
+                if s_store.get(path) is not None:
+                    s_store.set_ok(path, True)
+            except Exception:
+                pass
+        if watch is not None:
+            watch.skipped_fingerprints.pop(pk, None)
+
+        aplog.write("人工放行", f"用户确认没问题，放行补发：《{title}》", level="INFO", account=nick, day_iso=day_iso)
+        override_vs.append(apisrc.ApiVideo(path=path, title=title, account=nick, date=md, folder=os.path.dirname(path)))
+
+    if not override_vs:
+        why_s = "；".join(f"《{r['title']}》({r['why']})" for r in rejected[:4]) or "没有可放行补发的视频"
+        return {
+            "day_iso": day_iso, "md": md, "stopped": False,
+            "published_count": 0, "retried_count": 0, "failed_count": 0, "unsure_count": 0,
+            "skipped_count": 0, "converted_count": 0, "outro_cut_count": 0, "outro_cut_items": [],
+            "renamed_count": 0, "cleaned_dirs_count": 0, "black_covers": [], "exported_covers_count": 0,
+            "uncertain_missing": [], "skipped_items": [], "failed_items": [], "key_errors": [],
+            "missing_accounts": [], "waiting_folders": [], "done_accounts": [], "per_account": [],
+            "enabled_checks": [], "rejected_overrides": rejected,
+            "summary": f"未能放行补发：{why_s}。",
+        }
+
+    rep = run(
+        st, rec,
+        day=day_iso,
+        explicit_videos=override_vs,
+        watch=watch,
+        on_progress=on_progress,
+        stopped=stopped,
+        deps=deps,
+        ignore_platform_words=True,
+    )
+    if rejected:
+        rep["rejected_overrides"] = rejected
+    return rep
 
 
 def _now_hm(deps: dict | None = None) -> str:

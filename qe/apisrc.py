@@ -65,8 +65,11 @@ def date_key(name: str) -> str:
 
 
 def nick_of_folder(name: str) -> str:
-    """「CSGO--CSGO战神君」→「CSGO战神君」;「国漫解说馆z」→ 原样。"""
-    return name.split("--")[-1].strip() if "--" in name else name.strip()
+    """「CSGO--CSGO战神君」「三角洲---三角洲密探君」→「CSGO战神君」「三角洲密探君」;「国漫解说馆z」→ 原样。"""
+    s = (name or "").strip()
+    if re.search(r"[-—–]{2,}", s):
+        return re.split(r"[-—–]{2,}", s)[-1].lstrip("-—– ").strip()
+    return s
 
 
 def account_folders(roots, known=None) -> dict[str, str]:
@@ -101,9 +104,10 @@ def account_folder_list(roots, known=None) -> dict[str, list[str]]:
                 out.setdefault(by_folder[n.strip()], []).append(p)
                 continue
             if known is not None:
-                if nick not in known and "--" not in n:
-                    # 11-03 新号的文件夹只有一个横杠:「腾讯系FPS射击游戏-FPS射击游戏馆」→ 横杠后面是号名就认
-                    nick = next((k for k in known if n.endswith("-" + k)), nick)
+                if nick not in known:
+                    # 兼容单横杠 / 多横杠 / 破折号结尾写法:「腾讯系FPS射击游戏-FPS射击游戏馆」「三角洲---三角洲密探君」
+                    ns = n.strip()
+                    nick = next((k for k in known if re.search(r"[-—–]+" + re.escape(k) + r"$", ns)), nick)
                 if nick in known:
                     out.setdefault(nick, []).append(p)
             elif "--" in n or any(date_key(x) for x in _subdirs(p)):

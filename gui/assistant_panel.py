@@ -588,7 +588,7 @@ class AssistantHub(QObject):
     def _start(self, mode: str, arg, status: str):
         if self.is_busy():
             return
-        is_ap = (mode == "action" and isinstance(arg, dict) and arg.get("kind") in ("run_autopilot", "watch_tick"))
+        is_ap = (mode == "action" and isinstance(arg, dict) and arg.get("kind") in ("run_autopilot", "watch_tick", "override_publish"))
         if is_ap:
             self._live_active = True
             self._live_stage = 1
@@ -677,7 +677,7 @@ class AssistantHub(QObject):
             return
         if self.is_busy():
             return
-        if kind in ("pull_back", "clean_old_folders", "run_autopilot") and self.owner is not None:
+        if kind in ("pull_back", "clean_old_folders", "run_autopilot", "override_publish") and self.owner is not None:
             busy = redo.busy_reason(self.owner)
             if busy:
                 self._append("assistant", f"暂时不能启动：{busy}")
@@ -1561,6 +1561,9 @@ class _AutopilotReportCard(QFrame):
         self._tiles: list[tuple[QFrame, QLabel, QLabel, str]] = []
         self._outro_cards: list[tuple[QFrame, QLabel, QLabel]] = []
         self._outro_btns: list[QPushButton] = []
+        self._issue_cards: list[tuple[QFrame, QLabel, QLabel]] = []
+        self._release_btns: list[QPushButton] = []
+        self._released_btns: set[int] = set()
         self.setObjectName("apReport")
 
         v = QVBoxLayout(self)
@@ -1678,32 +1681,115 @@ class _AutopilotReportCard(QFrame):
             self.outro_group = og
             v.addWidget(og)
 
-        # 待拍板异常清单（前 4 条直接看，多余折叠）
-        issue_lines = []
+        # 待拍板 / 失败清单（交互式卡片组：支持一键「看原片」与「没问题，放行补发」，前 4 条展开其余折叠）
+        issue_items: list[dict] = []
         for x in self.rep.get("skipped_items") or []:
-            issue_lines.append(f"· [{x['account']}] 《{x['title'][:22]}》— {'、'.join(x.get('reasons') or [])}")
+            issue_items.append({
+                "account": x.get("account") or "",
+                "title": x.get("title") or "",
+                "path": x.get("path") or "",
+                "reasons": list(x.get("reasons") or []),
+                "desc": "、".join(x.get("reasons") or []) or "发前检查未通过",
+            })
         for x in self.rep.get("failed_items") or []:
-            issue_lines.append(f"· [{x['account']}] 《{x['title'][:22]}》— 发布失败：{x.get('error', '')}")
+            issue_items.append({
+                "account": x.get("account") or "",
+                "title": x.get("title") or "",
+                "path": x.get("path") or "",
+                "error": x.get("error") or "",
+                "reasons": [f"发布失败：{x.get('error', '')}"],
+                "desc": f"发布失败：{x.get('error', '')}",
+            })
+        self.issue_group = None
+        self.lab_issue_head = None
+        self.b_release_all = None
         self._more_box = None
         self.b_more = None
         self.lab_issues = None
-        if issue_lines:
-            head_txt = "待拍板 / 失败清单：\n" + "\n".join(issue_lines[:4])
-            self.lab_issues = QLabel(head_txt)
-            self.lab_issues.setWordWrap(True)
-            self.lab_issues.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            v.addWidget(self.lab_issues)
-            if len(issue_lines) > 4:
-                self.b_more = QPushButton(f"展开其余 {len(issue_lines) - 4} 条 ▾")
+        if issue_items:
+            ig = QFrame()
+            ig.setObjectName("apIssueGroup")
+            il_root = QVBoxLayout(ig)
+            il_root.setContentsMargins(10, 8, 10, 8)
+            il_root.setSpacing(6)
+
+            overridables = [it for it in issue_items if AP.is_overridable_item(it)]
+            ih = QHBoxLayout()
+            ih.setSpacing(6)
+            self.lab_issue_head = QLabel(f"⚠ 待拍板 / 失败清单（{len(issue_items)} 条）")
+            ih.addWidget(self.lab_issue_head, 1)
+            if len(overridables) >= 2 and self.on_action is not None:
+                ba = QPushButton(f"全部放行补发 ({len(overridables)})")
+                ba.setObjectName("primary")
+                ba.setCursor(Qt.CursorShape.PointingHandCursor)
+                act_all = {
+                    "label": f"放行补发全部 {len(overridables)} 条",
+                    "kind": "override_publish",
+                    "payload": {"items": overridables, "day": self.rep.get("day_iso") or ""},
+                }
+                ba.clicked.connect(lambda _c=False, a=act_all, btn=ba: self._clicked_release(btn, a, mark_all=True))
+                ih.addWidget(ba, 0)
+                self.b_release_all = ba
+                self._release_btns.append(ba)
+            il_root.addLayout(ih)
+
+            def _make_issue_row(it: dict) -> QFrame:
+                ic = QFrame()
+                ic.setObjectName("apIssueItem")
+                rl = QHBoxLayout(ic)
+                rl.setContentsMargins(8, 6, 8, 6)
+                rl.setSpacing(6)
+                tv = QVBoxLayout()
+                tv.setSpacing(2)
+                lt = QLabel(f"[{it['account']}] 《{it['title'][:24]}》")
+                lt.setWordWrap(True)
+                ls = QLabel(it["desc"])
+                ls.setWordWrap(True)
+                tv.addWidget(lt)
+                tv.addWidget(ls)
+                rl.addLayout(tv, 1)
+                vp = str(it.get("path") or "")
+                if vp:
+                    bv = QPushButton("看原片")
+                    bv.setObjectName("link")
+                    bv.setCursor(Qt.CursorShape.PointingHandCursor)
+                    bv.clicked.connect(lambda _c=False, p=vp: self._open_shot(p))
+                    rl.addWidget(bv, 0)
+                if AP.is_overridable_item(it) and self.on_action is not None:
+                    br = QPushButton("没问题，放行补发")
+                    br.setObjectName("pill")
+                    br.setCursor(Qt.CursorShape.PointingHandCursor)
+                    act_one = {
+                        "label": f"放行补发：{it['account']}《{it['title'][:14]}》",
+                        "kind": "override_publish",
+                        "payload": {"items": [it], "day": self.rep.get("day_iso") or ""},
+                    }
+                    br.clicked.connect(lambda _c=False, a=act_one, btn=br: self._clicked_release(btn, a, mark_all=False))
+                    rl.addWidget(br, 0)
+                    self._release_btns.append(br)
+                self._issue_cards.append((ic, lt, ls))
+                return ic
+
+            for it in issue_items[:4]:
+                il_root.addWidget(_make_issue_row(it))
+            if len(issue_items) > 4:
+                self._more_count = len(issue_items) - 4
+                self.b_more = QPushButton(f"展开其余 {self._more_count} 条 ▾")
                 self.b_more.setObjectName("link")
                 self.b_more.setCursor(Qt.CursorShape.PointingHandCursor)
                 self.b_more.clicked.connect(self._toggle_more)
-                v.addWidget(self.b_more, 0, Qt.AlignmentFlag.AlignLeft)
-                self._more_box = QLabel("\n".join(issue_lines[4:]))
-                self._more_box.setWordWrap(True)
-                self._more_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                self._more_box.hide()
-                v.addWidget(self._more_box)
+                il_root.addWidget(self.b_more, 0, Qt.AlignmentFlag.AlignLeft)
+                mb = QWidget()
+                ml = QVBoxLayout(mb)
+                ml.setContentsMargins(0, 0, 0, 0)
+                ml.setSpacing(6)
+                for it in issue_items[4:]:
+                    ml.addWidget(_make_issue_row(it))
+                mb.hide()
+                self._more_box = mb
+                il_root.addWidget(mb)
+            self.issue_group = ig
+            v.addWidget(ig)
 
         extra_notes = []
         for cn in self.rep.get("count_notes") or []:
@@ -1726,8 +1812,21 @@ class _AutopilotReportCard(QFrame):
             return
         vis = not self._more_box.isVisible()
         self._more_box.setVisible(vis)
-        n = len(self._more_box.text().splitlines())
+        n = getattr(self, "_more_count", 0)
         self.b_more.setText("收起 ▴" if vis else f"展开其余 {n} 条 ▾")
+
+    def _clicked_release(self, btn: QPushButton, act: dict, mark_all: bool = False):
+        if mark_all:
+            for b in self._release_btns:
+                self._released_btns.add(id(b))
+                b.setEnabled(False)
+            btn.setText("已发起放行补发")
+        else:
+            self._released_btns.add(id(btn))
+            btn.setEnabled(False)
+            btn.setText("已发起")
+        if self.on_action is not None:
+            self.on_action(act)
 
     def _open_shot(self, path: str):
         import os
@@ -1740,6 +1839,8 @@ class _AutopilotReportCard(QFrame):
     def set_busy(self, busy: bool):
         for b in self._outro_btns:
             b.setEnabled(not busy)
+        for b in self._release_btns:
+            b.setEnabled((not busy) and (id(b) not in self._released_btns))
 
     def sync_state(self):
         pass
@@ -1770,14 +1871,15 @@ class _AutopilotReportCard(QFrame):
                 ic.setStyleSheet(f"QFrame#apOutroItem {{ background:{t['card']}; border:1px solid {t['line2']}; border-radius:8px; }}")
                 lt.setStyleSheet(f"color:{t['tx']}; font-size:12px; font-weight:bold; background:transparent;")
                 ls.setStyleSheet(f"color:{t['mu']}; font-size:11px; background:transparent;")
-        if self.lab_issues is not None:
-            self.lab_issues.setStyleSheet(
-                f"background:{t['warn_bg']}; color:{t['tx']}; border-radius:8px; padding:8px 10px; font-size:12px;"
+        if self.issue_group is not None:
+            self.issue_group.setStyleSheet(
+                f"QFrame#apIssueGroup {{ background:{t['warn_bg']}; border:1px solid {t['line']}; border-radius:10px; }}"
             )
-        if self._more_box is not None:
-            self._more_box.setStyleSheet(
-                f"background:{t['soft']}; color:{t['tx2']}; border-radius:8px; padding:8px 10px; font-size:12px;"
-            )
+            self.lab_issue_head.setStyleSheet(f"color:{t['warn']}; font-weight:bold; font-size:12px; background:transparent;")
+            for ic, lt, ls in self._issue_cards:
+                ic.setStyleSheet(f"QFrame#apIssueItem {{ background:{t['card']}; border:1px solid {t['line2']}; border-radius:8px; }}")
+                lt.setStyleSheet(f"color:{t['tx']}; font-size:12px; font-weight:bold; background:transparent;")
+                ls.setStyleSheet(f"color:{t['mu']}; font-size:11px; background:transparent;")
         if self.lab_extra is not None:
             self.lab_extra.setStyleSheet(f"color:{t['dim']}; font-size:12px; background:transparent;")
 
