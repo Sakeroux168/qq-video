@@ -9107,6 +9107,113 @@ def test_autopilot_parallel_and_board(tmp: Path):
     apiacc.save([])
 
 
+def test_urgent_sunday_and_log_ui(tmp: Path):
+    print("[时效性优先 + 去空格未改比例 + 周末=星期天专发 + 一句话放行 + 留痕日志彩色时间线与折叠空巡检]")
+    import time
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from gui.assistant_panel import AutopilotLogDialog
+    from qe import apiacc, aplog, assistant as A, autopilot as AP, folder_intent as FI
+    from qe.config import Settings
+    from qe.records import Records
+
+    # 1. 时效性 & 带空格「未改 比例」0 延迟秒判
+    r_urg = FI.interpret_folder("11.28时效性")
+    check(r_urg["action"] == "ready" and r_urg["priority"] and r_urg["source"] == "rule",
+          f"11.28时效性 -> rule/ready/priority: {r_urg}")
+    r_sp = FI.interpret_folder("11.28未改 比例")
+    check(r_sp["action"] == "ready" and r_sp["needs_vertical_hint"] and r_sp["source"] == "rule",
+          f"11.28未改 比例（中间多空格） -> rule/ready/vert: {r_sp}")
+    check(FI.is_sunday_folder("周末")[0] and FI.is_sunday_folder("星期天")[0] and not FI.is_sunday_folder("周末存货")[0],
+          "准确区分「周末/星期天」星期天专用夹与「周末存货」普通存货夹")
+
+    # 2. 周六(2026-11-28) vs 周日(2026-11-29) 实测
+    groot = tmp / "sun_root" / "动漫视频"
+    acc_root = groot / "国漫--国漫解说馆z"
+    (acc_root / "11.28").mkdir(parents=True)
+    (acc_root / "11.28时效性").mkdir(parents=True)
+    (acc_root / "周末").mkdir(parents=True)
+    (acc_root / "11.29").mkdir(parents=True)
+    (acc_root / "11.28" / "普通周六片.mp4").write_bytes(b"a")
+    (acc_root / "11.28时效性" / "紧急时效片.mp4").write_bytes(b"b")
+    (acc_root / "周末" / "周日专发片.mp4").write_bytes(b"c")
+    (acc_root / "11.29" / "周日日期片.mp4").write_bytes(b"d")
+
+    accs = [{"nick": "国漫解说馆z", "source_name": "国漫", "client_id": "c1", "secret": apiacc.seal("s"), "category": 1604, "enabled": True}]
+    apiacc.save(accs)
+    st = Settings(tmp / "st_sun.json")
+    st["api_roots"] = [str(groot)]
+    st["api_archive"] = str(tmp / "sun_arc" / "{date}")
+    st["api_interval"] = 0
+    st["api_cover"] = "不传"
+    for k in ("sharp_check", "crop_check", "outro_check", "audio_check", "long_check", "game_ai_check"):
+        st[k] = False
+    st["daily_plan"] = [{"cat": "动漫", "label": "动漫", "accounts": {"国漫解说馆z": 10}}]
+    rec = Records(tmp / "rec_sun.sqlite")
+
+    sent_order = []
+
+    class FakeC:
+        def send(self, path, title, cat, before_publish=None, **_k):
+            if before_publish:
+                before_publish("V_" + title)
+            sent_order.append(title)
+            return {"article_id": "A_" + title, "vid": "V_" + title, "status": "成功"}
+
+    base_deps = {
+        "api_accounts_fn": lambda: accs,
+        "accounts_fn": lambda: [(a, False) for a in accs],
+        "make_client": lambda _a: FakeC(),
+        "check_one_fn": lambda v, words=None, ff="": {"w": 1080, "h": 1920, "dur": 30.0, "has_audio": True, "landscape": False, "tags": [], "platform": [], "bad_read": False},
+        "check_account_fn": lambda cl, r_db, nick, d: {"nick": nick, "ours": 2, "live": 2, "ok": 2, "review": 0, "missing": [], "extra": []},
+        "scan_one_fn": lambda acc, s, e, **_k: ([], 0),
+        "api_interval": 0,
+    }
+
+    # 周六(2026-11-28)：发「11.28时效性」排最前 + 「11.28」，绝不动「周末」和「11.29」
+    sat_deps = dict(base_deps, today_fn=lambda: "2026-11-28")
+    sat_scan = AP._scan_smart_folders(st, rec, accs, "11.28", "2026-11-28", watch=AP.WatchState(day_iso="2026-11-28", md="11.28"), deps=sat_deps)
+    check(not sat_scan["undated_discovered"], f"周六看到「周末」静默留给明天，不当陌生无日期夹打扰 -> {sat_scan['undated_discovered']}")
+    rep_sat = AP.run(st, rec, day="2026-11-28", deps=sat_deps)
+    check(sent_order == ["紧急时效片", "普通周六片"], f"周六优先发「11.28时效性」再发普通「11.28」，不动「周末」与「11.29」 -> {sent_order}")
+
+    # 周日(2026-11-29)：「周末」与「11.29」一起自动发！
+    sent_order.clear()
+    sun_deps = dict(base_deps, today_fn=lambda: "2026-11-29")
+    rep_sun = AP.run(st, rec, day="2026-11-29", deps=sun_deps)
+    check(set(sent_order) == {"周日专发片", "周日日期片"}, f"周日自动认出「周末」与「11.29」一起发布 -> {sent_order}")
+
+    # 3. 一句话放行：add_folder 不写子文件夹名时自动识别唯一待放行目录并 trigger_tick=True
+    d_hold = acc_root / "11.29（待老板看）"
+    d_hold.mkdir(parents=True)
+    (d_hold / "待放行片.mp4").write_bytes(b"h")
+    agent = A.AssistantAgent(st, rec, deps=sun_deps)
+    agent.watch = AP.WatchState(day_iso="2026-11-29", md="11.29")
+    agent.watch.waiting_summary = [{"account": "国漫解说馆z", "folder_name": "11.29（待老板看）", "path": str(d_hold), "reason": "待看"}]
+    r_add = agent.tool_manage_watch("add_folder", account="国漫解说")
+    check(r_add.get("ok") and r_add.get("trigger_tick") is True and str(d_hold) in (agent.watch.extra_folders.get("国漫解说馆z") or []),
+          f"说「国漫解说可以了」不带目录名自动放行唯一等待目录并立即触发巡检 -> {r_add}")
+
+    # 4. 留痕日志：连续空巡检折叠 + 统计卡 + 弹窗渲染（使用独立测试日期避免混入前面用例日志）
+    day_log = "2026-11-25"
+    aplog.write("④/⑥", "发布成功：《测试动画1》（article_id=AID1）", level="OK", account="国漫解说馆z", day_iso=day_log)
+    aplog.write("③剪结尾", "剪片尾成功（剪掉末尾 2.5 秒）：《测试动画1》", level="OK", account="国漫解说馆z", day_iso=day_log)
+    aplog.write("②检查", "拦截跳过：《无声测试》—— 没有声音", level="SKIP", account="国漫解说馆z", day_iso=day_log)
+    for k in range(1, 6):
+        aplog.write("值守巡检", f"第 {k} 轮巡检完成：无新落稳视频（等待中 0 个目录）", level="INFO", day_iso=day_log)
+
+    dlg = AutopilotLogDialog(day_iso=day_log)
+    check(dlg.k_fold.isChecked() and "静默巡检 5 轮" in dlg.ed_log.toPlainText(),
+          f"默认折叠连续 5 轮空巡检为清爽一行 -> {dlg.ed_log.toPlainText()}")
+    check(dlg._stat_tiles["published"][1].text() == "1" and dlg._stat_tiles["processed"][1].text() == "1"
+          and dlg._stat_tiles["skipped"][1].text() == "1",
+          "顶部统计卡准确统计已发布 / 预处理 / 跳过条数")
+    dlg.k_fold.setChecked(False)
+    check("第 3 轮巡检完成" in dlg.ed_log.toPlainText(), "取消勾选「折叠空巡检」可展开查看逐轮巡检")
+    dlg.close()
+    apiacc.save([])
+
+
 if __name__ == "__main__":
     tmp = Path(tempfile.mkdtemp(prefix="qe_test_"))
     _no_dialogs()
@@ -9218,6 +9325,7 @@ if __name__ == "__main__":
     test_folder_intent_and_watch(tmp)
     test_autopilot_fixes_and_live(tmp)
     test_autopilot_parallel_and_board(tmp)
+    test_urgent_sunday_and_log_ui(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项:\n  - " + "\n  - ".join(fails)))
     sys.exit(1 if fails else 0)

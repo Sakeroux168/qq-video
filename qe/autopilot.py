@@ -207,6 +207,7 @@ class WatchState:
     total_skipped: int = 0
     total_cleaned: int = 0
     waiting_summary: list[dict[str, Any]] = field(default_factory=list)
+    undated_summary: list[dict[str, Any]] = field(default_factory=list)
     recent_notes: list[str] = field(default_factory=list)
 
     def skip_account(self, nick: str, on: bool = True) -> None:
@@ -254,6 +255,7 @@ class WatchState:
             "skip_accounts": sorted(self.skip_accounts),
             "extra_folders": {k: list(v) for k, v in self.extra_folders.items() if v},
             "waiting": list(self.waiting_summary),
+            "undated": list(self.undated_summary),
             "sent_by_account": sent,
         }
 
@@ -326,12 +328,21 @@ def _scan_smart_folders(
                 _add_dir(ep, True, {"action": "ready", "expected_count": None, "reason": "已加入今日值守", "source": "rule"})
 
         if not pk:
+            try:
+                is_sunday = (datetime.strptime(day_iso, "%Y-%m-%d").weekday() == 6)
+            except ValueError:
+                is_sunday = False
             for acc_dir in acc_dirs_map.get(nick) or []:
                 for sub in sorted(apisrc._subdirs(acc_dir)):
                     sp = os.path.join(acc_dir, sub)
                     sub_md, _rem = FI.parse_date_and_remark(sub)
-                    if sub_md == md:
-                        intent = FI.interpret_folder(sub, st=st, ask_fn=ask_fn)
+                    is_sun_dir, sun_rem = (False, "") if sub_md else FI.is_sunday_folder(sub)
+                    if sub_md == md or (is_sun_dir and is_sunday):
+                        if is_sun_dir and not sun_rem:
+                            intent = {"action": "ready", "expected_count": None, "needs_vertical_hint": False,
+                                      "priority": False, "reason": "星期天专用目录", "source": "rule"}
+                        else:
+                            intent = FI.interpret_folder(sub, st=st, ask_fn=ask_fn)
                         if intent["action"] == "ignore":
                             continue
                         if intent["action"] == "wait":
@@ -341,6 +352,9 @@ def _scan_smart_folders(
                             })
                             continue
                         _add_dir(sp, False, intent)
+                    elif is_sun_dir and not is_sunday:
+                        # 工作室规矩：「周末 / 星期天 / 周日」留着星期天发，周六及平时静默跳过不误发也不打扰
+                        continue
                     elif not sub_md and watch is not None:
                         # 检查不带日期的文件夹：绝不擅自发，但今天刚有新未发视频时静默提示 + 一键加入按钮
                         if apisrc.is_removable_subdir(sub) or any(w in sub for w in FI.IGNORE_WORDS):
@@ -365,6 +379,9 @@ def _scan_smart_folders(
                             undated_discovered.append({
                                 "account": nick, "folder_name": sub, "path": sp, "video_count": unsent_cnt,
                             })
+
+        # 时效性文件夹（如 11.28时效性）排最前优先发，防止超时过期
+        cand_dirs.sort(key=lambda x: (0 if x[2].get("priority") else 1))
 
         acc_ready: list[apisrc.ApiVideo] = []
         acc_waiting = any(w["account"] == nick for w in waiting_folders)
@@ -1565,6 +1582,13 @@ def run_watch_tick(
 
     scan = _scan_smart_folders(st, rec, active_accs, watch.md, watch.day_iso, watch=watch, check_stability=True, deps=deps)
     watch.waiting_summary = list(scan["waiting_folders"])
+    if scan["undated_discovered"]:
+        seen_u = {os.path.normcase(os.path.abspath(x["path"])) for x in watch.undated_summary if x.get("path")}
+        for u in scan["undated_discovered"]:
+            fk_u = os.path.normcase(os.path.abspath(u["path"]))
+            if fk_u not in seen_u:
+                watch.undated_summary.append(dict(u))
+                seen_u.add(fk_u)
     for wf in scan["waiting_folders"]:
         aplog.write("巡检等待", f"暂不动「{wf['folder_name']}」：{wf['reason']}", level="INFO", account=wf["account"], day_iso=watch.day_iso)
     for note in scan["count_notes"]:

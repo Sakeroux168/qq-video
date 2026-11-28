@@ -4,12 +4,14 @@
 """
 from __future__ import annotations
 
+import html as _html
+import re as _re
 import time
 
 from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-                               QVBoxLayout, QWidget)
+                               QTextBrowser, QVBoxLayout, QWidget)
 
 from gui import theme as TH
 from qe import aplog, assistant as A, autopilot as AP, redo
@@ -48,20 +50,34 @@ class _TaskWorker(QThread):
 
 
 class AutopilotLogDialog(QDialog):
-    """全自动运行留痕查看窗口：按日期浏览每一步执行时间与结果，支持一键筛选只看异常/失败/跳过。"""
+    """全自动运行留痕查看窗口：顶部 4 枚统计卡 + 级别筛选胶囊 + 折叠空巡检 + 彩色时间线自动换行排版。"""
+    LEVEL_FILTERS = (
+        ("all", "全部"),
+        ("ok", "成功"),
+        ("skip", "跳过"),
+        ("err", "异常/警告"),
+    )
 
     def __init__(self, day_iso: str = "", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("全自动留痕日志")
-        self.resize(860, 560)
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
+        self.setWindowTitle("全自动运行留痕")
+        self.resize(980, 650)
+        self._lvl_filter = "all"
+        self._stat_tiles: dict[str, tuple[QFrame, QLabel, QLabel, str]] = {}
 
-        top = QHBoxLayout()
-        top.setSpacing(8)
-        top.addWidget(QLabel("日期："))
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 14)
+        v.setSpacing(12)
+
+        # 1. 顶栏：标题 + 日期切换 + 实时刷新 + 打开原文件
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self.lab_head = QLabel("全自动运行留痕")
+        self.lab_head.setObjectName("pageTitle")
+        head.addWidget(self.lab_head)
+
         self.c_day = QComboBox()
+        self.c_day.setMinimumWidth(130)
         days = aplog.list_days(30)
         want_day = (day_iso or "").strip() or (days[0] if days else aplog.log_path().stem)
         if want_day and want_day not in days:
@@ -71,38 +87,96 @@ class AutopilotLogDialog(QDialog):
         idx = self.c_day.findData(want_day)
         if idx >= 0:
             self.c_day.setCurrentIndex(idx)
-        self.c_day.currentIndexChanged.connect(lambda _i: self.reload())
-        top.addWidget(self.c_day)
-
-        self.k_err = QCheckBox("只看异常 / 失败 / 跳过")
-        self.k_err.toggled.connect(lambda _c: self.reload())
-        top.addWidget(self.k_err)
-
-        self.ed_acc = QLineEdit()
-        self.ed_acc.setPlaceholderText("按账号或关键词筛选…")
-        self.ed_acc.setFixedWidth(180)
-        self.ed_acc.textChanged.connect(lambda _t: self.reload())
-        top.addWidget(self.ed_acc)
-        top.addStretch(1)
+        self.c_day.currentIndexChanged.connect(lambda _i: self.reload(force=True))
+        head.addWidget(self.c_day)
+        head.addStretch(1)
 
         self.k_live = QCheckBox("实时刷新")
         self.k_live.setChecked(True)
         self.k_live.toggled.connect(self._toggle_live)
-        top.addWidget(self.k_live)
+        head.addWidget(self.k_live)
 
         b_ref = QPushButton("刷新")
+        b_ref.setObjectName("pill")
+        b_ref.setCursor(Qt.CursorShape.PointingHandCursor)
         b_ref.clicked.connect(lambda: self.reload(force=True))
-        top.addWidget(b_ref)
-        b_open = QPushButton("打开原文件")
-        b_open.clicked.connect(self._open_file)
-        top.addWidget(b_open)
-        v.addLayout(top)
+        head.addWidget(b_ref)
 
-        self.ed_log = QPlainTextEdit()
-        self.ed_log.setReadOnly(True)
-        self.ed_log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        b_open = QPushButton("打开原文件")
+        b_open.setObjectName("pill")
+        b_open.setCursor(Qt.CursorShape.PointingHandCursor)
+        b_open.clicked.connect(self._open_file)
+        head.addWidget(b_open)
+        v.addLayout(head)
+
+        # 2. 顶部 4 枚统计 KPI 卡片
+        sr = QHBoxLayout()
+        sr.setSpacing(10)
+        for key, lbl, tone in (
+            ("published", "已发布成功", "ok"),
+            ("processed", "转竖屏 / 剪片尾", "acc"),
+            ("skipped", "拦截跳过", "warn"),
+            ("errors", "出错 / 警告", "bad"),
+        ):
+            box = QFrame()
+            box.setObjectName("logStatBox")
+            bl = QHBoxLayout(box)
+            bl.setContentsMargins(14, 10, 14, 10)
+            bl.setSpacing(8)
+            lv = QLabel("0")
+            ll = QLabel(lbl)
+            bl.addWidget(lv)
+            bl.addWidget(ll)
+            bl.addStretch(1)
+            sr.addWidget(box, 1)
+            self._stat_tiles[key] = (box, lv, ll, tone)
+        v.addLayout(sr)
+
+        # 3. 筛选栏卡片：级别胶囊 + 只看异常 + 折叠空巡检 + 账号搜索
+        self.filter_bar = QFrame()
+        self.filter_bar.setObjectName("logFilterBar")
+        fl = QHBoxLayout(self.filter_bar)
+        fl.setContentsMargins(12, 8, 12, 8)
+        fl.setSpacing(8)
+
+        self._lvl_btns: dict[str, QPushButton] = {}
+        for k, lab in self.LEVEL_FILTERS:
+            b = QPushButton(lab)
+            b.setCheckable(True)
+            b.setChecked(k == "all")
+            b.setObjectName("logLvlBtn")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, lk=k: self._set_level_filter(lk))
+            fl.addWidget(b)
+            self._lvl_btns[k] = b
+
+        self.k_err = QCheckBox("只看异常 / 失败 / 跳过")
+        self.k_err.toggled.connect(self._on_k_err_toggled)
+        fl.addWidget(self.k_err)
+
+        self.k_fold = QCheckBox("折叠空巡检")
+        self.k_fold.setChecked(True)
+        self.k_fold.setToolTip("把连续多轮「无新落稳视频」的静默巡检合并成一行，重要记录一目了然")
+        self.k_fold.toggled.connect(lambda _c: self.reload(force=True))
+        fl.addWidget(self.k_fold)
+        fl.addStretch(1)
+
+        self.ed_acc = QLineEdit()
+        self.ed_acc.setObjectName("search")
+        self.ed_acc.setPlaceholderText("按账号或关键词筛选…")
+        self.ed_acc.setFixedWidth(210)
+        self.ed_acc.textChanged.connect(lambda _t: self.reload(force=True))
+        fl.addWidget(self.ed_acc)
+        v.addWidget(self.filter_bar)
+
+        # 4. 彩色结构化时间线浏览区（自动换行绝不截断、支持复制、兼容 toPlainText）
+        self.ed_log = QTextBrowser()
+        self.ed_log.setObjectName("logTimeline")
+        self.ed_log.setOpenLinks(False)
+        self.ed_log.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
         v.addWidget(self.ed_log, 1)
 
+        # 5. 底栏
         bot = QHBoxLayout()
         self.lab_info = QLabel("")
         self.lab_info.setObjectName("muted")
@@ -110,14 +184,60 @@ class AutopilotLogDialog(QDialog):
         bot.addWidget(self.lab_info, 1)
         b_close = QPushButton("关闭")
         b_close.setObjectName("primary")
+        b_close.setCursor(Qt.CursorShape.PointingHandCursor)
         b_close.clicked.connect(self.accept)
         bot.addWidget(b_close)
         v.addLayout(bot)
+
         self._last_sig = None
+        self._apply_style()
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1500)
         self._live_timer.timeout.connect(lambda: self.reload(force=False))
         self._live_timer.start()
+        self.reload(force=True)
+
+    def _apply_style(self):
+        t = TH.cur()
+        tone_map = {
+            "ok": (t["ok"], t["ok_bg"]),
+            "acc": (t["acc"], t["acc_bg"]),
+            "warn": (t["warn"], t["warn_bg"]),
+            "bad": (t["bad"], t["bad_bg"]),
+        }
+        for _k, (box, lv, ll, tone) in self._stat_tiles.items():
+            fg, bg = tone_map[tone]
+            box.setStyleSheet(f"QFrame#logStatBox {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:12px; }}")
+            lv.setStyleSheet(f"color:{fg}; background:{bg}; border-radius:8px; padding:2px 9px; font-size:16px; font-weight:bold;")
+            ll.setStyleSheet(f"color:{t['tx2']}; font-size:12px; font-weight:bold; background:transparent;")
+        self.filter_bar.setStyleSheet(
+            f"QFrame#logFilterBar {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:12px; }}"
+        )
+        for b in self._lvl_btns.values():
+            b.setStyleSheet(
+                f"QPushButton#logLvlBtn {{ background:{t['soft']}; border:none; border-radius:13px; padding:4px 12px; font-size:12px; color:{t['tx2']}; }}"
+                f"QPushButton#logLvlBtn:hover {{ background:{t['soft_h']}; }}"
+                f"QPushButton#logLvlBtn:checked {{ background:{t['acc']}; color:#ffffff; font-weight:bold; }}"
+            )
+        self.ed_log.setStyleSheet(
+            f"QTextBrowser#logTimeline {{ background:{t['card']}; border:1px solid {t['line']}; border-radius:14px; padding:6px; }}"
+        )
+
+    def _set_level_filter(self, lk: str):
+        self._lvl_filter = lk
+        for k, b in self._lvl_btns.items():
+            b.setChecked(k == lk)
+        if lk != "all" and self.k_err.isChecked():
+            self.k_err.blockSignals(True)
+            self.k_err.setChecked(False)
+            self.k_err.blockSignals(False)
+        self.reload(force=True)
+
+    def _on_k_err_toggled(self, on: bool):
+        if on:
+            self._lvl_filter = "all"
+            for k, b in self._lvl_btns.items():
+                b.setChecked(k == "all")
         self.reload(force=True)
 
     def _toggle_live(self, on: bool):
@@ -131,25 +251,102 @@ class AutopilotLogDialog(QDialog):
             self._live_timer.stop()
         super().closeEvent(e)
 
+    def _render_html(self, rows: list[dict]) -> str:
+        t = TH.cur()
+        if not rows:
+            empty_msg = (
+                "当前筛选条件下没有匹配记录。"
+                if (self.k_err.isChecked() or self._lvl_filter != "all" or self.ed_acc.text().strip())
+                else "这一天还没有全自动运行留痕记录。"
+            )
+            return (
+                f"<div style='padding:40px 16px; text-align:center; color:{t['dim']}; font-size:13px;'>"
+                f"{_html.escape(empty_msg)}</div>"
+            )
+
+        lvl_style = {
+            "OK": (t["ok"], t["ok_bg"], "transparent"),
+            "SKIP": (t["warn"], t["warn_bg"], t["rows"]["yellow"]),
+            "WARN": (t["warn"], t["warn_bg"], t["rows"]["orange"]),
+            "ERROR": (t["bad"], t["bad_bg"], t["rows"]["red"]),
+            "FAIL": (t["bad"], t["bad_bg"], t["rows"]["red"]),
+            "FOLD": (t["dim"], t["soft"], t["alt"]),
+            "INFO": (t["acc"], t["acc_bg"], "transparent"),
+        }
+        trs = []
+        for idx, r in enumerate(rows):
+            lvl = r.get("level") or "INFO"
+            fg, bg, row_bg = lvl_style.get(lvl, (t["tx2"], t["soft"], "transparent"))
+            if row_bg == "transparent" and idx % 2 == 1:
+                row_bg = t["alt"]
+            ts = _html.escape(r.get("time") or "")
+            stg = _html.escape(r.get("stage") or "日志")
+            acc = _html.escape(r.get("account") or "系统")
+            acc_col = t["tx"] if r.get("account") else t["dim"]
+            msg_raw = r.get("message") or ""
+            # 把尾部 article_id=... 调成柔和辅助色，让视频标题更突出
+            msg_esc = _html.escape(msg_raw)
+            msg_esc = _re.sub(
+                r"（(article_id=[^）]+)）",
+                rf" <span style='color:{t['dim']}; font-size:11px;'>(\1)</span>",
+                msg_esc,
+            )
+            msg_style = f"color:{t['dim']}; font-style:italic;" if lvl == "FOLD" else f"color:{t['tx']};"
+            trs.append(
+                f"<tr style='background:{row_bg};'>"
+                f"<td style='padding:7px 8px; border-bottom:1px solid {t['line2']}; color:{t['dim']}; font-size:11px; white-space:nowrap;' width='82'>{ts}</td>"
+                f"<td style='padding:7px 6px; border-bottom:1px solid {t['line2']}; white-space:nowrap;' width='78'>"
+                f"<span style='background:{bg}; color:{fg}; padding:2px 7px; border-radius:6px; font-size:11px; font-weight:bold;'>{stg}</span></td>"
+                f"<td style='padding:7px 8px; border-bottom:1px solid {t['line2']}; color:{acc_col}; font-size:12px; font-weight:bold; white-space:nowrap;' width='115'>{acc}</td>"
+                f"<td style='padding:7px 8px; border-bottom:1px solid {t['line2']}; font-size:12px; line-height:1.45; {msg_style}'>{msg_esc}</td>"
+                f"</tr>"
+            )
+        return (
+            f"<html><body style='margin:0; padding:0; font-family:\"Microsoft YaHei UI\",\"Microsoft YaHei\"; background:{t['card']}; color:{t['tx']};'>"
+            f"<table width='100%' cellspacing='0' cellpadding='0' style='border-collapse:collapse;'>"
+            + "".join(trs)
+            + "</table></body></html>"
+        )
+
     def reload(self, force: bool = True):
         day = str(self.c_day.currentData() or "")
         err_on = self.k_err.isChecked()
+        fold_on = self.k_fold.isChecked()
         acc_q = self.ed_acc.text().strip()
+
+        # 先读全天数据算顶部统计，再做筛选与折叠
+        all_res = aplog.read(day, errors_only=False, account="", limit=2000)
+        full_sum = aplog.summarize_and_fold(all_res["lines"], fold_empty=False)
+        st_d = full_sum["stats"]
+        for k, (_box, lv, _ll, _tone) in self._stat_tiles.items():
+            lv.setText(str(st_d.get(k, 0)))
+
         res = aplog.read(day, errors_only=err_on, account=acc_q, limit=1500)
-        sig = (day, err_on, acc_q, res["total_lines"], len(res["lines"]))
+        sig = (day, err_on, self._lvl_filter, fold_on, acc_q, res["total_lines"], len(res["lines"]))
         if not force and sig == self._last_sig:
             return
         self._last_sig = sig
         self._cur_path = res["path"]
-        if res["text"]:
-            self.ed_log.setPlainText(res["text"])
-            sb = self.ed_log.verticalScrollBar()
-            sb.setValue(sb.maximum())
-        else:
-            self.ed_log.setPlainText(
-                "这一天还没有异常/跳过记录。" if err_on and res["total_lines"] else "这一天还没有全自动运行留痕记录。"
-            )
-        self.lab_info.setText(f"共 {res['total_lines']} 行，当前显示 {len(res['lines'])} 行 · {res['path']}")
+
+        folded = aplog.summarize_and_fold(res["lines"], fold_empty=fold_on)
+        rows = folded["rows"]
+        if self._lvl_filter == "ok":
+            rows = [r for r in rows if r["level"] == "OK"]
+        elif self._lvl_filter == "skip":
+            rows = [r for r in rows if r["level"] == "SKIP"]
+        elif self._lvl_filter == "err":
+            rows = [r for r in rows if r["level"] in ("ERROR", "FAIL", "WARN")]
+
+        self.ed_log.setHtml(self._render_html(rows))
+        QTimer.singleShot(0, self._scroll_bottom)
+        fold_note = f"（已折叠 {folded['folded_count']} 条空巡检）" if folded["folded_count"] else ""
+        self.lab_info.setText(
+            f"共 {res['total_lines']} 行，当前显示 {len(rows)} 条{fold_note} · {res['path']}"
+        )
+
+    def _scroll_bottom(self):
+        sb = self.ed_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def _open_file(self):
         import os

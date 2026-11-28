@@ -22,6 +22,72 @@ _LISTENERS: list = []
 _KEEP_DAYS = 30
 _ERR_LEVELS = frozenset({"WARN", "ERROR", "SKIP", "FAIL"})
 _LINE_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s*(.*)$")
+_ACC_PREFIX_RE = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
+
+
+def parse_line(ln: str) -> dict[str, Any]:
+    """把单行留痕解析成结构化字典，供彩色时间线表格展示与统计。"""
+    m = _LINE_RE.match(ln or "")
+    if not m:
+        return {"time": "", "stage": "日志", "level": "INFO", "account": "", "message": str(ln or ""), "is_empty_tick": False}
+    ts, stg, lvl, rest = m.group(1), m.group(2).strip(), m.group(3).strip().upper(), m.group(4).strip()
+    acc = ""
+    am = _ACC_PREFIX_RE.match(rest)
+    if am:
+        acc, rest = am.group(1).strip(), am.group(2).strip()
+    is_empty = (stg == "值守巡检" and "无新落稳视频" in rest)
+    return {"time": ts, "stage": stg, "level": lvl, "account": acc, "message": rest, "is_empty_tick": is_empty}
+
+
+def summarize_and_fold(lines: list[str], *, fold_empty: bool = True) -> dict[str, Any]:
+    """统计整日关键指标，并按需把连续「无新落稳视频」空巡检折叠成清爽一行。"""
+    parsed = [parse_line(ln) for ln in lines if (ln or "").strip()]
+    stats = {"published": 0, "processed": 0, "skipped": 0, "errors": 0}
+    for r in parsed:
+        lvl, stg, msg = r["level"], r["stage"], r["message"]
+        if lvl == "OK" and "发布成功" in msg:
+            stats["published"] += 1
+        elif lvl == "OK" and ("转竖屏成功" in msg or "剪片尾成功" in msg or stg == "③改标题"):
+            stats["processed"] += 1
+        elif lvl == "SKIP":
+            stats["skipped"] += 1
+        elif lvl in ("ERROR", "FAIL", "WARN"):
+            stats["errors"] += 1
+
+    if not fold_empty:
+        return {"stats": stats, "rows": parsed, "folded_count": 0}
+
+    rows: list[dict[str, Any]] = []
+    folded_total = 0
+    i = 0
+    n = len(parsed)
+    while i < n:
+        r = parsed[i]
+        if not r["is_empty_tick"]:
+            rows.append(r)
+            i += 1
+            continue
+        j = i + 1
+        while j < n and parsed[j]["is_empty_tick"]:
+            j += 1
+        cnt = j - i
+        if cnt == 1:
+            rows.append(r)
+        else:
+            t1 = parsed[i]["time"][:5] or parsed[i]["time"]
+            t2 = parsed[j - 1]["time"][:5] or parsed[j - 1]["time"]
+            folded_total += cnt - 1
+            rows.append({
+                "time": f"{t1}~{t2}" if t1 != t2 else parsed[i]["time"],
+                "stage": "值守巡检",
+                "level": "FOLD",
+                "account": "",
+                "message": f"静默巡检 {cnt} 轮（均无新落稳视频）",
+                "is_empty_tick": True,
+                "folded": cnt,
+            })
+        i = j
+    return {"stats": stats, "rows": rows, "folded_count": folded_total}
 
 
 def add_listener(fn) -> None:

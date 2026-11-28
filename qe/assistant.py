@@ -47,6 +47,7 @@ SYSTEM_PROMPT = """你是「企鹅号发布助手」内置的 AI 助手，用简
 - 当用户让你「全自动跑今天 16 个号 / 自动处理并发布」时，调用 prepare_autopilot，然后用 1~2 句简短的话提醒用户在下方卡片点「确认启动全自动」即可，不要重复把长列表再写一遍。
 - 当用户只是让你「查一下 / 列出来看看」时，只调用查询工具，不要擅自调用清理或拎回工具；查完清楚汇报结果即可（界面会自动附带一键操作按钮）。
 - 当用户明确下达执行指令（如「把这些过期残留文件夹清理掉」「把今天没发上但挪到已发里的都拿出来重发」「顺手截清晰封面」）时，可以直接调用对应执行工具，并逐条汇报结果。
+- 当用户说「某某号可以了 / 可以发了 / 放行某某 / 发某某的某某夹」时（通常指该号有备注等待中的目录或刚发现的无日期目录），先调 `manage_watch(action="status")` 查看 `waiting` 和 `undated` 列表，确认该号对应的文件夹后调 `manage_watch(action="add_folder", account=..., folder=...)` 放行并立刻触发巡检。
 - 回答尽量简明清晰，先说结论，再列关键清单，不要编造工具里没返回的数据。"""
 
 TOOLS_SCHEMA: list[dict[str, Any]] = [
@@ -993,14 +994,35 @@ class AssistantAgent:
             nk = self._resolve_api_nick(account)
             if not nk:
                 return {"ok": False, "error": "请说明要把文件夹加到哪个账号名下。"}
-            real_p = self._resolve_account_subfolder(nk, folder)
+            real_p = self._resolve_account_subfolder(nk, folder) if (folder or "").strip() else ""
+            if not real_p and not (folder or "").strip():
+                # 没指定子夹名（如用户只说「国漫解说可以了」）：自动从该号的等待中 / 无日期发现目录里挑唯一候选
+                cands = [x for x in (w.waiting_summary + w.undated_summary) if x.get("account") == nk and x.get("path")]
+                uniq = []
+                seen_p = set()
+                for c in cands:
+                    pk_c = os.path.normcase(os.path.abspath(c["path"]))
+                    if pk_c not in seen_p and os.path.isdir(c["path"]):
+                        seen_p.add(pk_c)
+                        uniq.append(c)
+                if len(uniq) == 1:
+                    real_p = uniq[0]["path"]
+                elif len(uniq) > 1:
+                    names = "、".join(c.get("folder_name") or os.path.basename(c["path"]) for c in uniq)
+                    return {"ok": False, "error": f"「{nk}」下有多个待确认目录（{names}），请说明要放行哪一个。"}
             if not real_p:
-                return {"ok": False, "error": f"在「{nk}」的素材目录下找不到「{folder}」这个文件夹。"}
+                return {"ok": False, "error": f"在「{nk}」的素材目录下找不到「{folder or '待放行'}」这个文件夹。"}
             added = w.add_extra_folder(nk, real_p)
             w.skip_account(nk, on=False)
-            msg = f"已把「{nk}/{os.path.basename(real_p)}」加入今天的值守范围。" if added else f"「{nk}/{os.path.basename(real_p)}」已经在今日值守范围里了。"
+            fk_ok = os.path.normcase(os.path.abspath(real_p))
+            w.waiting_summary = [x for x in w.waiting_summary if os.path.normcase(os.path.abspath(x.get("path") or "")) != fk_ok]
+            w.undated_summary = [x for x in w.undated_summary if os.path.normcase(os.path.abspath(x.get("path") or "")) != fk_ok]
+            msg = f"已把「{nk}/{os.path.basename(real_p)}」加入今天的值守范围，马上开始处理。" if added else f"「{nk}/{os.path.basename(real_p)}」已经在今日值守范围里了，马上巡检。"
             aplog.write("中途指挥", msg, level="INFO", account=nk, day_iso=w.day_iso)
-            return {"ok": True, "message": msg, "path": real_p, "watch_changed": True, "snapshot": w.snapshot(self.st, self.rec)}
+            return {
+                "ok": True, "message": msg, "path": real_p,
+                "watch_changed": True, "trigger_tick": True, "snapshot": w.snapshot(self.st, self.rec),
+            }
 
         if act == "set_interval":
             if int(interval_min or 0) <= 0:
@@ -1415,12 +1437,18 @@ class AssistantAgent:
         actions = self._build_actions(trace)
         card = None
         watch_changed = False
+        trigger_tick = False
         for name, res in reversed(trace):
             if name == "prepare_autopilot" and card is None:
                 card = {"kind": "autopilot_confirm", "plan": res}
             if name == "manage_watch" and res.get("watch_changed"):
                 watch_changed = True
-        return {"reply": reply, "actions": actions, "card": card, "watch_changed": watch_changed, "mutated": mutated}
+            if name == "manage_watch" and res.get("trigger_tick"):
+                trigger_tick = True
+        return {
+            "reply": reply, "actions": actions, "card": card,
+            "watch_changed": watch_changed, "trigger_tick": trigger_tick, "mutated": mutated,
+        }
 
     # ---------------- 无需额外大模型往返的快捷操作 & 内联按钮执行 ----------------
 

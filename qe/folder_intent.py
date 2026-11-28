@@ -37,12 +37,16 @@ WAIT_WORDS = (
     "别动", "先别动", "不要动", "别发", "先别发", "不要发", "暂不发", "暂停",
     "待核对", "待审核", "等审核", "待检查", "待修改", "等改", "待补", "缺封面", "无封面", "没封面",
 )
+URGENT_WORDS = (
+    "时效性", "有时效", "时效", "热点", "急发", "紧急", "先发", "优先", "当天发", "当天", "今天发", "马上发", "立刻发",
+)
 READY_WORDS = (
     "未改比例", "未改", "已改比例", "已改", "已核对", "已检查", "可发", "能发", "好了", "改好了", "处理好了", "已处理",
     "补发", "重发", "加更", "存货", "竖屏", "横屏",
     "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日", "星期天",
     "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天", "周末",
-)
+) + URGENT_WORDS
+SUNDAY_PREFIXES = ("周末", "星期天", "星期日", "周日", "周天")
 _BATCH_RE = re.compile(r"第\s*[一二三四五六七八九十\d]+\s*[批波轮次]")
 # 数量标注：括号里的纯数字 (15) / （15条） 或 独立的「共15条 / 15条 / 15个」
 _PAREN_COUNT_RE = re.compile(r"[（(]\s*(?:共|补|约|先发)?\s*(\d{1,3})\s*(?:条|个|集|视频)?\s*[）)]")
@@ -50,6 +54,20 @@ _BARE_COUNT_RE = re.compile(r"(?:共|补)\s*(\d{1,3})\s*(?:条|个|集)?|(?<!\d)
 
 _TEMP_SUFFIXES = (".part", ".tmp", ".crdownload", ".downloading", ".aria2")
 _LOCK = threading.Lock()
+
+
+def is_sunday_folder(folder_name: str) -> tuple[bool, str]:
+    """判断是否是「周末 / 星期天 / 周日」专用文件夹（工作室规矩：周末 = 星期天发，周六不动）。
+    返回 (is_sunday, remark_tail)。"""
+    s = re.sub(r"\s+", "", (folder_name or "").strip())
+    for p in SUNDAY_PREFIXES:
+        if s == p or s.startswith(p):
+            tail = s[len(p):].strip()
+            # 防止误伤「周末存货」这类明确叫存货的目录（让它走无日期存货发现）
+            if tail and any(w in tail for w in ("存货", "备用", "历史")):
+                return False, ""
+            return True, tail
+    return False, ""
 
 
 def parse_date_and_remark(folder_name: str) -> tuple[str, str]:
@@ -85,8 +103,10 @@ def extract_expected_count(remark: str) -> int | None:
 
 
 def _strip_known_ready_tokens(remark: str) -> str:
-    """把已经认识的『数量标注』『括号』『常规就绪词』『第X批』剥掉，看还剩没有不认识的词。"""
-    s = _PAREN_COUNT_RE.sub(" ", remark or "")
+    """把已经认识的『数量标注』『括号』『常规就绪词』『第X批』剥掉，看还剩没有不认识的词。
+    先去掉空白再匹配，避免同事手滑打出「未改 比例」「时 效 性」导致拆词误判。"""
+    s = re.sub(r"\s+", "", remark or "")
+    s = _PAREN_COUNT_RE.sub(" ", s)
     s = _BARE_COUNT_RE.sub(" ", s)
     s = _BATCH_RE.sub(" ", s)
     for w in sorted(READY_WORDS, key=len, reverse=True):
@@ -148,8 +168,8 @@ def _ask_ai_remark(folder_name: str, remark: str, ai: aiconf.AI) -> dict[str, An
     prompt = (
         f"运营同事在视频素材文件夹上起名为：「{folder_name}」（其中备注部分为「{remark}」）。\n"
         "请判断自动发布助手现在应该怎么对待这个文件夹，只从下面 3 种动作里选一个：\n"
-        "- ready：说明素材已准备好可以处理发布（如只是标注日期、批次、未改比例、补发、说明来源等）；\n"
-        "- wait：说明同事还在处理 / 等审核 / 缺东西 / 明确叫先别动，需要继续等待；\n"
+        "- ready：说明素材已准备好可以处理发布（包括：未改比例/横屏[软件会自动转竖屏]、时效性/热点/急发[今天要赶紧发]、批次、补发、说明来源等）；\n"
+        "- wait：说明同事还在处理 / 等审核 / 缺封面 / 明确叫先别动，需要继续等待；\n"
         "- ignore：说明这是废片 / 已发 / 不能用 / 脏话等，永远不要发。\n"
         "如果拿不准，一律选 wait（宁可等也别误发）。\n"
         '只输出 JSON，不要其他文字：{"action":"ready|wait|ignore","reason":"一句话原因"}'
@@ -175,46 +195,52 @@ def interpret_folder(
         'action': 'ready' | 'wait' | 'ignore',
         'expected_count': int | None,
         'needs_vertical_hint': bool,
+        'priority': bool,
         'reason': str,
         'source': 'rule' | 'cache' | 'ai' | 'fallback',
     }
     """
     md, remark = parse_date_and_remark(folder_name)
+    compact_rem = re.sub(r"\s+", "", remark)
     exp = extract_expected_count(remark)
-    needs_vert = ("未改比例" in remark) or ("横屏" in remark and "原片" not in remark)
+    needs_vert = ("未改比例" in compact_rem) or ("横屏" in compact_rem and "原片" not in compact_rem)
+    is_urgent = any(w in compact_rem for w in URGENT_WORDS)
 
     # 0) 纯日期（无备注）
-    if not remark:
+    if not compact_rem:
         return {
             "date_md": md, "remark": "", "action": "ready", "expected_count": None,
-            "needs_vertical_hint": False, "reason": "标准日期文件夹", "source": "rule",
+            "needs_vertical_hint": False, "priority": False, "reason": "标准日期文件夹", "source": "rule",
         }
 
-    # 1) 固定词库优先：先判 ignore，再判 wait（注意：先判「已处理/处理好了」免得被「处理」误伤；WAIT_WORDS 里是精确词「正在处理/处理中」）
+    # 1) 固定词库优先：先判 ignore，再判 wait（去空格匹配，防手滑打空格）
     for w in IGNORE_WORDS:
-        if w in remark:
+        if w in compact_rem:
             return {
                 "date_md": md, "remark": remark, "action": "ignore", "expected_count": exp,
-                "needs_vertical_hint": needs_vert, "reason": f"备注含「{w}」，忽略不发", "source": "rule",
+                "needs_vertical_hint": needs_vert, "priority": False, "reason": f"备注含「{w}」，忽略不发", "source": "rule",
             }
     for w in WAIT_WORDS:
-        if w in remark:
+        if w in compact_rem:
             return {
                 "date_md": md, "remark": remark, "action": "wait", "expected_count": exp,
-                "needs_vertical_hint": needs_vert, "reason": f"备注含「{w}」，先不动继续等", "source": "rule",
+                "needs_vertical_hint": needs_vert, "priority": False, "reason": f"备注含「{w}」，先不动继续等", "source": "rule",
             }
 
     # 2) 剥掉所有已知就绪词与数量标注后，如果已经为空 -> 直接 ready（0 费用）
     leftover = _strip_known_ready_tokens(remark)
     if not leftover:
         hint = []
+        if is_urgent:
+            hint.append("时效性优先发")
         if needs_vert:
             hint.append("含待转竖屏提示")
         if exp is not None:
             hint.append(f"标明 {exp} 条")
         return {
             "date_md": md, "remark": remark, "action": "ready", "expected_count": exp,
-            "needs_vertical_hint": needs_vert, "reason": "、".join(hint) or "常规备注，可处理", "source": "rule",
+            "needs_vertical_hint": needs_vert, "priority": is_urgent,
+            "reason": "、".join(hint) or "常规备注，可处理", "source": "rule",
         }
 
     # 3) 遇到不认识的新奇备注：先查本地缓存，再问一次 AI（拿不准保守判 wait）
@@ -223,7 +249,8 @@ def interpret_folder(
     if hit and hit.get("action") in ("ready", "wait", "ignore"):
         return {
             "date_md": md, "remark": remark, "action": hit["action"], "expected_count": exp,
-            "needs_vertical_hint": needs_vert, "reason": hit.get("reason") or f"缓存判定({hit['action']})", "source": "cache",
+            "needs_vertical_hint": needs_vert, "priority": is_urgent,
+            "reason": hit.get("reason") or f"缓存判定({hit['action']})", "source": "cache",
         }
 
     try:
@@ -243,12 +270,12 @@ def interpret_folder(
         cache().put(ck, {"action": act, "reason": rsn, "remark": remark})
         return {
             "date_md": md, "remark": remark, "action": act, "expected_count": exp,
-            "needs_vertical_hint": needs_vert, "reason": rsn, "source": "ai",
+            "needs_vertical_hint": needs_vert, "priority": is_urgent, "reason": rsn, "source": "ai",
         }
     except Exception:
         return {
             "date_md": md, "remark": remark, "action": "wait", "expected_count": exp,
-            "needs_vertical_hint": needs_vert,
+            "needs_vertical_hint": needs_vert, "priority": is_urgent,
             "reason": f"不认识的备注「{remark}」，保守先不动等你确认",
             "source": "fallback",
         }
